@@ -132,3 +132,24 @@ describe("GET /api/sessions/:id/stream", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("compression", () => {
+  it("gzips the frames document when the client accepts it, and never the event stream", async () => {
+    const { app, sessionId, ingestToken } = await startSession(DEFAULT_LIMITS);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0), makeSystemFrame(1)]);
+
+    const frames = await app.request(`/api/sessions/${sessionId}/frames`, {
+      headers: { "accept-encoding": "gzip" },
+    });
+    const stream = await app.request(`/api/sessions/${sessionId}/stream`, {
+      headers: { "accept-encoding": "gzip" },
+    });
+
+    expect(frames.headers.get("content-encoding")).toBe("gzip");
+    const decompressed = frames.body!.pipeThrough(new DecompressionStream("gzip"));
+    const text = await new Response(decompressed).text();
+    expect(JSON.parse(text).frames).toHaveLength(2);
+    expect(stream.headers.get("content-type")).toContain("text/event-stream");
+    expect(stream.headers.get("content-encoding")).toBeNull();
+  });
+});

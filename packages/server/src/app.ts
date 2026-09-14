@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { compress } from "hono/compress";
 import type { AppConfig, AppDeps } from "./env.ts";
 import type { SessionStore } from "./store/sessions.ts";
 import { healthRoutes } from "./routes/health.ts";
@@ -35,6 +36,11 @@ export function createApp(config: AppConfig, store: SessionStore) {
   return (
     new Hono()
       .use("*", securityHeaders())
+      // gzip/deflate for JSON and the dashboard bundle: a one-hour session's /frames
+      // document is roughly 15 MB of very repetitive JSON, about a tenth of that
+      // compressed. Hono skips text/event-stream, so the SSE stream is untouched.
+      // TODO(perf): brotli would be smaller still but needs zlib rather than CompressionStream.
+      .use("*", compress())
       .use("/api/sessions/:sessionId/*", sessionIdParam())
       .route("/api/health", healthRoutes)
       .route("/versionz", versionRoutes(deps))
