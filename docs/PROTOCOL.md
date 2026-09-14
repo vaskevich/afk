@@ -307,8 +307,12 @@ no session id.
 
 ## Versioning
 
-`protocolVersion` is a literal in the create request; a server that does not
-understand it rejects the session with 400. Adding a collector or an optional field is
-backwards compatible. Renaming or removing a field, or changing a meaning, bumps the
-version. Schema drift between server and dashboard is caught by `safeParse` on the
-dashboard side and currently ignored per frame (TODO: surface it).
+Two independent numbers: the **protocol version** (`protocolVersion` in the create
+request, an integer, bumped only for an incompatible wire change; the server accepts
+`[MIN_PROTOCOL_VERSION, PROTOCOL_VERSION]`) and the **client version** (`clientVersion`
+and the `X-Afk-Client` header, semver, bumped on every client release; the server has a
+`MIN_CLIENT_VERSION` only for retiring clients with known-bad behaviour). A client the
+server will not talk to gets `426 Upgrade Required` with `details` naming both minimums.
+The policy, what each bump requires, and the checklist for a protocol bump are in
+[VERSIONING.md](VERSIONING.md). Schema drift between server and dashboard is caught by
+`safeParse` on the dashboard side and currently ignored per frame (TODO: surface it).
