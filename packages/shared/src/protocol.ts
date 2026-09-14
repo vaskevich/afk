@@ -182,18 +182,64 @@ export const AgentCounts = z.object({
 });
 export type AgentCounts = z.infer<typeof AgentCounts>;
 
+/** The coding agent tools the collector knows, in the order the dashboard lists them. */
+export const AGENT_TOOLS = ["claude", "codex"] as const;
+export type AgentTool = (typeof AGENT_TOOLS)[number];
+/** How each tool is named to a person (event messages, the dashboard). */
+export const AGENT_TOOL_LABELS: Record<AgentTool, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+};
+
 /**
- * Coding agents running on the machine, sampled every few seconds. `available` is
- * false when the tool's state directory does not exist or cannot be read; the counts
- * are then zero and mean nothing. The collector reads undocumented Claude Code
- * internals, so a layout change shows up as `available: false`, never as a failure.
- * TODO(agents): Codex counts, see BACKLOG.md.
+ * Coding agents running on the machine, sampled every few seconds. One block of
+ * counts per tool found on the machine (its state directory exists and can be read):
+ * `claude` for Claude Code, `codex` for Codex; a tool that is not there has no block,
+ * and `available` is true when at least one is. When `available` is false nothing
+ * was found and any block present (clients from before Codex support sent a zero
+ * `claude` block) means nothing. The collector reads undocumented internals of both
+ * tools, so a layout change shows up as a missing block, never as a failure.
  */
 export const AgentsCollectorData = z.object({
   available: z.boolean(),
-  claude: AgentCounts,
+  claude: AgentCounts.optional(),
+  codex: AgentCounts.optional(),
 });
 export type AgentsCollectorData = z.infer<typeof AgentsCollectorData>;
+
+/** The blocks of the tools that were found, in AGENT_TOOLS order; none when `available` is false. */
+export function agentToolsPresent(data: AgentsCollectorData): [AgentTool, AgentCounts][] {
+  if (!data.available) {
+    return [];
+  }
+  const present: [AgentTool, AgentCounts][] = [];
+  for (const tool of AGENT_TOOLS) {
+    const counts = data[tool];
+    if (counts !== undefined) {
+      present.push([tool, counts]);
+    }
+  }
+  return present;
+}
+
+/** The counts of every tool found added up, so a rule can look at the machine as a whole. */
+export function agentTotals(data: AgentsCollectorData): AgentCounts {
+  const totals: AgentCounts = {
+    sessions: 0,
+    working: 0,
+    idle: 0,
+    waitingOnInput: 0,
+    subagentsWorking: 0,
+  };
+  for (const [, counts] of agentToolsPresent(data)) {
+    totals.sessions += counts.sessions;
+    totals.working += counts.working;
+    totals.idle += counts.idle;
+    totals.waitingOnInput += counts.waitingOnInput;
+    totals.subagentsWorking += counts.subagentsWorking;
+  }
+  return totals;
+}
 
 // ---------------------------------------------------------------------------
 // Frames

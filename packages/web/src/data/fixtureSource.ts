@@ -25,10 +25,12 @@ import type { SessionSource } from "./source.ts";
  * A second stream, `processes`, samples the busiest processes every 5 s and shows a
  * `cpu-burn` node process dominating during the burn. A third, `run:…`, is a short
  * `afk run` of a fake migration that crashes with exit code 3; its final frame carries
- * the last lines it printed. A fourth, `agents`, counts two Claude Code sessions every
- * 5 s: one works (with two subagents for a while), asks a question at 6:30 that goes
- * unanswered until 10:00, then sits idle like the other. The anomaly events below are
- * what the server's rules would derive from these frames.
+ * the last lines it printed. A fourth, `agents`, counts the coding agents every 5 s:
+ * two Claude Code sessions, one of which works (with two subagents for a while), asks
+ * a question at 6:30 that goes unanswered until 10:00, then sits idle like the other;
+ * and a Codex thread that appears at 3:00, works until 8:30, and then sits idle too,
+ * so that from 10:00 every agent is idle. The anomaly events below are what the
+ * server's rules would derive from these frames.
  */
 
 /** What `deleteSession` rejects with; the same words the server answers `DELETE /api/sessions/demo` with. */
@@ -81,6 +83,10 @@ const AGENT_SUBAGENTS = 2;
 /** Then asks a question nobody answers until 10:00, after which it is idle too. */
 const AGENT_WAITING_START = 6 * 60 + 30;
 const AGENT_WAITING_END = 10 * 60;
+/** One Codex thread appears at 3:00, works until 8:30, and then sits idle. */
+const CODEX_SESSIONS = 1;
+const CODEX_START = 3 * 60;
+const CODEX_WORKING_END = 8 * 60 + 30;
 /** How long the server waits before calling a waiting agent an anomaly (AGENT_WAITING_AFTER_MS). */
 const AGENT_WAITING_DELAY_SECONDS = 120;
 /** How long every agent has to be idle before the server says so (AGENTS_ALL_IDLE_AFTER_MS). */
@@ -276,11 +282,13 @@ function migrationTail(): RunOutputTail {
   };
 }
 
-/** The agents on the machine at second `i`: see the AGENT_* constants for the story. */
+/** The agents on the machine at second `i`: see the AGENT_* and CODEX_* constants for the story. */
 function agentsAt(i: number): AgentsCollectorData {
   const waiting = i >= AGENT_WAITING_START && i < AGENT_WAITING_END;
   const working = i < AGENT_WAITING_START;
   const subagents = i >= AGENT_SUBAGENTS_START && i < AGENT_SUBAGENTS_END ? AGENT_SUBAGENTS : 0;
+  const codexSessions = i >= CODEX_START ? CODEX_SESSIONS : 0;
+  const codexWorking = i >= CODEX_START && i < CODEX_WORKING_END ? CODEX_SESSIONS : 0;
   return {
     available: true,
     claude: {
@@ -289,6 +297,13 @@ function agentsAt(i: number): AgentsCollectorData {
       waitingOnInput: waiting ? 1 : 0,
       idle: AGENT_SESSIONS - (working || waiting ? 1 : 0),
       subagentsWorking: subagents,
+    },
+    codex: {
+      sessions: codexSessions,
+      working: codexWorking,
+      waitingOnInput: 0,
+      idle: codexSessions - codexWorking,
+      subagentsWorking: 0,
     },
   };
 }
@@ -403,23 +418,25 @@ function demoEvents(
       STALE_END,
       `no frames received for ${describeSeconds(STALE_END - STALE_START)}`,
     ),
-    // Backdated to when the question was asked, though the rule only fires 2 m later.
+    // Backdated to when the question was asked, though the rule only fires 2 m later;
+    // the tool is named because only Claude Code sessions are waiting.
     event(
       AGENTS_STREAM,
       "agents.waiting",
       "warning",
       AGENT_WAITING_START,
       AGENT_WAITING_END,
-      `1 agent has been waiting on you for over ${AGENT_WAITING_DELAY_SECONDS / 60}m`,
+      `1 Claude Code agent has been waiting on you for over ${AGENT_WAITING_DELAY_SECONDS / 60}m`,
     ),
-    // Once the question is answered nothing is working any more; open until the end.
+    // Once the question is answered nothing is working any more, the Codex thread
+    // included, so the count covers both tools and names neither; open until the end.
     event(
       AGENTS_STREAM,
       "agents.all-idle",
       "info",
       AGENT_WAITING_END,
       DURATION_SECONDS,
-      `all ${AGENT_SESSIONS} agents idle for over ${AGENTS_ALL_IDLE_DELAY_SECONDS}s`,
+      `all ${AGENT_SESSIONS + CODEX_SESSIONS} agents idle for over ${AGENTS_ALL_IDLE_DELAY_SECONDS}s`,
     ),
   ];
   events.sort((a, b) => a.startedAt - b.startedAt);

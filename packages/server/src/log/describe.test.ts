@@ -97,28 +97,36 @@ describe("describeFrame", () => {
   });
 
   describe("agents frame", () => {
-    it("lists the Claude Code session count by state and the working subagents", () => {
+    it("lists each tool's session count by state and its working subagents", () => {
       const frame = makeAgentsFrame(0, {
-        sessions: 3,
-        working: 1,
-        idle: 1,
-        waitingOnInput: 1,
-        subagentsWorking: 2,
+        claude: { sessions: 3, working: 1, idle: 1, waitingOnInput: 1, subagentsWorking: 2 },
+        codex: { sessions: 1, working: 1, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
       });
 
       const description = describeFrame(frame);
 
       expect(description).toBe(
-        `${frame.stream} #${frame.sequence} claude=3 working=1 waiting=1 idle=1 subagents=2`,
+        `${frame.stream} #${frame.sequence} claude=3 working=1 waiting=1 idle=1 subagents=2 ` +
+          "codex=1 working=1 waiting=0 idle=0 subagents=0",
       );
     });
 
-    it("says claude=unavailable, with no counts, when Claude Code is not on the machine", () => {
-      const frame = makeAgentsFrame(0, { available: false, sessions: 0, working: 0, idle: 0 });
+    it("leaves out a tool that is not on the machine", () => {
+      const frame = makeAgentsFrame(0, { claude: null, codex: { sessions: 1 } });
 
       const description = describeFrame(frame);
 
-      expect(description).toBe(`${frame.stream} #${frame.sequence} claude=unavailable`);
+      expect(description).toBe(
+        `${frame.stream} #${frame.sequence} codex=1 working=1 waiting=0 idle=1 subagents=0`,
+      );
+    });
+
+    it("says agents=unavailable, with no counts, when neither tool is on the machine", () => {
+      const frame = makeAgentsFrame(0, { claude: null });
+
+      const description = describeFrame(frame);
+
+      expect(description).toBe(`${frame.stream} #${frame.sequence} agents=unavailable`);
     });
   });
 });

@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { FramesResponse } from "@afk/shared";
+import { FramesResponse, agentToolsPresent, agentTotals } from "@afk/shared";
 import type { AgentsFrame, RunFrame } from "@afk/shared";
 import { generateDemoSession } from "./fixtureSource.ts";
+
+/** The agents stream's frames in order. */
+function agentsFrames(data: FramesResponse): AgentsFrame[] {
+  return data.frames
+    .map((f) => f.frame)
+    .filter((frame): frame is AgentsFrame => frame.collector === "agents");
+}
 
 describe("generateDemoSession", () => {
   it("produces a session that validates against the FramesResponse schema", () => {
@@ -55,39 +62,68 @@ describe("generateDemoSession", () => {
     expect(processes.map((f) => f.frame.sequence)).toEqual(processes.map((_, i) => i + 1));
   });
 
-  it("samples the agents stream every 5 s with two sessions that partition into states", () => {
+  it("samples the agents stream every 5 s with a block per tool whose states partition its sessions", () => {
     const data = generateDemoSession("demo");
 
-    const agents = data.frames
-      .map((f) => f.frame)
-      .filter((frame): frame is AgentsFrame => frame.collector === "agents");
+    const agents = agentsFrames(data);
 
     expect(agents).toHaveLength(180 - 18);
     expect(agents.map((frame) => frame.sequence)).toEqual(agents.map((_, i) => i + 1));
     expect(agents.every((frame) => frame.data.available)).toBe(true);
-    expect(
-      agents.every(({ data: { claude } }) => {
-        return claude.working + claude.waitingOnInput + claude.idle === claude.sessions;
-      }),
-    ).toBe(true);
-    expect(agents.some((frame) => frame.data.claude.waitingOnInput > 0)).toBe(true);
-    expect(agents.some((frame) => frame.data.claude.subagentsWorking > 0)).toBe(true);
+    for (const frame of agents) {
+      for (const [, counts] of agentToolsPresent(frame.data)) {
+        expect(counts.working + counts.waitingOnInput + counts.idle).toBe(counts.sessions);
+      }
+      expect(agentToolsPresent(frame.data).map(([tool]) => tool)).toEqual(["claude", "codex"]);
+    }
+    expect(agents.some((frame) => frame.data.claude!.waitingOnInput > 0)).toBe(true);
+    expect(agents.some((frame) => frame.data.claude!.subagentsWorking > 0)).toBe(true);
   });
 
-  it("opens agents.waiting at the first sample that has a session waiting on input", () => {
+  it("has the Codex thread working while a Claude Code session is waiting, and idle with everything else at the end", () => {
+    const data = generateDemoSession("demo");
+    const agents = agentsFrames(data);
+
+    const overlap = agents.filter(
+      (frame) => frame.data.claude!.waitingOnInput > 0 && frame.data.codex!.working > 0,
+    );
+    const last = agents.at(-1)!.data;
+
+    expect(overlap.length).toBeGreaterThan(0);
+    expect(agentTotals(last)).toMatchObject({ sessions: 3, working: 0, waitingOnInput: 0 });
+  });
+
+  it("opens agents.waiting at the first sample that has a session waiting on input, naming Claude Code", () => {
     const data = generateDemoSession("demo");
     const waiting = data.events.find((event) => event.kind === "agents.waiting")!;
 
-    const firstWaiting = data.frames.find(
-      (f) => f.frame.collector === "agents" && f.frame.data.claude.waitingOnInput > 0,
-    )!;
+    const firstWaiting = agentsFrames(data).find((frame) => frame.data.claude!.waitingOnInput > 0)!;
 
     expect(waiting).toMatchObject({
       stream: "agents",
       severity: "warning",
-      startedAt: firstWaiting.frame.timestamp * 1000,
-      message: "1 agent has been waiting on you for over 2m",
+      startedAt: firstWaiting.timestamp * 1000,
+      message: "1 Claude Code agent has been waiting on you for over 2m",
     });
+  });
+
+  it("opens agents.all-idle at the first sample where every agent of both tools is idle, counting them all", () => {
+    const data = generateDemoSession("demo");
+    const allIdle = data.events.find((event) => event.kind === "agents.all-idle")!;
+
+    const firstIdle = agentsFrames(data).find((frame) => {
+      const totals = agentTotals(frame.data);
+      return totals.sessions > 0 && totals.working + totals.waitingOnInput === 0;
+    })!;
+
+    expect(allIdle).toMatchObject({
+      stream: "agents",
+      severity: "info",
+      startedAt: firstIdle.timestamp * 1000,
+      endedAt: data.session.endedAt,
+      message: "all 3 agents idle for over 60s",
+    });
+    expect(agentTotals(firstIdle.data).sessions).toBe(3);
   });
 
   it("wraps a failing migration in a run stream whose final frame alone carries the output tail", () => {

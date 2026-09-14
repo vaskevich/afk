@@ -1,4 +1,4 @@
-import { MemoryPressureLevel, type Frame } from "@afk/shared";
+import { MemoryPressureLevel, agentToolsPresent, type Frame } from "@afk/shared";
 
 const GIB = 1024 ** 3;
 const KIB = 1024;
@@ -57,15 +57,16 @@ export function describeFrame(frame: Frame): string {
       return `${frame.stream} #${frame.sequence} processes=${sampledCount} ${summary}`;
     }
     case "agents": {
-      const { available, claude } = frame.data;
-      if (!available) {
-        return `${frame.stream} #${frame.sequence} claude=unavailable`;
+      const tools = agentToolsPresent(frame.data);
+      if (tools.length === 0) {
+        return `${frame.stream} #${frame.sequence} agents=unavailable`;
       }
-      return (
-        `${frame.stream} #${frame.sequence} claude=${claude.sessions} ` +
-        `working=${claude.working} waiting=${claude.waitingOnInput} idle=${claude.idle} ` +
-        `subagents=${claude.subagentsWorking}`
+      const blocks = tools.map(
+        ([tool, counts]) =>
+          `${tool}=${counts.sessions} working=${counts.working} ` +
+          `waiting=${counts.waitingOnInput} idle=${counts.idle} subagents=${counts.subagentsWorking}`,
       );
+      return `${frame.stream} #${frame.sequence} ${blocks.join(" ")}`;
     }
   }
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  makeAgentCounts,
+  makeAgentsData,
   makeAgentsFrame,
   makeEvent,
   makeHost,
@@ -12,6 +14,8 @@ import {
   makeSystemFrame,
 } from "./testing.ts";
 import {
+  AGENT_TOOLS,
+  AGENT_TOOL_LABELS,
   AnomalyEvent,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -34,6 +38,8 @@ import {
   StreamEventName,
   UpgradeRequiredDetails,
   VersionResponse,
+  agentToolsPresent,
+  agentTotals,
 } from "./protocol.ts";
 
 /**
@@ -67,34 +73,53 @@ describe("Frame", () => {
     expect(result.success).toBe(true);
   });
 
-  it("accepts an agents frame from a machine without Claude Code, with zero counts", () => {
+  it("accepts an agents frame with a block per tool found, Claude Code and Codex", () => {
     const frame = makeAgentsFrame(0, {
-      available: false,
-      sessions: 0,
-      working: 0,
-      idle: 0,
-      waitingOnInput: 0,
-      subagentsWorking: 0,
+      claude: { sessions: 2, working: 1, idle: 1 },
+      codex: { sessions: 1, working: 1, idle: 0 },
     });
 
     const result = Frame.safeParse(frame);
 
-    expect(result).toMatchObject({ success: true, data: { data: { available: false } } });
+    expect(result).toMatchObject({
+      success: true,
+      data: { data: { available: true, codex: { sessions: 1 } } },
+    });
   });
 
-  it("rejects a negative agent count, naming the field", () => {
-    const frame = makeAgentsFrame(0, { waitingOnInput: -1 });
+  it("accepts an agents frame from a machine with neither tool: available false and no blocks", () => {
+    const frame = makeAgentsFrame(0, { claude: null });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result).toMatchObject({ success: true, data: { data: { available: false } } });
+    expect(frame.data).toEqual({ available: false });
+  });
+
+  it("accepts an agents frame from a client before Codex support: available false with a zero claude block", () => {
+    const frame = makeAgentsFrame(0, {
+      available: false,
+      claude: { sessions: 0, working: 0, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
+    });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a negative agent count, naming the tool and the field", () => {
+    const frame = makeAgentsFrame(0, { codex: { waitingOnInput: -1 } });
 
     const result = Frame.safeParse(frame);
 
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues[0]!.path).toEqual(["data", "claude", "waitingOnInput"]);
+      expect(result.error.issues[0]!.path).toEqual(["data", "codex", "waitingOnInput"]);
     }
   });
 
   it("rejects a fractional agent count, naming the field", () => {
-    const frame = makeAgentsFrame(0, { subagentsWorking: 1.5 });
+    const frame = makeAgentsFrame(0, { claude: { subagentsWorking: 1.5 } });
 
     const result = Frame.safeParse(frame);
 
@@ -456,6 +481,61 @@ describe("AnomalyEvent", () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0]!.path).toEqual(["details", "outputTail", "stdout"]);
+    }
+  });
+});
+
+describe("agentToolsPresent", () => {
+  it("lists the tools with a block, Claude Code before Codex", () => {
+    const data = makeAgentsData({ codex: { sessions: 1, working: 1, idle: 0 }, claude: {} });
+
+    expect(agentToolsPresent(data).map(([tool]) => tool)).toEqual(["claude", "codex"]);
+  });
+
+  it("leaves out a tool without a block", () => {
+    const data = makeAgentsData({ claude: null, codex: {} });
+
+    expect(agentToolsPresent(data).map(([tool]) => tool)).toEqual(["codex"]);
+  });
+
+  it("lists nothing when available is false, even with an old client's zero claude block", () => {
+    const data = makeAgentsData({ available: false, claude: makeAgentCounts({ sessions: 0 }) });
+
+    expect(agentToolsPresent(data)).toEqual([]);
+  });
+});
+
+describe("agentTotals", () => {
+  it("adds every count across the tools found", () => {
+    const data = makeAgentsData({
+      claude: { sessions: 3, working: 1, waitingOnInput: 1, idle: 1, subagentsWorking: 2 },
+      codex: { sessions: 1, working: 1, waitingOnInput: 0, idle: 0, subagentsWorking: 0 },
+    });
+
+    expect(agentTotals(data)).toEqual({
+      sessions: 4,
+      working: 2,
+      waitingOnInput: 1,
+      idle: 1,
+      subagentsWorking: 2,
+    });
+  });
+
+  it("is all zeros for a machine with neither tool", () => {
+    expect(agentTotals(makeAgentsData({ claude: null }))).toEqual({
+      sessions: 0,
+      working: 0,
+      waitingOnInput: 0,
+      idle: 0,
+      subagentsWorking: 0,
+    });
+  });
+});
+
+describe("AGENT_TOOL_LABELS", () => {
+  it("names every tool in AGENT_TOOLS", () => {
+    for (const tool of AGENT_TOOLS) {
+      expect(AGENT_TOOL_LABELS[tool]).toMatch(/^[A-Z]/);
     }
   });
 });

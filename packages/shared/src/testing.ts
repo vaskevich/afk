@@ -4,6 +4,7 @@
  * to it. Import from "@afk/shared/testing"; never from app code.
  */
 import type {
+  AgentCounts,
   AgentsCollectorData,
   AgentsFrame,
   AnomalyEvent,
@@ -187,32 +188,48 @@ export function makeProcessesFrame(
   };
 }
 
-/**
- * A machine with Claude Code on it: two sessions, one working and one idle, and no
- * subagents. Override the counts the test is about; `available: false` for a machine
- * without Claude Code (the counts are then zero).
- */
-export function makeAgentsData(
-  overrides: Partial<AgentsCollectorData["claude"]> & { available?: boolean } = {},
-): AgentsCollectorData {
-  const { available, ...claude } = overrides;
+/** One tool's counts: two sessions, one working and one idle, no subagents. */
+export function makeAgentCounts(overrides: Partial<AgentCounts> = {}): AgentCounts {
   return {
-    available: available ?? true,
-    claude: {
-      sessions: 2,
-      working: 1,
-      idle: 1,
-      waitingOnInput: 0,
-      subagentsWorking: 0,
-      ...claude,
-    },
+    sessions: 2,
+    working: 1,
+    idle: 1,
+    waitingOnInput: 0,
+    subagentsWorking: 0,
+    ...overrides,
+  };
+}
+
+export interface AgentsDataOverrides {
+  /** Claude Code's counts, `makeAgentCounts` by default; `null` for a machine without Claude Code. */
+  claude?: Partial<AgentCounts> | null;
+  /** Codex's counts; there is no Codex on the machine unless given. */
+  codex?: Partial<AgentCounts> | null;
+  /** Derived from the blocks unless given (an old client's `available: false` with a zero `claude` block). */
+  available?: boolean;
+}
+
+/**
+ * A machine with Claude Code on it and no Codex: two Claude sessions, one working and
+ * one idle. Override the counts the test is about, per tool.
+ */
+export function makeAgentsData(overrides: AgentsDataOverrides = {}): AgentsCollectorData {
+  const claude = overrides.claude === null ? undefined : makeAgentCounts(overrides.claude);
+  const codex =
+    overrides.codex === null || overrides.codex === undefined
+      ? undefined
+      : makeAgentCounts(overrides.codex);
+  return {
+    available: overrides.available ?? (claude !== undefined || codex !== undefined),
+    ...(claude === undefined ? {} : { claude }),
+    ...(codex === undefined ? {} : { codex }),
   };
 }
 
 /** An agents frame `atSeconds` after T0. Sequence defaults to the offset plus one. */
 export function makeAgentsFrame(
   atSeconds: number,
-  overrides: Parameters<typeof makeAgentsData>[0] & { sequence?: number } = {},
+  overrides: AgentsDataOverrides & { sequence?: number } = {},
 ): AgentsFrame {
   const { sequence, ...data } = overrides;
   return {

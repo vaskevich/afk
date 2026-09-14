@@ -25,6 +25,13 @@
   --cursor: #ff9e64;
   --shadow: rgba(0, 0, 0, 0.35);
 
+  /* The agents row, one hue per tool: working in the tool's colour, waiting on input
+     in its shade of the warning family (amber for Claude Code, orange for Codex). */
+  --agent-claude: #58a6ff;
+  --agent-claude-waiting: #d29922;
+  --agent-codex: #bc8cff;
+  --agent-codex-waiting: #f0883e;
+
   --font-sans:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji";
   --font-mono:
@@ -68,6 +75,11 @@
 
   --cursor: #bc4c00;
   --shadow: rgba(0, 0, 0, 0.18);
+
+  --agent-claude: #0969da;
+  --agent-claude-waiting: #9a6700;
+  --agent-codex: #8250df;
+  --agent-codex-waiting: #bc4c00;
 }
 
 *,
@@ -1184,6 +1196,22 @@ button:focus-visible {
   margin: 0;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* The agents row's legend: a square in the colour the tool's bars are drawn in. */
+.swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: 0;
+}
+.swatch-claude {
+  background: var(--agent-claude);
+}
+.swatch-codex {
+  background: var(--agent-codex);
 }
 
 /* processes details: one row per busy process. */
