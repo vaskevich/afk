@@ -2,7 +2,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { T0_MS, makeHost, makeStoredFrames, makeSystemFrame } from "@afk/shared/testing";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
-import { S3SessionStorage } from "./s3-storage.ts";
+import { READ_CONCURRENCY, S3SessionStorage } from "./s3-storage.ts";
 import type { SessionRecord } from "./storage.ts";
 
 /**
@@ -17,8 +17,14 @@ function commandName(command: unknown): string {
   return (command as { constructor: { name: string } }).constructor.name;
 }
 
+/** Awaited before a GET is served, so a test can observe or delay individual fetches. */
+type GetGate = (key: string) => Promise<void>;
+
+/** Lets every fetch started so far run before continuing, without a real wait. */
+const yieldToOthers = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 /** A tiny in-memory stand-in for a bucket, keyed by object key. */
-function installFakeS3(objects: Map<string, string>) {
+function installFakeS3(objects: Map<string, string>, beforeGet?: GetGate) {
   return vi.spyOn(S3Client.prototype, "send").mockImplementation(async (command: unknown) => {
     const input = (command as { input: Record<string, unknown> }).input;
     switch (commandName(command)) {
@@ -27,6 +33,7 @@ function installFakeS3(objects: Map<string, string>) {
         return {};
       }
       case "GetObjectCommand": {
+        await beforeGet?.(input.Key as string);
         const body = objects.get(input.Key as string);
         if (body === undefined) {
           throw Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" });
@@ -90,8 +97,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
-function makeStorage(objects: Map<string, string>): S3SessionStorage {
-  installFakeS3(objects);
+function makeStorage(objects: Map<string, string>, beforeGet?: GetGate): S3SessionStorage {
+  installFakeS3(objects, beforeGet);
   return new S3SessionStorage({
     bucket: "test-bucket",
     region: "us-east-1",
@@ -143,6 +150,72 @@ describe("S3SessionStorage", () => {
     await storage.appendFrames("session1", [frames[2]!]);
 
     await expect(storage.readFrames("session1")).resolves.toEqual(frames);
+  });
+
+  it("readFrames fetches READ_CONCURRENCY objects at a time rather than one after another", async () => {
+    // A session with more objects than the limit: one batch object per frame, the way
+    // the client's one-batch-a-second sender lays a session out in the bucket.
+    const objects = new Map<string, string>();
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const storage = makeStorage(objects, async () => {
+      inFlight++;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await yieldToOthers();
+      inFlight--;
+    });
+    const frames = makeStoredFrames(
+      Array.from({ length: READ_CONCURRENCY * 2 + 3 }, (_, i) =>
+        makeSystemFrame(i, { sequence: i + 1 }),
+      ),
+    );
+    for (const frame of frames) {
+      await storage.appendFrames("session1", [frame]);
+    }
+
+    const read = await storage.readFrames("session1");
+
+    expect(read).toEqual(frames);
+    expect(peakInFlight).toBe(READ_CONCURRENCY);
+  });
+
+  it("readFrames keeps index order when an earlier object arrives after later ones", async () => {
+    const objects = new Map<string, string>();
+    const storage = makeStorage(objects, async (key) => {
+      if (key.endsWith("/0000000001.ndjson")) {
+        await yieldToOthers();
+        await yieldToOthers();
+      }
+    });
+    const frames = makeStoredFrames([
+      makeSystemFrame(0),
+      makeSystemFrame(1, { sequence: 2 }),
+      makeSystemFrame(2, { sequence: 3 }),
+    ]);
+    for (const frame of frames) {
+      await storage.appendFrames("session1", [frame]);
+    }
+
+    await expect(storage.readFrames("session1")).resolves.toEqual(frames);
+  });
+
+  it("readFrames skips an object deleted between the listing and its fetch", async () => {
+    const objects = new Map<string, string>();
+    const storage = makeStorage(objects, async (key) => {
+      if (key.endsWith("/0000000002.ndjson")) {
+        objects.delete(key);
+      }
+    });
+    const frames = makeStoredFrames([
+      makeSystemFrame(0),
+      makeSystemFrame(1, { sequence: 2 }),
+      makeSystemFrame(2, { sequence: 3 }),
+    ]);
+    for (const frame of frames) {
+      await storage.appendFrames("session1", [frame]);
+    }
+
+    await expect(storage.readFrames("session1")).resolves.toEqual([frames[0], frames[2]]);
   });
 
   it("listSessionIds derives ids from common prefixes across pages", async () => {

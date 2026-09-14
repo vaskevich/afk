@@ -344,7 +344,10 @@ For UI work the Vite dev server proxies `/api` to the server.
 is append-only, one stored frame per line, in index order. Per-stream sequence state
 is rebuilt from the frames on load rather than persisted. The bucket layout
 (`store/s3-storage.ts`) is the same except that each ingested batch becomes its own
-object under `sessions/<id>/frames/`, since object stores cannot append. Retention is
+object under `sessions/<id>/frames/`, since object stores cannot append; a session is
+therefore thousands of small objects, and `readFrames` fetches them `READ_CONCURRENCY`
+(16) at a time, since the round trips, not the bytes, are what a cold load costs (see
+the 2026-09-14 entry in the decision log). Retention is
 `store/sweeper.ts`: every `AFK_SWEEP_INTERVAL_SECONDS` (one hour) it lists the stored
 sessions and deletes those that ended more than `AFK_RETENTION_DAYS` (7) ago, counting
 a session that never received an explicit end as ended when it hit its cap. It runs on

@@ -7,6 +7,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { StoredFrame } from "@afk/shared";
 import { log } from "../log/logger.ts";
+import { mapWithConcurrency } from "../utils/concurrency.ts";
 import { SessionRecord, parseStoredFrameLine, type SessionStorage } from "./storage.ts";
 
 const SESSION_KEY = "session.json";
@@ -16,6 +17,17 @@ const SAFE_ID = /^[A-Za-z0-9]+$/;
 
 /** S3 caps a single DeleteObjects call at 1000 keys. */
 const DELETE_BATCH_SIZE = 1000;
+
+/**
+ * How many frame objects `readFrames` fetches at once. The client sends one batch a
+ * second and every batch is its own object, so a one-hour session is a few thousand
+ * small objects and the round trips dominate: fetched one at a time at ~14 ms each,
+ * the 2,798 objects of a real session took 40 s to load on 2026-09-14 (the first
+ * dashboard visit after the cache had let the session go). Sixteen in flight brings
+ * that to about 3 s, stays well inside the SDK's socket pool (50 per host), and
+ * buffers at most sixteen batch objects (~130 KB each at the ingest body limit).
+ */
+export const READ_CONCURRENCY = 16;
 
 export interface S3StorageOptions {
   bucket: string;
@@ -116,16 +128,15 @@ export class S3SessionStorage implements SessionStorage {
     const keys = await this.listAllKeys(framesPrefix);
     keys.sort(); // zero-padded, so lexicographic order is index order
 
+    // Fetch in parallel, parse in key order: the objects are tiny and there are
+    // thousands, so the round trips are the cost, and the result must be in index order.
+    const texts = await mapWithConcurrency(keys, READ_CONCURRENCY, (key) =>
+      this.getObjectTextIfPresent(key),
+    );
     const frames: StoredFrame[] = [];
-    for (const key of keys) {
-      let text: string;
-      try {
-        text = await this.getObjectText(key);
-      } catch (err) {
-        if (isNotFound(err)) {
-          continue; // deleted between list and get; treat like a gap, not an error
-        }
-        throw err;
+    for (const text of texts) {
+      if (text === null) {
+        continue; // deleted between list and get; treat like a gap, not an error
       }
       for (const line of text.split("\n")) {
         if (line === "") {
@@ -214,6 +225,18 @@ export class S3SessionStorage implements SessionStorage {
       return "";
     }
     return result.Body.transformToString("utf8");
+  }
+
+  /** The object's text, or null when it no longer exists. */
+  private async getObjectTextIfPresent(key: string): Promise<string | null> {
+    try {
+      return await this.getObjectText(key);
+    } catch (err) {
+      if (isNotFound(err)) {
+        return null;
+      }
+      throw err;
+    }
   }
 }
 

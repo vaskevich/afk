@@ -160,14 +160,14 @@ does not need to know about events at all.
 
 Implement `SessionStorage` in `packages/server/src/store/storage.ts`:
 
-| method           | disk                            | object store                                                 |
-| ---------------- | ------------------------------- | ------------------------------------------------------------ |
-| `putSession`     | write `session.json` atomically | put `sessions/<id>/session.json`                             |
-| `getSession`     | read it                         | get it                                                       |
-| `appendFrames`   | append lines to `frames.ndjson` | put `sessions/<id>/frames/<first index, zero padded>.ndjson` |
-| `readFrames`     | read the file                   | list the prefix, get each object in key order, concatenate   |
-| `listSessionIds` | readdir                         | list `sessions/` with delimiter                              |
-| `deleteSession`  | rm -rf                          | delete every key under the prefix                            |
+| method           | disk                            | object store                                                            |
+| ---------------- | ------------------------------- | ----------------------------------------------------------------------- |
+| `putSession`     | write `session.json` atomically | put `sessions/<id>/session.json`                                        |
+| `getSession`     | read it                         | get it                                                                  |
+| `appendFrames`   | append lines to `frames.ndjson` | put `sessions/<id>/frames/<first index, zero padded>.ndjson`            |
+| `readFrames`     | read the file                   | list the prefix, get the objects 16 at a time, concatenate in key order |
+| `listSessionIds` | readdir                         | list `sessions/` with delimiter                                         |
+| `deleteSession`  | rm -rf                          | delete every key under the prefix                                       |
 
 Frames always arrive in index order and are never rewritten, which is what makes the
 object-store variant simple. `store/s3-storage.ts` is the S3-compatible
