@@ -175,23 +175,28 @@ button:focus-visible {
   background: var(--accent);
 }
 
+/* Padding, not a margin, makes the gap below the button hoverable: the pointer stays
+   inside the menu on its way down, so the menu does not close before a choice is hit. */
 .theme-menu-options {
   position: absolute;
-  top: calc(100% + 6px);
+  top: 100%;
   right: 0;
   z-index: 10;
+  min-width: 100%;
+  padding-top: 6px;
+}
+.theme-menu-options[hidden] {
+  display: none;
+}
+.theme-menu-list {
   display: flex;
   flex-direction: column;
-  min-width: 100%;
   padding: 4px;
   gap: 2px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-.theme-menu-options[hidden] {
-  display: none;
 }
 .theme-menu-option {
   text-align: left;

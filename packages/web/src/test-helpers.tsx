@@ -12,6 +12,7 @@ import {
 } from "@tanstack/react-router";
 import { render } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { vi } from "vitest";
 import { ThemeProvider } from "./useTheme.tsx";
 
 /**
@@ -36,4 +37,32 @@ export async function renderOnSessionRoute(element: ReactNode, path = "/s/curren
   );
   await router.load();
   return rendered;
+}
+
+/**
+ * jsdom has no `matchMedia`; this stand-in reports one answer for the dark-scheme
+ * query and lets a test flip it, firing the change listeners like the browser would.
+ * Remove it in `afterEach` with `delete window.matchMedia`: `vi.fn` on `window` is not
+ * covered by `restoreMocks`, and jsdom has no original to restore to.
+ */
+export function stubMatchMedia(prefersDark: boolean) {
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const query = {
+    matches: prefersDark,
+    addEventListener: (_type: "change", listener: (event: MediaQueryListEvent) => void) => {
+      listeners.add(listener);
+    },
+    removeEventListener: (_type: "change", listener: (event: MediaQueryListEvent) => void) => {
+      listeners.delete(listener);
+    },
+  };
+  window.matchMedia = vi.fn(() => query as unknown as MediaQueryList);
+  return {
+    flip(nowPrefersDark: boolean) {
+      query.matches = nowPrefersDark;
+      for (const listener of listeners) {
+        listener({ matches: nowPrefersDark } as MediaQueryListEvent);
+      }
+    },
+  };
 }
