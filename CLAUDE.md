@@ -10,6 +10,9 @@ with natural extension points, not completeness.
   dated decision log. Add a log entry whenever a direction changes.
 - [docs/PROTOCOL.md](docs/PROTOCOL.md): the wire contract. `packages/shared/src/protocol.ts`
   is the source of truth; keep the doc in step with it.
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every `AFK_*` environment variable the
+  server reads, with defaults. `packages/server/src/config.ts` is the source of truth;
+  a new tunable is added to both in the same change.
 - [docs/EXTENDING.md](docs/EXTENDING.md): how to add a collector, rule, storage backend,
   or data source.
 - [docs/TESTING.md](docs/TESTING.md): how tests are organized and written across the

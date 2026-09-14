@@ -85,7 +85,12 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   retried by the client rather than being counted as a duplicate.
 - `store/disk-storage.ts` is the local implementation; `store/s3-storage.ts` is the
   S3-compatible one used against Lightsail object storage in production.
-  `store/create-storage.ts` picks between them from `AFK_STORAGE=disk|s3`.
+  `store/create-storage.ts` builds whichever `AFK_STORAGE=disk|s3` asks for.
+- `store/sweeper.ts` is retention: it deletes sessions `AFK_RETENTION_DAYS` after they
+  end and evicts them from the store's cache, on every backend.
+- `config.ts` parses every `AFK_*` variable once at startup into a validated
+  `ServerConfig` (see [CONFIGURATION.md](CONFIGURATION.md)); `index.ts` turns that into
+  the in-process shapes (`AppConfig` in `env.ts`, the store's options, the sweeper's).
 - `log/describe.ts` formats frames for server logs; interpretation constants such as
   memory pressure labels live here or in shared.
 - `rules/` is the anomaly-detection engine, described below.
@@ -116,7 +121,7 @@ Two rules are time-based rather than purely frame-driven (`client.stale`, which 
 to notice _silence_, and any future rule like it): their `RuleInstance` also
 implements `onTick`, called with the current time so they can open or update an event
 even when no frame has arrived. `SessionStore.startTicker` runs a periodic tick
-(`TICK_INTERVAL_MS`, 5 s) across every session in memory; during replay the engine
+(`AFK_TICK_INTERVAL_SECONDS`, 5 s) across every session in memory; during replay the engine
 ticks with each frame's own timestamp instead, so history and a live viewer see the
 same events.
 
@@ -147,7 +152,7 @@ eleventh stream, which the frames route turns into 422 — the batch itself is
 well-formed, just over the limit, so a different status than a generic bad request.
 
 Ended sessions with no active SSE listeners are evicted from the in-memory cache after
-`EVICT_ENDED_AFTER_MS` (10 minutes) of no access, in the same `tick()` pass that runs
+`AFK_EVICT_ENDED_AFTER_SECONDS` (10 minutes) of no access, in the same `tick()` pass that runs
 the time-based rules — this keeps memory bounded without a separate sweep. What is
 _not_ done yet: `framesInMemory` in `GET /api/stats` is a frame **count**, not an
 actual measurement of bytes held, so it is only a proxy for the memory the admission
@@ -216,8 +221,11 @@ For UI work the Vite dev server proxies `/api` to the server.
 is append-only, one stored frame per line, in index order. Per-stream sequence state
 is rebuilt from the frames on load rather than persisted. The bucket layout
 (`store/s3-storage.ts`) is the same except that each ingested batch becomes its own
-object under `sessions/<id>/frames/`, since object stores cannot append. Retention
-(delete 7 days after end) is a server-side sweeper so it works on every backend.
+object under `sessions/<id>/frames/`, since object stores cannot append. Retention is
+`store/sweeper.ts`: every `AFK_SWEEP_INTERVAL_SECONDS` (one hour) it lists the stored
+sessions and deletes those that ended more than `AFK_RETENTION_DAYS` (7) ago, counting
+a session that never received an explicit end as ended when it hit its cap. It runs on
+the server so it works on every backend (Lightsail buckets have no lifecycle rules).
 
 ## Deployment
 
@@ -230,6 +238,11 @@ private network. See `infra/` and the Deployment section of BACKLOG.md.
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** All server tuning goes through environment variables parsed once in
+  `config.ts` (`loadConfig`, a Zod schema keyed by variable name). No other module reads
+  `process.env`; each default is owned by the module that uses it and referenced by the
+  schema, and [CONFIGURATION.md](CONFIGURATION.md) documents every variable. A bad value
+  stops startup naming the variable instead of surfacing later as `NaN`.
 - **2026-09-14** Tests are Vitest, one config at the repo root, co-located with the
   code they cover (`foo.test.ts` next to `foo.ts`), builders (`makeSystemFrame`,
   `makeEvent`, …) over literals, real implementations (`MemorySessionStorage`,

@@ -24,7 +24,7 @@ object storage (S3-compatible API) for the hosted deployment.
 
 - [x] `SessionStorage` interface + disk implementation (`sessions/<id>/session.json` + `frames.ndjson`)
 - [x] S3-compatible implementation (one object per frame batch under `sessions/<id>/frames/`); select with `AFK_STORAGE=disk|s3`; works against Lightsail buckets, real S3, MinIO -- `packages/server/src/store/s3-storage.ts` + `create-storage.ts`
-- [ ] Expiry: sweeper that deletes sessions 7 days after they end (Lightsail buckets have no lifecycle rules, so the server owns this for every backend)
+- [x] Expiry: sweeper that deletes sessions 7 days after they end (Lightsail buckets have no lifecycle rules, so the server owns this for every backend) -- `packages/server/src/store/sweeper.ts`, `AFK_RETENTION_DAYS` / `AFK_SWEEP_INTERVAL_SECONDS`; a session that never received an end counts as ended at its cap
 - [x] Evict idle ended sessions from the in-memory cache -- `SessionStore.tick()` evicts ended sessions with no listeners after `EVICT_ENDED_AFTER_MS` (10 min); `stats().framesInMemory` is still a frame count, not an actual measurement of memory held, see the hardening item below
 - [ ] Persist only what the dashboard needs (truncate process lists, drop unused fields)
 - [ ] Downsample or window frames for the browser if sessions ever exceed a few MB compressed
@@ -41,6 +41,7 @@ object storage (S3-compatible API) for the hosted deployment.
 ## Hardening (server)
 
 - [x] Global cap on active sessions and per-session frame/stream rate limit (admission control) -- `AdmissionLimits` in `env.ts` (20 sessions x 10 streams by default), 503 + `Retry-After` on create at capacity, 422 on a batch that would exceed the stream cap; see ARCHITECTURE.md
+- [x] Configuration: every server tunable (port, storage, limits, session cap, retention, tick/eviction/keepalive intervals) as an `AFK_*` variable parsed and validated once in `packages/server/src/config.ts`, documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md); a bad value stops startup naming the variable
 - [ ] Minimum client version check using the `X-Afk-Client` header -- the header is sent and logged but not enforced
 - [ ] Security headers (Hono `secureHeaders`)
 - [ ] Request body size limit on ingest -- `TODO(hardening)` in `routes/frames.ts`
