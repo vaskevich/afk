@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import type { AdmissionLimits } from "../env.ts";
-import { DEFAULT_LIMITS } from "../env.ts";
+import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
@@ -13,8 +13,13 @@ const NO_DIST_DIR = "/nonexistent/afk-test-dist";
 /** Builds a fresh app and creates one active session in it. */
 async function startSession(limits: AdmissionLimits = DEFAULT_LIMITS) {
   const app = createApp(
-    { publicBaseUrl: "https://afk.test", webDistDir: NO_DIST_DIR, limits },
-    new SessionStore(new MemorySessionStorage(), limits),
+    {
+      publicBaseUrl: "https://afk.test",
+      webDistDir: NO_DIST_DIR,
+      limits,
+      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
+    },
+    new SessionStore(new MemorySessionStorage(), { limits }),
   );
   const { sessionId, ingestToken } = await createTestSession(app);
   return { app, sessionId, ingestToken };

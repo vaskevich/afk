@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import type { AdmissionLimits } from "../env.ts";
-import { DEFAULT_LIMITS } from "../env.ts";
+import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
@@ -13,8 +13,13 @@ const NO_DIST_DIR = "/nonexistent/afk-test-dist";
 
 function buildApp(limits: AdmissionLimits = DEFAULT_LIMITS) {
   return createApp(
-    { publicBaseUrl: "https://afk.test", webDistDir: NO_DIST_DIR, limits },
-    new SessionStore(new MemorySessionStorage(), limits),
+    {
+      publicBaseUrl: "https://afk.test",
+      webDistDir: NO_DIST_DIR,
+      limits,
+      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
+    },
+    new SessionStore(new MemorySessionStorage(), { limits }),
   );
 }
 

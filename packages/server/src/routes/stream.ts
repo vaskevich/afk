@@ -8,9 +8,6 @@ import { errorResponse } from "../http/errors.ts";
 import type { Session, SessionEvent } from "../store/sessions.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
 
-/** How often to send an SSE comment so proxies and browsers keep the connection open. */
-const KEEPALIVE_INTERVAL_MS = 15_000;
-
 /** Parses the resume cursor: `Last-Event-ID` header wins, then `?after=`, else from the start. */
 function resumeIndex(lastEventId: string | undefined, afterQuery: string | undefined): number {
   const raw = lastEventId ?? afterQuery ?? "0";
@@ -23,7 +20,7 @@ function resumeIndex(lastEventId: string | undefined, afterQuery: string | undef
  * session id is the unguessable share link. Ingest stays behind the bearer token.
  */
 export function streamRoutes(deps: AppDeps) {
-  const { store } = deps;
+  const { store, config } = deps;
 
   return new Hono<AppEnv>()
     .get("/:sessionId/frames", async (c) => {
@@ -112,7 +109,7 @@ export function streamRoutes(deps: AppDeps) {
     });
     const keepalive = setInterval(
       () => void stream.write(": keepalive\n\n"),
-      KEEPALIVE_INTERVAL_MS,
+      config.sseKeepaliveMs,
     );
     stream.onAbort(() => finish());
 

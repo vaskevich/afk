@@ -1,39 +1,49 @@
 import { serve } from "@hono/node-server";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { createApp } from "./app.ts";
-import { DEFAULT_LIMITS } from "./env.ts";
-import { createStorageFromEnv } from "./store/create-storage.ts";
+import { ConfigError, describeConfig, loadConfig, type ServerConfig } from "./config.ts";
+import type { AppConfig } from "./env.ts";
+import { createStorage } from "./store/create-storage.ts";
 import { SessionStore } from "./store/sessions.ts";
+import { MS_PER_DAY, startSweeper } from "./store/sweeper.ts";
 
-const port = Number(process.env.AFK_PORT ?? 4141);
-const publicBaseUrl = process.env.AFK_PUBLIC_BASE_URL ?? `http://localhost:${port}`;
+const MS_PER_SECOND = 1000;
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const webDistDir = process.env.AFK_WEB_DIST ?? path.resolve(here, "../../web/dist");
+function loadConfigOrExit(): ServerConfig {
+  try {
+    return loadConfig(process.env);
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
 
-const defaultDataDir = path.resolve(here, "../data");
-const storage = createStorageFromEnv(process.env, defaultDataDir);
-const limits = {
-  maxActiveSessions: Number(
-    process.env.AFK_MAX_ACTIVE_SESSIONS ?? DEFAULT_LIMITS.maxActiveSessions,
-  ),
-  maxStreamsPerSession: Number(
-    process.env.AFK_MAX_STREAMS_PER_SESSION ?? DEFAULT_LIMITS.maxStreamsPerSession,
-  ),
+const config = loadConfigOrExit();
+
+const storage = createStorage(config.storage);
+const store = new SessionStore(storage, {
+  limits: config.limits,
+  maxSessionDurationSeconds: config.maxSessionDurationSeconds,
+  evictEndedAfterMs: config.evictEndedAfterSeconds * MS_PER_SECOND,
+});
+store.startTicker(config.tickIntervalSeconds * MS_PER_SECOND);
+startSweeper({
+  storage,
+  store,
+  retentionMs: config.retentionDays * MS_PER_DAY,
+  intervalMs: config.sweepIntervalSeconds * MS_PER_SECOND,
+});
+
+const appConfig: AppConfig = {
+  publicBaseUrl: config.publicBaseUrl,
+  webDistDir: config.webDistDir,
+  limits: config.limits,
+  sseKeepaliveMs: config.sseKeepaliveSeconds * MS_PER_SECOND,
 };
-const store = new SessionStore(storage, limits);
+const app = createApp(appConfig, store);
 
-/** How often time-based rules (client silent) run and idle ended sessions are evicted. */
-const TICK_INTERVAL_MS = 5_000;
-store.startTicker(TICK_INTERVAL_MS);
-
-const app = createApp({ publicBaseUrl, webDistDir, limits }, store);
-
-serve({ fetch: app.fetch, port }, (info) => {
-  console.log(
-    `afk server listening on http://localhost:${info.port} ` +
-      `(public base ${publicBaseUrl}, storage ${process.env.AFK_STORAGE ?? "disk"}, ` +
-      `limits ${limits.maxActiveSessions} sessions x ${limits.maxStreamsPerSession} streams)`,
-  );
+serve({ fetch: app.fetch, port: config.port }, (info) => {
+  console.log(`afk server listening on http://localhost:${info.port} (${describeConfig(config)})`);
 });

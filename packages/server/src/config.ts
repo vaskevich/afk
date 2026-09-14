@@ -1,0 +1,258 @@
+/**
+ * Server configuration, parsed once from the environment at startup.
+ *
+ * Every tunable the server has goes through here: `loadConfig` validates the `AFK_*`
+ * variables against a Zod schema keyed by variable name (so an error names the variable
+ * that is wrong), applies defaults, and returns a `ServerConfig` that `index.ts` turns
+ * into the in-process shapes (`AppConfig`, `SessionStoreOptions`, sweeper options).
+ * Nothing else in the server reads `process.env`.
+ *
+ * Each default has one owner: the module that uses it exports it and the schema below
+ * references it, so the docs table in docs/CONFIGURATION.md, the schema, and the code
+ * cannot drift apart. That table documents every variable; keep it in step with the
+ * schema.
+ */
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { z } from "zod";
+import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS, type AdmissionLimits } from "./env.ts";
+import { DEFAULT_STORE_OPTIONS, DEFAULT_TICK_INTERVAL_MS } from "./store/sessions.ts";
+import { DEFAULT_RETENTION_DAYS, DEFAULT_SWEEP_INTERVAL_MS } from "./store/sweeper.ts";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+const MS_PER_SECOND = 1000;
+const MAX_TCP_PORT = 65535;
+
+/** Where the server looks for the built dashboard and its data directory when not told otherwise. */
+export const DEFAULT_PATHS = {
+  webDistDir: path.resolve(here, "../../web/dist"),
+  dataDir: path.resolve(here, "../data"),
+};
+
+/** Defaults for every numeric variable, in the units the variable itself uses. */
+export const CONFIG_DEFAULTS = {
+  port: 4141,
+  maxActiveSessions: DEFAULT_LIMITS.maxActiveSessions,
+  maxStreamsPerSession: DEFAULT_LIMITS.maxStreamsPerSession,
+  maxSessionDurationSeconds: DEFAULT_STORE_OPTIONS.maxSessionDurationSeconds,
+  retentionDays: DEFAULT_RETENTION_DAYS,
+  sweepIntervalSeconds: DEFAULT_SWEEP_INTERVAL_MS / MS_PER_SECOND,
+  tickIntervalSeconds: DEFAULT_TICK_INTERVAL_MS / MS_PER_SECOND,
+  evictEndedAfterSeconds: DEFAULT_STORE_OPTIONS.evictEndedAfterMs / MS_PER_SECOND,
+  sseKeepaliveSeconds: DEFAULT_SSE_KEEPALIVE_MS / MS_PER_SECOND,
+} as const;
+
+export const STORAGE_BACKENDS = ["disk", "s3"] as const;
+export type StorageBackend = (typeof STORAGE_BACKENDS)[number];
+
+/** Which `SessionStorage` to construct and what it needs. See store/create-storage.ts. */
+export type StorageConfig =
+  | { backend: "disk"; dataDir: string }
+  | {
+      backend: "s3";
+      bucket: string;
+      region: string;
+      /** Only for S3-compatible stores (MinIO); unset means the regional S3 endpoint. */
+      endpoint: string | undefined;
+      accessKeyId: string;
+      secretAccessKey: string;
+    };
+
+/** Everything the server can be told from the environment, validated and defaulted. */
+export interface ServerConfig {
+  port: number;
+  /** Public origin used to build dashboard URLs, e.g. https://afk.osv.im */
+  publicBaseUrl: string;
+  /** Absolute path to the built dashboard (packages/web/dist). */
+  webDistDir: string;
+  storage: StorageConfig;
+  limits: AdmissionLimits;
+  /** Server-owned cap on how long one session accepts frames. */
+  maxSessionDurationSeconds: number;
+  /** How long after a session ends its data is kept before the sweeper deletes it. */
+  retentionDays: number;
+  sweepIntervalSeconds: number;
+  /** How often time-based rules run and idle ended sessions are evicted from memory. */
+  tickIntervalSeconds: number;
+  evictEndedAfterSeconds: number;
+  sseKeepaliveSeconds: number;
+}
+
+/** Thrown by `loadConfig` with one line per problem, each naming the variable. */
+export class ConfigError extends Error {
+  constructor(readonly problems: string[]) {
+    super(`invalid configuration:\n  ${problems.join("\n  ")}`);
+    this.name = "ConfigError";
+  }
+}
+
+/** An optional string variable; an empty value counts as unset, like a shell would treat it. */
+const optionalString = z
+  .string()
+  .optional()
+  .transform((raw) => (raw === undefined || raw === "" ? undefined : raw));
+
+/** A whole number with a default and a lower (and optional upper) bound. */
+function integer(defaultValue: number, min: number, max = Number.MAX_SAFE_INTEGER) {
+  return optionalString.transform((raw, ctx) => {
+    if (raw === undefined) {
+      return defaultValue;
+    }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      const range = max === Number.MAX_SAFE_INTEGER ? `>= ${min}` : `between ${min} and ${max}`;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `expected a whole number ${range}, got "${raw}"`,
+      });
+      return z.NEVER;
+    }
+    return value;
+  });
+}
+
+/** One of a fixed set of words, with a default. */
+function oneOf<const T extends readonly [string, ...string[]]>(values: T, defaultValue: T[number]) {
+  return optionalString.transform((raw, ctx): T[number] => {
+    if (raw === undefined) {
+      return defaultValue;
+    }
+    if (!values.includes(raw)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `expected one of ${values.join(", ")}, got "${raw}"`,
+      });
+      return z.NEVER;
+    }
+    return raw;
+  });
+}
+
+/** Variables that must be set when `AFK_STORAGE=s3`. */
+const S3_REQUIRED_VARIABLES = [
+  "AFK_S3_BUCKET",
+  "AFK_S3_REGION",
+  "AFK_S3_ACCESS_KEY_ID",
+  "AFK_S3_SECRET_ACCESS_KEY",
+] as const;
+
+const EnvSchema = z
+  .object({
+    AFK_PORT: integer(CONFIG_DEFAULTS.port, 1, MAX_TCP_PORT),
+    AFK_PUBLIC_BASE_URL: optionalString,
+    AFK_WEB_DIST: optionalString,
+
+    AFK_STORAGE: oneOf(STORAGE_BACKENDS, "disk"),
+    AFK_DATA_DIR: optionalString,
+    AFK_S3_BUCKET: optionalString,
+    AFK_S3_REGION: optionalString,
+    AFK_S3_ENDPOINT: optionalString,
+    AFK_S3_ACCESS_KEY_ID: optionalString,
+    AFK_S3_SECRET_ACCESS_KEY: optionalString,
+
+    AFK_MAX_ACTIVE_SESSIONS: integer(CONFIG_DEFAULTS.maxActiveSessions, 1),
+    AFK_MAX_STREAMS_PER_SESSION: integer(CONFIG_DEFAULTS.maxStreamsPerSession, 1),
+    AFK_MAX_SESSION_DURATION_SECONDS: integer(CONFIG_DEFAULTS.maxSessionDurationSeconds, 1),
+
+    AFK_RETENTION_DAYS: integer(CONFIG_DEFAULTS.retentionDays, 0),
+    AFK_SWEEP_INTERVAL_SECONDS: integer(CONFIG_DEFAULTS.sweepIntervalSeconds, 1),
+
+    AFK_TICK_INTERVAL_SECONDS: integer(CONFIG_DEFAULTS.tickIntervalSeconds, 1),
+    AFK_EVICT_ENDED_AFTER_SECONDS: integer(CONFIG_DEFAULTS.evictEndedAfterSeconds, 0),
+    AFK_SSE_KEEPALIVE_SECONDS: integer(CONFIG_DEFAULTS.sseKeepaliveSeconds, 1),
+
+    // RESERVED(versioning): AFK_MIN_CLIENT_VERSION and AFK_MIN_PROTOCOL_VERSION are
+    // being added in a separate change (minimum client version check, BACKLOG.md
+    // "Hardening (server)"). Add them here and to docs/CONFIGURATION.md together.
+  })
+  .superRefine((env, ctx) => {
+    if (env.AFK_STORAGE !== "s3") {
+      return;
+    }
+    for (const name of S3_REQUIRED_VARIABLES) {
+      if (env[name] === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [name],
+          message: "required when AFK_STORAGE=s3",
+        });
+      }
+    }
+  });
+
+type ParsedEnv = z.infer<typeof EnvSchema>;
+
+function storageConfig(env: ParsedEnv, defaultDataDir: string): StorageConfig {
+  if (env.AFK_STORAGE === "disk") {
+    return { backend: "disk", dataDir: env.AFK_DATA_DIR ?? defaultDataDir };
+  }
+  // superRefine has already rejected the s3 backend without these set.
+  return {
+    backend: "s3",
+    bucket: env.AFK_S3_BUCKET ?? "",
+    region: env.AFK_S3_REGION ?? "",
+    endpoint: env.AFK_S3_ENDPOINT,
+    accessKeyId: env.AFK_S3_ACCESS_KEY_ID ?? "",
+    secretAccessKey: env.AFK_S3_SECRET_ACCESS_KEY ?? "",
+  };
+}
+
+/**
+ * Parses and validates the `AFK_*` variables. Throws `ConfigError` naming every variable
+ * that is wrong. `defaultPaths` exists so tests can pass a temp directory.
+ */
+export function loadConfig(
+  env: NodeJS.ProcessEnv,
+  defaultPaths: typeof DEFAULT_PATHS = DEFAULT_PATHS,
+): ServerConfig {
+  const parsed = EnvSchema.safeParse(env);
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map(
+      (issue) => `${issue.path.join(".")}: ${issue.message}`,
+    );
+    throw new ConfigError(problems);
+  }
+  const value = parsed.data;
+  return {
+    port: value.AFK_PORT,
+    publicBaseUrl: value.AFK_PUBLIC_BASE_URL ?? `http://localhost:${value.AFK_PORT}`,
+    webDistDir: value.AFK_WEB_DIST ?? defaultPaths.webDistDir,
+    storage: storageConfig(value, defaultPaths.dataDir),
+    limits: {
+      maxActiveSessions: value.AFK_MAX_ACTIVE_SESSIONS,
+      maxStreamsPerSession: value.AFK_MAX_STREAMS_PER_SESSION,
+    },
+    maxSessionDurationSeconds: value.AFK_MAX_SESSION_DURATION_SECONDS,
+    retentionDays: value.AFK_RETENTION_DAYS,
+    sweepIntervalSeconds: value.AFK_SWEEP_INTERVAL_SECONDS,
+    tickIntervalSeconds: value.AFK_TICK_INTERVAL_SECONDS,
+    evictEndedAfterSeconds: value.AFK_EVICT_ENDED_AFTER_SECONDS,
+    sseKeepaliveSeconds: value.AFK_SSE_KEEPALIVE_SECONDS,
+  };
+}
+
+function describeStorage(storage: StorageConfig): string {
+  if (storage.backend === "disk") {
+    return `storage disk (${storage.dataDir})`;
+  }
+  // Credentials are never printed, not even partially.
+  const endpoint = storage.endpoint === undefined ? "" : `, endpoint ${storage.endpoint}`;
+  return `storage s3 (bucket ${storage.bucket}, region ${storage.region}${endpoint})`;
+}
+
+/** One line for the startup log with every effective setting and no secrets. */
+export function describeConfig(config: ServerConfig): string {
+  return [
+    `port ${config.port}`,
+    `public base ${config.publicBaseUrl}`,
+    `web dist ${config.webDistDir}`,
+    describeStorage(config.storage),
+    `limits ${config.limits.maxActiveSessions} sessions x ${config.limits.maxStreamsPerSession} streams`,
+    `max session ${config.maxSessionDurationSeconds}s`,
+    `retention ${config.retentionDays}d (sweep every ${config.sweepIntervalSeconds}s)`,
+    `tick ${config.tickIntervalSeconds}s`,
+    `evict ended after ${config.evictEndedAfterSeconds}s`,
+    `sse keepalive ${config.sseKeepaliveSeconds}s`,
+  ].join(", ");
+}

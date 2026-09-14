@@ -1,12 +1,20 @@
 import type { Session, SessionStore } from "./store/sessions.ts";
 
+/**
+ * What route modules need at request time. `index.ts` builds it from the validated
+ * `ServerConfig` (config.ts); tests build it by hand with an in-memory store.
+ */
 export interface AppConfig {
   /** Public origin used to build dashboard URLs, e.g. https://afk.osv.im */
   publicBaseUrl: string;
   /** Absolute path to the built dashboard (packages/web/dist). */
   webDistDir: string;
   limits: AdmissionLimits;
+  /** How often an SSE stream sends a comment so proxies and browsers keep it open. */
+  sseKeepaliveMs: number;
 }
+
+export const DEFAULT_SSE_KEEPALIVE_MS = 15_000;
 
 /**
  * Admission control. Sized for the smallest Lightsail container node (0.25 vCPU,
