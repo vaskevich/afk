@@ -8,7 +8,7 @@ import globals from "globals";
 
 export default tseslint.config(
   {
-    ignores: ["**/node_modules/**", "**/dist/**", "pnpm-lock.yaml"],
+    ignores: ["**/node_modules/**", "**/dist/**", "pnpm-lock.yaml", ".claude/worktrees/**"],
   },
   // Applied before the per-file blocks below (rather than after, its more common spot)
   // because it turns `curly` off defensively, and each block turns it back on: bracing

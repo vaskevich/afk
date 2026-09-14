@@ -4,3 +4,4 @@ pnpm-lock.yaml
 .terraform
 *.tfstate
 *.tfstate.*
+.claude/worktrees

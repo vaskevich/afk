@@ -4,3 +4,4 @@ dist/
 .DS_Store
 # server-side session storage (dev)
 packages/server/data/
+.claude/worktrees/
