@@ -172,16 +172,18 @@ http_request() { # curl args...
 collect_system() {
   # %cpu per process is the kernel's recent decayed average; summed and divided by
   # core count it gives "percent of the whole machine" and is cheap (~20 ms).
-  local cpu load1 load5 load15 pressure page_size swap_total_mb swap_used_mb
+  local cpu load1 load5 load15 pressure swap_total_mb swap_used_mb
   cpu=$(ps -A -o %cpu= | awk -v n="$HOST_CPU_COUNT" '{ s += $1 } END { printf "%.1f", s / n }')
 
   # vm.loadavg looks like "{ 4.16 4.98 4.98 }"
+  # shellcheck disable=SC2046 # splitting the three numbers into $1..$3 is the point
   set -- $(sysctl -n vm.loadavg | tr -d '{}')
   load1=$1; load5=$2; load15=$3
 
   pressure=$(sysctl -n kern.memorystatus_vm_pressure_level)
 
   # vm.swapusage looks like "total = 10240.00M  used = 9179.50M  free = 1060.50M  (encrypted)"
+  # shellcheck disable=SC2046 # splitting the words into $1..$6 is the point
   set -- $(sysctl -n vm.swapusage | tr -d 'M')
   swap_total_mb=$3; swap_used_mb=$6
 
@@ -241,6 +243,7 @@ collect_run() { # state [exitCode]
   err=$(file_size "$RUN_DIR/stderr")
   elapsed=$(( $(now_seconds) - RUN_STARTED ))
   # ps reports rss in KiB; both read as 0 once the process is gone.
+  # shellcheck disable=SC2046 # splitting the two columns into $1 and $2 is the point
   set -- $(ps -o %cpu=,rss= -p "$pid" 2>/dev/null)
   cpu=${1:-0}; rss=${2:-0}
   printf '{"command":"%s","pid":%d,"state":"%s","exitCode":%s,"elapsedSeconds":%d,"process":{"cpuPercent":%s,"rssBytes":%d},"output":{"flavor":"volume","stdoutBytes":%d,"stderrBytes":%d}}' \
@@ -268,7 +271,7 @@ run_sampler_loop() {
 
 gather_host_info() {
   HOST_NAME=$(hostname -s 2>/dev/null || hostname)
-  HOST_PLATFORM=$(uname -s | tr 'A-Z' 'a-z')
+  HOST_PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
   HOST_OS_VERSION=$(sw_vers -productVersion 2>/dev/null || uname -r)
   HOST_CPU_COUNT=$(sysctl -n hw.ncpu)
   HOST_MEMORY_BYTES=$(sysctl -n hw.memsize)
@@ -613,6 +616,7 @@ cmd_start() {
     log "session ended. Dashboard stays available at $DASHBOARD_URL"
     exit 0
   }
+  # shellcheck disable=SC2329 # invoked through the trap finish sets
   abandon() {
     trap - INT TERM
     log "interrupted again; leaving $(queue_count) queued frames unsent in $SESSION_DIR"

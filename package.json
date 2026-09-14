@@ -9,6 +9,7 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "lint:sh": "if command -v shellcheck >/dev/null 2>&1; then shellcheck cli/afk; else echo 'shellcheck not installed (brew install shellcheck); skipping lint:sh'; fi",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build": "pnpm -r build",
