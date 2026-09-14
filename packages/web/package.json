@@ -15,7 +15,7 @@
     "qrcode-generator": "2.0.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "zod": "^3.23.8"
+    "zod": "^4.6.2"
   },
   "devDependencies": {
     "@types/react": "^19.1.0",
