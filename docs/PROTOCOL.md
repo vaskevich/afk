@@ -9,6 +9,7 @@ disagree, the schemas win. Protocol version: 1.
 POST /api/sessions                      client → server   create
 POST /api/sessions/:id/frames           client → server   ingest, repeated (bearer token)
 POST /api/sessions/:id/end              client → server   end (bearer token)
+DELETE /api/sessions/:id                client or anyone  delete (bearer token, or none: the link is the secret)
 GET  /api/sessions/:id/qr               client → server   dashboard URL as a QR code (bearer token)
 GET  /api/sessions/:id                  anyone            summary
 GET  /api/sessions/:id/frames?after=N   dashboard         history
@@ -27,7 +28,11 @@ write access.
 Every route with a `:id` answers `404` with an `ErrorResponse` (`unknown session`) for
 an id that is not exactly 22 base62 characters, before anything else about the request
 is checked (the `X-Afk-Client` header, the bearer token, the session's state), and the
-same `404` for a well-formed id no session has.
+same `404` for a well-formed id no session has. A session that was deleted (see
+"Delete" below) is such an id; for about a minute after the deletion the server still
+remembers it and the `404`'s message is `session deleted` with `details`
+`{ "reason": "deleted" }` (`DeletedSessionDetails`), after which it is the plain
+`unknown session`.
 
 Every client request (create, ingest, end, qr) carries `X-Afk-Client: <name>/<semver>`,
 `bash/0.2.0` today. The server refuses clients below its minimum version, and requests
@@ -160,14 +165,15 @@ Frames whose `sequence` is at or below the server's latest for that stream are
 counted as duplicates and ignored. That makes retries idempotent: a batch that was
 received but whose acknowledgement was lost is resent and skipped. Status codes:
 
-| code                        | meaning                                              | client behaviour                        |
-| --------------------------- | ---------------------------------------------------- | --------------------------------------- |
-| 200                         | accepted                                             | delete the batch                        |
-| 400 / 401 / 404 / 413       | the server will never accept this batch              | park it in `rejected/`, keep going      |
-| 410                         | session ended or past its maximum duration           | stop the session                        |
-| 422                         | a frame's stream would exceed `maxStreamsPerSession` | park it in `rejected/`, keep going      |
-| 426                         | the server no longer talks to this client version    | stop the session, print the update hint |
-| anything else / no response | transient                                            | keep the batch, back off, retry         |
+| code                        | meaning                                              | client behaviour                                       |
+| --------------------------- | ---------------------------------------------------- | ------------------------------------------------------ |
+| 200                         | accepted                                             | delete the batch                                       |
+| 400 / 401 / 413             | the server will never accept this batch              | park it in `rejected/`, keep going                     |
+| 404                         | the session was deleted (see "Delete")               | stop the session for good: drop the queue, never chain |
+| 410                         | session ended or past its maximum duration           | stop the session (`afk start` chains to a successor)   |
+| 422                         | a frame's stream would exceed `maxStreamsPerSession` | park it in `rejected/`, keep going                     |
+| 426                         | the server no longer talks to this client version    | stop the session, print the update hint                |
+| anything else / no response | transient                                            | keep the batch, back off, retry                        |
 
 413 means the body is over the ingest cap (1 MiB; `details.limit`), which a
 well-behaved client never reaches (see the arithmetic in `routes/frames.ts`). 422 means
@@ -177,6 +183,15 @@ The client cannot fix either by retrying, so the batch is parked the same way as
 permanent rejection. 426 is the version check described under "Session lifecycle": a
 client that was fine when it created the session but has since been retired keeps its
 queue on disk and stops, like a 410, so nothing sampled is lost.
+
+404 is the deletion signal. The server never forgets a session it created while its
+client is still sending for any other reason (storage is durable across restarts, and
+the sweeper only touches sessions that ended days ago), so a 404 on ingest or end means
+someone deleted it: the client stops sampling and sending, drops what it had queued
+(there is nothing to send it to), prints one line saying so, and does not chain, which
+is the difference from a 410. While the server remembers the deletion the body says so
+(`session deleted`, `details.reason` `deleted`); the client treats the plain `unknown
+session` the same way.
 
 ### End
 
@@ -193,6 +208,50 @@ Marks the session ended and returns the session summary. A session's `status` is
 A silent session gets a `client.stale` event after 60 s as the early warning, then the
 end; both reach an open dashboard over the stream. Retention counts from `endedAt`, or
 from the cap for an expired session.
+
+### Delete
+
+`DELETE /api/sessions/:id` removes the session and every frame it held from memory and
+storage, at once, whatever its status; retention (seven days after the end) is
+otherwise the only way a session goes away. Response:
+
+```json
+{ "sessionId": "D3FzMqK8qOLVva9LoHF9uc", "frames": 3412 }
+```
+
+Two callers. The client (`afk delete [id]`) sends its ingest token as the bearer like
+every other write. The dashboard has no token and sends none: anyone holding the link
+may delete the session, because holding the link already means seeing everything in it
+(the id is the secret; see the decision log in [ARCHITECTURE.md](ARCHITECTURE.md)). A
+bearer that is sent must be the right one (`401`), so a client with a stale token is
+told rather than deleting blindly. The route is not version-checked, since the
+dashboard sends no `X-Afk-Client`.
+
+A session that is still running is stopped first: its open events are closed, its
+open streams receive `end` with `reason: "deleted"` (see "Stream" below) and are
+closed, and its slot is freed. The client learns on its next request: ingest and end
+answer `404` (see the ingest table above), and it stops without chaining. Nothing is
+sent to the client; it is the next `POST` that tells it.
+
+Status codes:
+
+| code | meaning                                                                                                     |
+| ---- | ----------------------------------------------------------------------------------------------------------- |
+| 200  | deleted; the body above                                                                                     |
+| 401  | a bearer was sent and it is not the session's ingest token                                                  |
+| 403  | the id is `demo`, the session the dashboard renders from a built-in fixture; it is refused by name          |
+| 404  | no such session: never issued, already deleted (`details.reason` `deleted` while remembered), or swept away |
+
+Deleting is idempotent in the sense that a second delete is the same `404` as any other
+read of the id. Chain links are not rewritten: a neighbour's `previousSessionId` or
+`nextSessionId` keeps naming the deleted session, and the dashboard renders it as a link
+that opens to "not found", which it handles already.
+
+The demo session (`DEMO_SESSION_ID`, `demo`, in shared) exists only in the dashboard
+(`packages/web/src/data/fixtureSource.ts`); the server has no record of it and its id is
+not one the server issues, so every other route answers `404` for it. `DELETE` alone is
+answered `403` with `the demo session cannot be deleted`, and the dashboard shows no
+delete control on it.
 
 ### QR code
 

@@ -1,16 +1,19 @@
 import { createMiddleware } from "hono/factory";
 import type { AppDeps, AppEnv } from "../env.ts";
-import { errorResponse } from "../http/errors.ts";
+import { errorResponse, sessionNotFound } from "../http/errors.ts";
 
 /**
  * Resolves `:sessionId`, checks the bearer ingest token, and rejects sessions that are
- * no longer active with 410 Gone (the client treats that as "stop sending").
+ * no longer active with 410 Gone (the client treats that as "stop sending"). A session
+ * that was deleted answers 404 (with `reason: "deleted"` while the store remembers it),
+ * which the client treats as "the session is gone for good: stop, and do not chain".
  */
 export function ingestAuth({ store }: AppDeps) {
   return createMiddleware<AppEnv>(async (c, next) => {
-    const session = await store.get(c.req.param("sessionId") ?? "");
+    const sessionId = c.req.param("sessionId") ?? "";
+    const session = await store.get(sessionId);
     if (!session) {
-      return errorResponse(c, 404, "unknown session");
+      return sessionNotFound(c, store.wasDeleted(sessionId));
     }
 
     const auth = c.req.header("authorization") ?? "";

@@ -109,11 +109,9 @@ it.
 
 Hono on Node. Layout is documented at the top of `src/app.ts`:
 
-- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end, the
-  dashboard URL as a QR code), `frames` (ingest), `stream` (history + SSE), `web` (built
-  dashboard).
-- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end),
-  `frames` (ingest), `stream` (history + SSE), `install` (the `/install` one-liner and
+- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end, delete,
+  the dashboard URL as a QR code, and the refusal to delete the demo), `frames`
+  (ingest), `stream` (history + SSE), `install` (the `/install` one-liner and
   `/cli/afk`, the client itself), `web` (built dashboard).
 - `middleware/session-id.ts` answers 404 for a `:sessionId` that is not the 22 base62
   characters the server issues, before any route or storage backend sees it.
@@ -133,7 +131,11 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   S3-compatible one used against Lightsail object storage in production.
   `store/create-storage.ts` builds whichever `AFK_STORAGE=disk|s3` asks for.
 - `store/sweeper.ts` is retention: it deletes sessions `AFK_RETENTION_DAYS` after they
-  end and evicts them from the store's cache, on every backend.
+  end and evicts them from the store's cache, on every backend. `SessionStore.delete`
+  is the on-demand version behind `DELETE /api/sessions/:id`: the same storage call,
+  plus stopping a session that is still running (its streams get `end` with `reason:
+"deleted"`) and a tombstone in the negative id cache so the client's next request and
+  a dashboard reload get a 404 that says why.
 - `config.ts` parses every `AFK_*` variable once at startup into a validated
   `ServerConfig` (see [CONFIGURATION.md](CONFIGURATION.md)); `index.ts` turns that into
   the in-process shapes (`AppConfig` in `env.ts`, the store's options, the sweeper's).
@@ -388,6 +390,21 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** Anyone holding a session's link may delete it. `DELETE
+/api/sessions/:id` takes the ingest token when the caller has one (`afk delete`) and
+  nothing at all when it does not (the dashboard's Delete control), because the id is
+  already the secret: 22 characters of base62, unguessable, and whoever has it sees
+  everything the session recorded, which is the greater power. There are no accounts to
+  tie ownership to, and a delete-only token in the URL would leak the same way the URL
+  does. Same trust model as viewing, written down here so it is not re-litigated as a
+  hardening item. The push-back to a client still sending is a 404 on ingest (the
+  session no longer exists; the server never forgets a live session for any other
+  reason), kept apart from the 410 the client answers by chaining; a tombstone in the
+  negative id cache makes that 404 cheap and lets it say "deleted" for a minute. The
+  demo session, which lives only in the dashboard's fixture, is refused by name (403)
+  so the one link everybody has cannot be used to make the landing page's example
+  vanish. Chain links are left dangling rather than rewritten: the neighbour already
+  renders a link, and a link to a 404 is the truth.
 - **2026-09-14** A cold dashboard load costs round trips, not bytes. The first visit to
   `/s/DbTEUHkKfXpo7biKEmk7XC` after the cache had let the session go took 40 s on the
   hosted instance, every reload after it milliseconds: the session was 4,320 frames in

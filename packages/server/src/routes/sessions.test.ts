@@ -10,11 +10,13 @@ import { DEFAULT_LIMITS, DEFAULT_MINIMUM_VERSIONS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
-import { MAX_CREATE_BODY_BYTES } from "./sessions.ts";
+import { sweepExpiredSessions } from "../store/sweeper.ts";
+import { DEMO_SESSION_DELETE_MESSAGE, MAX_CREATE_BODY_BYTES } from "./sessions.ts";
 import {
   CLIENT_VERSION_HEADER,
   chainTestSession,
   createTestSession,
+  deleteTestSession,
   endTestSession,
   makeAppConfig,
   postFrames,
@@ -514,5 +516,162 @@ describe("POST /api/sessions/:id/end", () => {
     const res = await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
 
     expect(res.status).toBe(410);
+  });
+});
+
+describe("DELETE /api/sessions/:id", () => {
+  const deletedDetails = { reason: "deleted" };
+
+  it("deletes a running session with the client's token, and every read of it is then a 404 that says deleted", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0), makeSystemFrame(1)]);
+
+    const res = await deleteTestSession(app, sessionId, ingestToken);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessionId, frames: 2 });
+    const summary = await app.request(`/api/sessions/${sessionId}`);
+    const frames = await app.request(`/api/sessions/${sessionId}/frames`);
+    const stream = await app.request(`/api/sessions/${sessionId}/stream`);
+    expect(summary.status).toBe(404);
+    expect(await summary.json()).toEqual({ error: "session deleted", details: deletedDetails });
+    expect(frames.status).toBe(404);
+    expect(stream.status).toBe(404);
+  });
+
+  it("deletes without any token, since holding the link is holding the session, and needs no X-Afk-Client", async () => {
+    const app = buildApp();
+    const { sessionId } = await createTestSession(app);
+
+    const res = await deleteTestSession(app, sessionId);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessionId, frames: 0 });
+    expect((await app.request(`/api/sessions/${sessionId}`)).status).toBe(404);
+  });
+
+  it("returns 401 for a bearer that is not the session's token, and keeps the session", async () => {
+    const app = buildApp();
+    const { sessionId } = await createTestSession(app);
+
+    const res = await deleteTestSession(app, sessionId, "wrong-token");
+
+    expect(res.status).toBe(401);
+    expect((await app.request(`/api/sessions/${sessionId}`)).status).toBe(200);
+  });
+
+  it("answers the client's next frame post and end with a 404 saying deleted, not the 410 that means chain", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+    await deleteTestSession(app, sessionId);
+
+    const post = await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    const end = await endTestSession(app, sessionId, ingestToken);
+
+    expect(post.status).toBe(404);
+    expect(await post.json()).toEqual({ error: "session deleted", details: deletedDetails });
+    expect(end.status).toBe(404);
+    expect(await end.json()).toEqual({ error: "session deleted", details: deletedDetails });
+  });
+
+  it("is idempotent: a second delete is the same 404 as any other read of a deleted id", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+    await deleteTestSession(app, sessionId, ingestToken);
+
+    const again = await deleteTestSession(app, sessionId, ingestToken);
+
+    expect(again.status).toBe(404);
+    expect(await again.json()).toEqual({ error: "session deleted", details: deletedDetails });
+  });
+
+  it("returns a plain 404 for an id that never existed, well formed or not", async () => {
+    const app = buildApp();
+
+    const wellFormed = await deleteTestSession(app, "aaaaaaaaaaaaaaaaaaaaaa");
+    const malformed = await deleteTestSession(app, "does-not-exist");
+
+    expect(wellFormed.status).toBe(404);
+    expect(await wellFormed.json()).toEqual({ error: "unknown session" });
+    expect(malformed.status).toBe(404);
+    expect(await malformed.json()).toEqual({ error: "unknown session" });
+  });
+
+  it("refuses to delete the demo session by name with 403", async () => {
+    const app = buildApp();
+
+    const res = await deleteTestSession(app, "demo");
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: DEMO_SESSION_DELETE_MESSAGE });
+    // Only DELETE is special: reading the demo from the server is still unknown.
+    expect((await app.request("/api/sessions/demo")).status).toBe(404);
+  });
+
+  it("deletes a session that has already ended", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    await endTestSession(app, sessionId, ingestToken);
+
+    const res = await deleteTestSession(app, sessionId);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessionId, frames: 1 });
+    expect((await app.request(`/api/sessions/${sessionId}`)).status).toBe(404);
+  });
+
+  it("frees the slot a running session held, so a create at capacity succeeds again", async () => {
+    const app = buildApp({
+      maxActiveSessions: 1,
+      maxStreamsPerSession: 10,
+      maxFramesPerSession: 15_000,
+    });
+    const first = await createTestSession(app);
+    expect((await createTestSession(app)).res.status).toBe(503);
+
+    await deleteTestSession(app, first.sessionId);
+    const afterDeleting = await createTestSession(app);
+
+    expect(afterDeleting.res.status).toBe(201);
+  });
+
+  it("leaves nothing for the retention sweeper to find or trip over", async () => {
+    const storage = new MemorySessionStorage();
+    const store = new SessionStore(storage, { limits: DEFAULT_LIMITS });
+    const app = createApp(makeAppConfig(), store);
+    const kept = await createTestSession(app);
+    const { sessionId, ingestToken } = await createTestSession(app);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    await endTestSession(app, sessionId, ingestToken);
+    await deleteTestSession(app, sessionId);
+
+    // No retention at all: anything ended would go now. The one session storage still
+    // lists is the active one, which retention never touches.
+    const sweep = await sweepExpiredSessions(storage, store, Date.now(), 0);
+
+    expect(sweep).toEqual({ scanned: 1, deleted: 0 });
+    await expect(storage.listSessionIds()).resolves.toEqual([kept.sessionId]);
+    expect(store.stats()).toMatchObject({ sessionsInMemory: 1, framesInMemory: 0 });
+  });
+
+  it("leaves a chained neighbour's link pointing at the deleted session, which reads as 404", async () => {
+    const app = buildApp();
+    const first = await createTestSession(app);
+    const next = await chainTestSession(app, first.sessionId, first.ingestToken);
+
+    const res = await deleteTestSession(app, first.sessionId);
+
+    expect(res.status).toBe(200);
+    expect(await (await app.request(`/api/sessions/${next.sessionId}`)).json()).toMatchObject({
+      status: "active",
+      previousSessionId: first.sessionId,
+    });
+    expect((await app.request(`/api/sessions/${first.sessionId}`)).status).toBe(404);
+    // The successor is untouched: it still takes frames and can be deleted on its own.
+    const post = await postFrames(app, next.sessionId, next.ingestToken, [makeSystemFrame(0)]);
+    expect(post.status).toBe(200);
+    expect((await deleteTestSession(app, next.sessionId)).status).toBe(200);
   });
 });

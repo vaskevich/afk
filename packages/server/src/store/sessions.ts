@@ -5,6 +5,7 @@ import type {
   SessionSummary,
   SessionStatus,
   StoredFrame,
+  StreamEndReason,
 } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import { DEFAULT_LIMITS, type AdmissionLimits } from "../env.ts";
@@ -16,11 +17,15 @@ import type { SessionRecord, SessionStorage } from "./storage.ts";
 
 export type { StoredFrame };
 
-/** Something that happened to a session that live subscribers (SSE) care about. */
+/**
+ * Something that happened to a session that live subscribers (SSE) care about. `ended`
+ * carries why (`StreamEndReason`): a deleted session's last summary is the same shape
+ * as an ended one's, and the reason is what tells a viewer the difference.
+ */
 export type SessionEvent =
   | { type: "frames"; frames: StoredFrame[] }
   | { type: "events"; events: AnomalyEvent[] }
-  | { type: "ended"; summary: SessionSummary };
+  | { type: "ended"; summary: SessionSummary; reason: StreamEndReason };
 export type SessionListener = (event: SessionEvent) => void;
 
 /** A session held in memory: the persisted record plus live bookkeeping. */
@@ -70,6 +75,22 @@ export const DEFAULT_TICK_INTERVAL_MS = 5_000;
 export const UNKNOWN_ID_TTL_MS = 60_000;
 /** Bound on remembered unknown ids; past it the oldest entry is forgotten first. */
 export const UNKNOWN_ID_CACHE_MAX_ENTRIES = 4096;
+
+/**
+ * An entry of the negative id cache: when to forget it, and whether the id is unknown
+ * because it was deleted (so a 404 can say so, see `wasDeleted`) rather than never
+ * issued.
+ */
+interface UnknownIdEntry {
+  expiresAt: number;
+  deleted: boolean;
+}
+
+/** What `delete` reports back: the record that was removed and how many frames went with it. */
+export interface DeleteResult {
+  sessionId: string;
+  frames: number;
+}
 
 /** Whether a record is still accepting frames, was ended by the client, or ran past its cap. */
 export function sessionStatus(record: SessionRecord, now: number): SessionStatus {
@@ -129,8 +150,8 @@ export class TooManyStreamsError extends Error {
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
   private readonly loading = new Map<string, Promise<Session | undefined>>();
-  /** Ids storage did not know, each with the time its entry expires. Insertion order is age. */
-  private readonly unknownIds = new Map<string, number>();
+  /** Ids storage did not know (or that were deleted), each with when to forget it. Insertion order is age. */
+  private readonly unknownIds = new Map<string, UnknownIdEntry>();
   private readonly options: SessionStoreOptions;
 
   constructor(
@@ -241,18 +262,33 @@ export class SessionStore {
   }
 
   private isRememberedUnknown(sessionId: string, now: number): boolean {
-    const expiresAt = this.unknownIds.get(sessionId);
-    if (expiresAt === undefined) {
-      return false;
-    }
-    if (expiresAt <= now) {
-      this.unknownIds.delete(sessionId);
-      return false;
-    }
-    return true;
+    return this.rememberedUnknown(sessionId, now) !== undefined;
   }
 
-  private rememberUnknown(sessionId: string, now: number): void {
+  /**
+   * True while the store remembers that `sessionId` was deleted (the same
+   * `UNKNOWN_ID_TTL_MS` as any unknown id), so a 404 can say "deleted" rather than
+   * "unknown" to the client that was still sending to it and to a dashboard that
+   * reloads. After that the id is simply unknown, which the client handles the same way.
+   */
+  wasDeleted(sessionId: string, now = Date.now()): boolean {
+    return this.rememberedUnknown(sessionId, now)?.deleted ?? false;
+  }
+
+  /** The live negative-cache entry for `sessionId`, dropping it once it has expired. */
+  private rememberedUnknown(sessionId: string, now: number): UnknownIdEntry | undefined {
+    const entry = this.unknownIds.get(sessionId);
+    if (entry === undefined) {
+      return undefined;
+    }
+    if (entry.expiresAt <= now) {
+      this.unknownIds.delete(sessionId);
+      return undefined;
+    }
+    return entry;
+  }
+
+  private rememberUnknown(sessionId: string, now: number, deleted = false): void {
     // A Map iterates in insertion order, so its first key is the oldest entry.
     if (this.unknownIds.size >= UNKNOWN_ID_CACHE_MAX_ENTRIES) {
       const oldest = this.unknownIds.keys().next().value;
@@ -260,7 +296,7 @@ export class SessionStore {
         this.unknownIds.delete(oldest);
       }
     }
-    this.unknownIds.set(sessionId, now + UNKNOWN_ID_TTL_MS);
+    this.unknownIds.set(sessionId, { expiresAt: now + UNKNOWN_ID_TTL_MS, deleted });
   }
 
   private async loadAndUntrack(sessionId: string, now: number): Promise<Session | undefined> {
@@ -379,7 +415,33 @@ export class SessionStore {
     session.endedAt = endedAt;
     await this.storage.putSession(this.record(session));
     this.emitEvents(session, session.engine.closeAll(session.endedAt));
-    this.emit(session, { type: "ended", summary: this.summary(session) });
+    this.emit(session, { type: "ended", summary: this.summary(session), reason: "ended" });
+  }
+
+  /**
+   * Removes a session and every frame it held, from storage (the same
+   * `deleteSession` the retention sweeper uses) and from memory. A session that is
+   * still running is stopped first: its open events are closed and its subscribers get
+   * an `ended` event whose reason is `deleted`, after which the stream route closes
+   * them. Nothing is persisted on the way out; the record is about to go. Pending
+   * frame writes are drained first so a batch in flight cannot recreate the session's
+   * files after they were removed. The id then goes into the negative cache marked
+   * deleted, so the client's next request and a dashboard reload get a cheap 404 that
+   * says why. Chain links on a neighbouring session are left as they are: the dashboard
+   * renders a link to a 404, which it already handles.
+   */
+  async delete(session: Session, now = Date.now()): Promise<DeleteResult> {
+    const frames = session.frames.length;
+    if (session.endedAt === null) {
+      session.endedAt = Math.min(now, sessionEndMs(session));
+      this.emitEvents(session, session.engine.closeAll(session.endedAt));
+    }
+    this.emit(session, { type: "ended", summary: this.summary(session), reason: "deleted" });
+    await session.writeQueue.drain();
+    await this.storage.deleteSession(session.sessionId);
+    this.sessions.delete(session.sessionId);
+    this.rememberUnknown(session.sessionId, now, true);
+    return { sessionId: session.sessionId, frames };
   }
 
   /** Frames after the given session-wide index (0 = everything). */

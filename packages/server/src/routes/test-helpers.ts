@@ -118,6 +118,22 @@ export async function postFrames(
   );
 }
 
+/**
+ * Deletes a session through the API. With a token it is the client's call (bearer and
+ * `X-Afk-Client`, like end); without one it is the dashboard's, which sends neither.
+ */
+export async function deleteTestSession(
+  app: App,
+  sessionId: string,
+  ingestToken?: string,
+): Promise<Response> {
+  const headers: Record<string, string> =
+    ingestToken === undefined
+      ? {}
+      : { authorization: `Bearer ${ingestToken}`, ...CLIENT_VERSION_HEADER };
+  return app.request(`/api/sessions/${sessionId}`, { method: "DELETE", headers });
+}
+
 /** Ends a session through the API with the session's bearer token. */
 export async function endTestSession(
   app: App,

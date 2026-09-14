@@ -156,6 +156,7 @@ describe("SessionStore", () => {
       expect(received).toContainEqual({
         type: "ended",
         summary: expect.objectContaining({ status: "ended", nextSessionId: next.sessionId }),
+        reason: "ended",
       });
     });
 
@@ -370,6 +371,108 @@ describe("SessionStore", () => {
     });
   });
 
+  describe("delete", () => {
+    it("removes the record and frames from storage and memory, and reports how many frames went", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1)]);
+
+      const result = await store.delete(session);
+
+      expect(result).toEqual({ sessionId: session.sessionId, frames: 2 });
+      await expect(storage.getSession(session.sessionId)).resolves.toBeNull();
+      await expect(storage.readFrames(session.sessionId)).resolves.toEqual([]);
+      expect(store.stats().sessionsInMemory).toBe(0);
+    });
+
+    it("stops a running session first: closes its open events and tells subscribers it was deleted", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage());
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, highCpuFrames(31));
+      const received: SessionEvent[] = [];
+      store.subscribe(session, (event) => received.push(event));
+
+      await store.delete(session, T0_MS + 40_000);
+
+      expect(session.engine.events).toEqual([
+        expect.objectContaining({ kind: "cpu.high", endedAt: T0_MS + 40_000 }),
+      ]);
+      expect(received.at(-1)).toEqual({
+        type: "ended",
+        summary: expect.objectContaining({ status: "ended", endedAt: T0_MS + 40_000 }),
+        reason: "deleted",
+      });
+    });
+
+    it("remembers the id as deleted, so the next get is answered from memory and says why", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const getSessionSpy = vi.spyOn(storage, "getSession");
+
+      await store.delete(session, T0_MS);
+      const found = await store.get(session.sessionId, T0_MS + 1);
+
+      expect(found).toBeUndefined();
+      expect(getSessionSpy).not.toHaveBeenCalled();
+      expect(store.wasDeleted(session.sessionId, T0_MS + UNKNOWN_ID_TTL_MS - 1)).toBe(true);
+      expect(store.wasDeleted(session.sessionId, T0_MS + UNKNOWN_ID_TTL_MS)).toBe(false);
+    });
+
+    it("reports an id that was never issued as unknown, not deleted", async () => {
+      const store = new SessionStore(new MemorySessionStorage());
+
+      await store.get("doesNotExist", T0_MS);
+
+      expect(store.wasDeleted("doesNotExist", T0_MS + 1)).toBe(false);
+    });
+
+    it("waits for a frame write in flight so the batch cannot recreate the session's files", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const append = storage.appendFrames.bind(storage);
+      vi.spyOn(storage, "appendFrames").mockImplementation(async (sessionId, frames) => {
+        await gate;
+        return append(sessionId, frames);
+      });
+      const ingesting = store.ingest(session, [makeSystemFrame(0)]);
+
+      const deleting = store.delete(session);
+      release();
+      await ingesting;
+      await deleting;
+
+      await expect(storage.readFrames(session.sessionId)).resolves.toEqual([]);
+    });
+
+    it("deletes an already ended session without emitting a second end to anyone", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.end(session, T0_MS + 1_000);
+      const received: SessionEvent[] = [];
+      store.subscribe(session, (event) => received.push(event));
+
+      await store.delete(session, T0_MS + 2_000);
+
+      expect(session.endedAt).toBe(T0_MS + 1_000);
+      expect(received).toEqual([
+        {
+          type: "ended",
+          summary: expect.objectContaining({ endedAt: T0_MS + 1_000 }),
+          reason: "deleted",
+        },
+      ]);
+      await expect(storage.getSession(session.sessionId)).resolves.toBeNull();
+    });
+  });
+
   describe("ingest", () => {
     it("assigns session-wide indexes across streams in the order frames arrive", async () => {
       const store = new SessionStore(new MemorySessionStorage());
@@ -514,6 +617,7 @@ describe("SessionStore", () => {
       expect(received).toContainEqual({
         type: "ended",
         summary: expect.objectContaining({ status: "ended", endedAt: T0_MS + 1000 }),
+        reason: "ended",
       });
     });
 
@@ -686,6 +790,7 @@ describe("SessionStore", () => {
       expect(received).toContainEqual({
         type: "ended",
         summary: expect.objectContaining({ status: "ended", endedAt: T0_MS + 605_000 }),
+        reason: "ended",
       });
       // The early warning is closed at the same moment the session ends.
       expect(session.engine.events).toEqual([
