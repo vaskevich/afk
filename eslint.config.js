@@ -17,7 +17,7 @@ export default tseslint.config(
   {
     // TypeScript sources: packages/*/src. Type-aware rules use each package's own
     // tsconfig via projectService.
-    files: ["packages/*/src/**/*.ts"],
+    files: ["packages/*/src/**/*.ts", "cli/**/*.ts"],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     plugins: { promise },
     languageOptions: {
