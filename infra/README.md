@@ -119,19 +119,81 @@ aws-vault exec osv_im_admin -- infra/deploy.sh
 
 `deploy.sh`:
 
-1. Builds `afk:latest` from the repo root's `Dockerfile`.
+1. Builds an image (tag from the first argument, else `$IMAGE_TAG`, else
+   `afk:latest`) from the repo root's `Dockerfile`.
 2. Pushes it to the service's private registry with
    `aws lightsail push-container-image` and captures the registered image name
-   (e.g. `:afk.server.3`) from its output.
-3. Reads the bucket name/region/access key out of `tofu output` (never stored in
-   a file) and creates a new deployment with
+   (e.g. `:afk.server.3`) from its output. This needs the `lightsailctl` plugin
+   on `PATH` (not bundled with the AWS CLI) -- see [the AWS
+   docs](https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-install-software.html)
+   to install it locally; `deploy.yml` installs it fresh on every CI run.
+3. Reads the bucket name/access key from the `AFK_S3_BUCKET` /
+   `AFK_S3_ACCESS_KEY_ID` / `AFK_S3_SECRET_ACCESS_KEY` environment variables when
+   set, falling back to `tofu output` for whichever is unset (never stored in a
+   file either way), and creates a new deployment with
    `aws lightsail create-container-service-deployment`: one container (`server`)
    running that image on port 4141, and a public endpoint pointed at it with a
    health check on `/api/health`.
 
 Run it through `aws-vault` (`aws-vault exec osv_im_admin -- infra/deploy.sh`) --
 it never embeds credentials itself, it relies on the AWS CLI picking up
-aws-vault's temporary credentials from the environment.
+aws-vault's temporary credentials from the environment. `deploy.yml` runs the
+same script with credentials from an OIDC-assumed role instead -- see "CI and
+deploys" above.
+
+## CI and deploys
+
+GitHub Actions runs two workflows (`.github/workflows/`):
+
+- **`ci.yml`** -- on every pull request and push to main: `pnpm typecheck`,
+  `pnpm lint`, `pnpm format:check`, `pnpm test`, `pnpm build` in one job, and
+  `tofu fmt -check` + `tofu validate` for `infra/` (no credentials, no state) in
+  another.
+- **`deploy.yml`** -- on `workflow_dispatch` or a push to main, after `ci.yml`'s
+  jobs pass (it calls `ci.yml` as a reusable workflow and `needs` it). The
+  `deploy` job authenticates to AWS via GitHub's OIDC provider -- no long-lived
+  AWS keys stored in GitHub -- then runs `infra/deploy.sh`, the same script
+  described in [Deploys](#deploys) below, with the bucket credentials supplied
+  as environment variables instead of `tofu output` (a GitHub-hosted runner has
+  no local tofu state).
+
+### One-time setup
+
+1. `aws-vault exec osv_im_admin -- tofu -chdir=infra apply` -- besides the
+   container service/bucket, this also provisions `ci.tf`: a GitHub OIDC
+   identity provider (`token.actions.githubusercontent.com`, unless one already
+   exists in this account -- see the comment on `create_github_oidc_provider` in
+   `variables.tf`) and the `afk-github-deploy` IAM role, trusted only by this
+   repo's `main` branch and its `production` GitHub environment, with a policy
+   scoped to exactly the Lightsail actions `deploy.sh` needs (see `ci.tf` for
+   the reasoning and confidence level behind each one).
+
+2. In the GitHub repo, create a **`production` environment**
+   (Settings > Environments > New environment). `deploy.yml`'s deploy job
+   declares `environment: production`; this is also what the IAM role's trust
+   policy in `ci.tf` keys off (a job targeting an environment presents an
+   environment-shaped OIDC subject, not a branch-shaped one). Optionally
+   restrict the environment to deployments from `main` and/or require a
+   reviewer, for a second layer of protection beyond the trust policy.
+
+3. In the GitHub repo, set these under Settings > Secrets and variables >
+   Actions, reading the values from `tofu output` (never commit them):
+
+   ```sh
+   # Variables (not secret, but not meant to be edited by hand either):
+   gh variable set AWS_DEPLOY_ROLE_ARN --body "$(tofu -chdir=infra output -raw github_deploy_role_arn)"
+   gh variable set AFK_S3_BUCKET --body "$(tofu -chdir=infra output -raw bucket_name)"
+
+   # Secrets:
+   gh secret set AFK_S3_ACCESS_KEY_ID --body "$(tofu -chdir=infra output -raw bucket_access_key_id)"
+   gh secret set AFK_S3_SECRET_ACCESS_KEY --body "$(tofu -chdir=infra output -raw bucket_secret_access_key)"
+   ```
+
+   (Or set the same four under the repo's Settings UI, pasting each `tofu
+output -raw ...` value by hand.) If the bucket access key is ever rotated
+   (`tofu apply` after a change to `storage.tf`, or a manual key rotation in the
+   Lightsail console), re-run the two `gh secret set` commands -- GitHub secrets
+   don't track tofu state and won't update themselves.
 
 ## Files
 
@@ -143,8 +205,12 @@ aws-vault's temporary credentials from the environment.
 - `dns.tf` -- Route53 zone data source, certificate validation CNAMEs, and the
   `afk.osv.im` CNAME to the container service's generated hostname.
 - `storage.tf` -- the session-storage bucket and its access key.
-- `outputs.tf` -- URLs and the bucket name/region/access key (secret marked
-  `sensitive`), consumed by `deploy.sh`.
-- `deploy.sh` -- builds the image, pushes it, creates a deployment.
+- `ci.tf` -- GitHub OIDC provider + the `afk-github-deploy` IAM role
+  `.github/workflows/deploy.yml` assumes. See "CI and deploys" above.
+- `outputs.tf` -- URLs, the bucket name/region/access key (secret marked
+  `sensitive`), and the GitHub deploy role ARN, consumed by `deploy.sh` and the
+  one-time GitHub setup above.
+- `deploy.sh` -- builds the image, pushes it, creates a deployment. Shared by a
+  laptop (via `aws-vault`) and `deploy.yml` -- see "CI and deploys" above.
 - `terraform.tfvars.example` -- copy to `terraform.tfvars` (gitignored) and fill
   in `bucket_name`.

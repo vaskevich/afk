@@ -69,8 +69,10 @@ endpoint come from Lightsail; deploys are push-image + new deployment.
 - [x] Rework `infra/` for a container service: service + custom domain certificate + DNS validation records + `afk.osv.im` record in the osv.im zone + Lightsail bucket; drop the instance, key pair, static IP, and cloud-init bootstrap. Bucket access is env vars, not Lightsail "resource access" -- see the decision log entry below.
 - [x] Dockerfile that builds the dashboard and runs the server -- still runs the server via `tsx` (see the next item), not compiled JS
 - [ ] Compile `packages/server` to plain JS instead of running it through `tsx` in the container (the Dockerfile has a TODO for this; `tsx` was moved to `dependencies` in the meantime so it ships in the runtime image)
-- [x] `deploy.sh` becomes build image, push to Lightsail, create deployment
+- [x] `deploy.sh` becomes build image, push to Lightsail, create deployment; refactored to take bucket config from the environment (falling back to `tofu output`) and the image tag from an argument/env, so both a laptop and CI run the exact same script
+- [x] CI: `.github/workflows/ci.yml` (typecheck/lint/format/test/build + `tofu fmt`/`validate` for `infra/`) on every PR and push to main
+- [x] CD: `.github/workflows/deploy.yml` (build, push, deploy via `deploy.sh`) on push to main (gated on CI) or manual dispatch, authenticated to AWS via GitHub OIDC (`infra/ci.tf`'s `afk-github-deploy` role) -- no long-lived AWS keys in GitHub
 - [ ] Confirm SSE passes through the container service load balancer (15 s keepalive is already in place)
-- [ ] Actually run `tofu apply`
+- [ ] Actually run `tofu apply` -- including `ci.tf`'s OIDC provider/role, and then set the GitHub repository secrets/variables and `production` environment `infra/README.md`'s "CI and deploys" section describes, before `deploy.yml` can actually deploy anything
 - [x] Serve the built dashboard from the Node server
 - [ ] Installer one-liner that downloads `cli/afk`

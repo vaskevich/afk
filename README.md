@@ -15,6 +15,10 @@ Status: early prototype. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 - `packages/web` – Vite + React + TanStack dashboard.
 - `infra` – OpenTofu config and deploy script for the `afk.osv.im` deployment.
 - `docs` – architecture, protocol, and extension guides.
+- `.github/workflows` – CI (typecheck/lint/format/test/build, plus `infra/`
+  validation) on every PR and push to main, and a deploy pipeline to
+  `afk.osv.im` on push to main or manual dispatch; see the "CI and deploys"
+  section of [infra/README.md](infra/README.md).
 
 ## Dev
 
