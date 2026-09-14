@@ -32,10 +32,20 @@ A collector is a named kind of measurement. Four places, in this order:
 Per-instance collectors (a wrapped command, a watched log file) use a stream id of
 `<collector>:<shortId>` so each instance gets its own row and sequence space.
 
-Shipped so far: `system`, `run` (`afk run -- <cmd>`), and `processes` (the busiest
-processes with pid, parent pid, cpu, rss, full path, every 5 s). Planned: `agents`
-(running claude / codex counts). See the wire shapes in [PROTOCOL.md](PROTOCOL.md) and
-"Adding an output flavor for `run`" below for extending `run` further.
+Shipped so far: `system`, `run` (`afk run -- <cmd>`), `processes` (the busiest
+processes with pid, parent pid, cpu, rss, full path, every 5 s), and `agents` (how
+many Claude Code sessions are working, waiting on input, or idle, and how many
+subagents are working, every 5 s; counts only, and `available: false` on a machine
+without Claude Code). Codex counts and opt-in session names are on the backlog. See
+the wire shapes in [PROTOCOL.md](PROTOCOL.md) and "Adding an output flavor for `run`"
+below for extending `run` further.
+
+A collector that reads another tool's private state, as `agents` does, is held to
+three things: it reads only what the counts need (never a transcript's contents,
+never a file that is not its business, such as the `.key` files next to the session
+records), it reports `available: false` rather than failing when the layout it
+expects is not there, and it says in the script's own comment block exactly which
+files and fields it depends on, since none of them are documented by the other tool.
 
 ### External collectors (planned)
 

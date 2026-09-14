@@ -448,7 +448,7 @@ http_request() { # curl args...
 # machine right now. The sampler wraps it in a frame envelope. Keep collectors free of
 # interpretation: raw numbers in, server decides what they mean.
 #
-# TODO(collectors): agents (claude/codex). TODO(linux): /proc equivalents.
+# TODO(agents): codex counts, see BACKLOG.md. TODO(linux): /proc equivalents.
 # TODO(plugins): allow any executable printing JSON to act as a collector.
 # ---------------------------------------------------------------------------
 

@@ -12,7 +12,7 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [x] Web: event markers on the timeline once the server emits anomaly events -- `timeline/EventMarkers.tsx` + `clusters.ts`, `StatusBanner`, `NearbyEvents`
 - [x] Server: anomaly rules (cpu sustained high, memory pressure warn/critical, client stale) -- `packages/server/src/rules/`
 - [x] CLI: `afk run -- <cmd>` joins the current session; reports stdout/stderr bytes per tick + exit code
-- [x] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps` -- `collect_processes`, every 5 s on the `processes` stream; `cpu.high` names the top three in `details.topProcesses`. The agents collector is still open, see the wishlist below
+- [x] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps` -- `collect_processes`, every 5 s on the `processes` stream; `cpu.high` names the top three in `details.topProcesses`. The agents collector landed too, see "Agents collector" below
 - [x] Server rules for runs: exited non-zero, no output for N seconds -- `rules/run.ts` (`run.exited`, `run.stalled`)
 - [x] QR code of the dashboard URL so a phone scans it instead of typing it -- rendered on the server for the CLI (`GET /api/sessions/:id/qr`, `utils/qr.ts`, bearer token) and in the browser for the dashboard (`SharePanel.tsx`), so the bash client stays dependency-free; `afk start` prints it, `afk qr` reprints it, `--no-qr` / `AFK_NO_QR=1` skip it
 
@@ -79,28 +79,49 @@ A reliability pass over the hosted instance (one nano container, one bucket, one
 
 Examined and found sound for this scale: the sweeper (server clock only on both sides, active sessions skipped, one session's failure isolated, `session.json` sorts after `frames/` so a partial delete retries next hour), the shutdown order and its 10 s deadline with node as PID 1, sequence-based de-duplication making client retries idempotent, the client's spool cap, 30 s maximum backoff, and the 410/426 stop and 4xx park paths, `deploy.sh`'s rollout polling and `/versionz` check with the previous deployment kept on failure, the OIDC-scoped deploy role (a leak exposes the bucket key through the deployment spec, which infra/README.md already says and covers with rotation), the SSE keepalive verified against the Lightsail front end, body limits, the negative id cache, and a cost that is fixed at about $8 a month with only bucket storage past the bundle able to move it. Live at review time: `/api/health`, `/api/stats`, and `/versionz` answered in about 110 ms, commit `2a339fd`, one session in memory, 4,320 frames, uptime 46 minutes.
 
-## Wishlist: agents collector (claude / codex)
+## Agents collector (claude / codex)
 
-Parked on 2026-09-15. Investigated and cheap to build (about the size of the
-processes collector), but it depends on undocumented tool internals and ships session
-names off the machine, so it waits for a deliberate decision.
+Decided on 2026-09-14 (see the decision log in docs/ARCHITECTURE.md): counts only,
+Claude Code first. The parts still open are below.
 
-- What is observable today: Claude Code writes `~/.claude/sessions/<pid>.json` per
-  running session (`name`, `cwd`, `kind`, `status`, `version`, `startedAt`, `updatedAt`);
-  subagent transcripts live under `~/.claude/projects/<project>/<session>/subagents/`
-  and a file modified in the last minute is a working subagent; Codex has `codex` /
-  `codex app-server` processes and rollouts under `~/.codex/sessions/YYYY/MM/DD/`.
-- Shape: a generic `agents` collector, one entry per agent (tool, pid, name, cwd,
-  status, kind, lastActivityAt) plus per-tool working-subagent counts, sampled every 5 s.
-- The payoff rule: an agent whose transcript has not changed for 10 minutes while its
-  process is alive is almost certainly waiting on a person (permission prompt or
-  question). Lean on transcript inactivity, not the `status` string, until its
-  vocabulary is confirmed across working, idle, and waiting sessions.
-- Privacy: send only the directory basename, make the collector opt-in for hosted
-  servers (default on for self-hosted).
-- Degrade gracefully when the directories are missing or the file shape changes.
-- JSON-heavy in bash; a good first collector for a Python client if that port happens
-  (see docs/CLIENT.md).
+- [x] CLI: Claude Code counts -- `collect_agents`, every 5 s on the `agents` stream:
+      `sessions`, `working`, `waitingOnInput`, `idle`, `subagentsWorking` from
+      `~/.claude/sessions/<pid>.json` (`status`, live pid) crossed with transcript mtimes
+      under `~/.claude/projects/`, a subagent's activity counting as its session's; no
+      name, id, or path on the wire; `available: false` once per session on a machine
+      without Claude Code. Server rules `agents.waiting` (warning, 120 s) and
+      `agents.all-idle` (info, 60 s); dashboard row with waiting in the warning colour;
+      demo fixture. The `status` vocabulary (`busy` / `idle`) was confirmed on 2.1.270
+      across working, waiting, and idle sessions, which is why the states lean on it
+      as well as on transcript age.
+- [ ] [agents] Opt-in session names: `afk start --agent-names` (or `AFK_AGENT_NAMES=1`)
+      adds a per-session list to the frame, `{ name, state, kind }` with `name` the
+      session record's `name` (Claude Code derives it from the directory basename plus
+      two characters, `afk-8f`) or the cwd basename; schema first as an optional
+      `claude.sessions[]` array beside the counts so old frames stay valid, capped like
+      `processes.top`, names through `json_string`, default off on the hosted server
+      and documented as leaving the machine. Wanted only if the counts prove too coarse
+      ("which one is waiting?"), and it would let the dashboard's agents row label bars.
+- [ ] [agents] Codex support: `codex` (a terminal session) and `codex app-server` (what
+      the ChatGPT desktop app keeps running permanently, so process presence alone says
+      nothing) processes, rollouts under `~/.codex/sessions/YYYY/MM/DD/*.jsonl` with
+      the rollout's mtime as the only activity signal, since there is no status file:
+      a working/idle split from mtime age alone, no waiting-on-input state without a
+      status to cross it with (a quiet rollout is either idle or waiting), and the
+      session count from rollouts modified in the last few minutes whose `codex`
+      process is alive rather than from processes. A second `codex` block next to
+      `claude` in `AgentsCollectorData`, same five counts with `waitingOnInput` always
+      0 until a signal for it exists, and `available` per tool rather than per frame.
+- [ ] [agents] `CLAUDE_CONFIG_DIR`: Claude Code honours it as the root instead of
+      `~/.claude`; the collector reads `$HOME/.claude` only, so a relocated config
+      reads as `available: false`. Cheap to honour once a test can unset it (the unit
+      tests run under Claude Code, where it may be set).
+- [ ] [agents] A quiet main transcript with a working subagent is read from the
+      subagent's mtime, but a session whose subagent finished more than 120 s ago and
+      whose own turn is still running a long tool call (a build, a test suite) reads as
+      waiting on input: the transcript only changes when the tool returns. Reading
+      `tool-results/` mtimes next to the transcript, or the tool call's start line,
+      would close that gap; watch for false `agents.waiting` events first.
 
 ## Storage & retention
 
