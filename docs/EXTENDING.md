@@ -16,20 +16,23 @@ A collector is a named kind of measurement. Four places, in this order:
    Numbers can be printed directly; strings must go through `json_string`. Keep it a
    point-in-time command, not a long-lived process.
 3. **Server**: add a `case` to `describeFrame` in `packages/server/src/log/describe.ts`
-   for readable logs, and (once rules exist) a rules module for the events this
-   collector can raise. Interpretation constants such as label maps are `const`s at the
-   top of the file or, if they are protocol semantics, enums in shared.
+   for readable logs, and, if this collector's data can indicate something worth
+   flagging, a rules module for the events it can raise (see "Adding a server-side
+   rule" below). Interpretation constants such as label maps are `const`s at the top of
+   the file or, if they are protocol semantics, enums in shared.
 4. **Dashboard** (`packages/web/src/timeline/collectors/`): add a row renderer and a
    details component and register them in `timeline/registry.ts` keyed by collector
-   name. The `system` collector is the template. Extend the fixture in
-   `data/fixtureSource.ts` so `/s/demo` exercises the new row.
+   name (see "Adding a dashboard row renderer" below). The `system` collector is the
+   template. Extend the fixture in `data/fixtureSource.ts` so `/s/demo` exercises the
+   new row.
 
 Per-instance collectors (a wrapped command, a watched log file) use a stream id of
 `<collector>:<shortId>` so each instance gets its own row and sequence space.
 
 Planned collectors: `processes` (top processes with pid, parent pid, cpu, rss, full
-path), `agents` (running claude / codex counts), `run` (`afk run -- <cmd>`: stdout and
-stderr bytes per tick and the exit code).
+path), `agents` (running claude / codex counts). `run` (`afk run -- <cmd>`) shipped;
+see the wire shape in [PROTOCOL.md](PROTOCOL.md) and "Adding an output flavor for
+`run`" below for extending it further.
 
 ### External collectors (planned)
 
@@ -38,16 +41,106 @@ The collector protocol is "print one JSON object". The intended plugin path is f
 `collector: "<plugin name>"`, with the server accepting a generic `custom` collector
 whose `data` is an open object. Until then, collectors are shell functions.
 
-## Adding a server-side rule (planned shape)
+## Adding a server-side rule
 
-Rules turn frames into **events**: `{ id, stream, kind, severity, message, startedAt,
-endedAt? }`. They live in the server, keyed by collector, and run on every accepted
-frame with access to that stream's recent history. Events are persisted next to frames
-and delivered to the dashboard as `event: event` on the same SSE stream. The status
-banner shows currently open events; the timeline marks them on the relevant row.
+Rules turn frames into `AnomalyEvent`s (`packages/shared/src/protocol.ts`): `id`,
+`stream`, `kind`, `severity`, `message`, `startedAt`, `endedAt`. They live under
+`packages/server/src/rules/`, keyed by collector, and are derived on the fly — never
+persisted — by a per-session `RuleEngine` (`rules/engine.ts`). See ARCHITECTURE.md for
+how the engine drives them; this section is about writing one.
 
-First rules to write: cpu above 90% for 30 s, memory pressure at warn or critical,
-client silent for 60 s, a run exiting non-zero, a run producing no output for 60 s.
+The types (`rules/types.ts`):
+
+- **`Rule<C>`**: `{ kind, collector, create() }`. `kind` becomes `AnomalyEvent.kind`
+  (dotted, e.g. `"cpu.high"`). `create()` returns a fresh `RuleInstance` — the engine
+  makes one per `(stream, rule kind)`, lazily, the first time that stream sees a frame
+  from a matching collector.
+- **`RuleInstance<C>`**: `onFrame(frame, atMs): Verdict`, run for every frame of the
+  stream in index order; optionally `onTick(nowMs): Verdict` for rules that need to
+  notice _silence_ rather than a frame (only `client.stale` does today). The engine
+  ticks time-based rules with each frame's own timestamp during replay, so history and
+  a live viewer produce the same events.
+- **`Verdict`**: `{ active, severity, message, since?, instant? }`. `active: false` (or
+  `INACTIVE`) closes any open event for this rule. `since` backdates the start to when
+  the condition first held rather than when the rule became sure (a "high for 30 s"
+  rule reports `since` as the moment it crossed the line, not 30 s later). `instant`
+  marks a point-in-time event (a command exiting) that is created already closed.
+- **`Sustain`**: helper for "this condition has held for at least N ms" — feed it a
+  boolean each frame, it returns the timestamp the condition first held once the
+  duration is met, else `null`. Every current sustained rule uses it; write a new one
+  from scratch only if the condition isn't a simple duration threshold.
+- **`register(rule)`**: erases the collector type parameter so rules for different
+  collectors can share one array. Wrap every rule with it.
+
+Steps:
+
+1. Write the rule in a file grouped by collector (`rules/system.ts` for `system`-typed
+   rules, a new `rules/<collector>.ts` for a new collector) as a `Rule<C>` with a
+   `kind` and a `create()`.
+2. Add `register(yourRule)` to the `RULES` array in `rules/engine.ts`. This is the only
+   wiring step — the engine, replay, SSE delivery, and the dashboard's `StatusBanner`
+   / `EventMarkers` / `NearbyEvents` all key off `RULES` and the events it produces.
+3. Write a co-located `<collector>.test.ts` next to the rule file. Follow
+   `rules/engine.test.ts` (the reference test) and [TESTING.md](TESTING.md): feed
+   stored frames built with `@afk/shared/testing` builders (`makeSystemFrame`,
+   `makeRunFrame`, …) at fixed offsets, assert on the events returned. Cover the
+   threshold boundary (29 s vs 30 s, not just "way over" and "way under"), backdating
+   (`since`/`startedAt`), and close-on-condition-clear.
+4. Update the rule catalogue table in [PROTOCOL.md](PROTOCOL.md) with the new `kind`,
+   its collector, severity, and trigger — the wire contract includes what events mean,
+   not just their shape.
+
+## Adding an output flavor for `run`
+
+`RunCollectorData.output` is a discriminated union on `flavor` (`packages/shared/src/
+protocol.ts`) so how the client looks at a wrapped command's output can grow without
+changing the rest of the frame or bumping the protocol version. Today there is one
+flavor, `"volume"` (cumulative stdout/stderr byte counts). A richer flavor — parsing
+progress lines, counting structured log records — is a new member of that union:
+
+1. **Shared schema**: add a `RunOutput<Name>` Zod object with
+   `flavor: z.literal("<name>")` and whatever fields it needs, and add it to the
+   `RunOutput` discriminated union.
+2. **Client** (`cli/afk`): `collect_run` builds the `output` object; branch on however
+   the run was started (a new flag to `afk run`, or detection of the command) to emit
+   the new flavor's shape instead of `"volume"`. Keep it a cheap, point-in-time read —
+   no long-lived parsing process per the bash-client rule.
+3. **Server**: `rules/run.ts`'s `totalBytes` helper (used by `runStalled`) has a
+   `TODO(run)` marking it as volume-only; a rule that wants to react to the new
+   flavor's fields needs its own logic, gated on `output.flavor`.
+4. **Dashboard**: `timeline/collectors/run.tsx`'s `drawRow` and `rates()` currently
+   assume `stdoutBytes`/`stderrBytes` exist on every frame; branch on `output.flavor`
+   there too (or route to a different renderer) before reading flavor-specific fields.
+5. Update the `output.flavor` union in [PROTOCOL.md](PROTOCOL.md) with the new member.
+
+## Adding a dashboard row renderer
+
+Every collector needs an entry in `timeline/registry.ts`'s `collectors` object, typed
+as `CollectorUi<C>`:
+
+- **`label`**: short text for the row header.
+- **`rowHeight`**: CSS pixels.
+- **`drawRow(ctx, frames, view)`**: imperative canvas drawing, called on every resize
+  and data change. `view` gives `width`, `height`, the visible `t0`/`t1`, and
+  `x(timeMs)` to map a time to an x coordinate — frames outside `[t0, t1]` may still be
+  passed in, so clip or skip them rather than assuming everything is visible.
+  `timeline/collectors/system.tsx` and `run.tsx` are the templates: read CSS custom
+  properties for color (`getComputedStyle(document.documentElement)`, see the `css()`
+  helper in each) rather than hardcoding colors, so the row respects the active theme.
+- **`Details`**: a React component rendering the frame under the scrubber, typically a
+  `<dl className="kv">` of label/value pairs (see `SystemDetails` / `RunDetails`).
+
+Register the entry in `collectors` keyed by the collector's name; the `{ [C in
+CollectorName]: CollectorUi<C> }` type on that object means adding a collector to the
+shared `Frame` union makes this file fail to type check until an entry exists — that
+is intentional, not a bug to work around. `collectorUi()` is the lookup a caller uses
+when it only has a `CollectorName` and needs the type erased.
+
+The dashboard does not interpret raw measurements: a row renderer draws what the data
+already says (a percentage, a byte rate, a pressure level) rather than deciding what
+counts as high. Anomaly markers and bands are drawn separately, as a DOM overlay
+(`timeline/EventMarkers.tsx`) positioned from the same `x(timeMs)` — a row renderer
+does not need to know about events at all.
 
 ## Adding a storage backend
 

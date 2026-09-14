@@ -12,6 +12,8 @@ with natural extension points, not completeness.
   is the source of truth; keep the doc in step with it.
 - [docs/EXTENDING.md](docs/EXTENDING.md): how to add a collector, rule, storage backend,
   or data source.
+- [docs/TESTING.md](docs/TESTING.md): how tests are organized and written across the
+  monorepo. Read it before adding a test, not just before running one.
 - [BACKLOG.md](BACKLOG.md): the todo list. Deferred work goes here, not in scattered
   TODO comments alone. Check items off as they land.
 
@@ -28,6 +30,7 @@ pnpm install
 pnpm build            # dashboard into packages/web/dist, served by the server
 pnpm dev:server       # http://localhost:4141
 pnpm dev:web          # Vite on :5173, proxies /api to :4141
+pnpm test             # Vitest, once; see docs/TESTING.md
 pnpm typecheck && pnpm lint && pnpm format:check
 AFK_SERVER=http://localhost:4141 ./cli/afk start
 ```
@@ -59,3 +62,6 @@ server can hold port 4141 and silently serve old code: kill it with
   committing.
 - Leave `TODO(topic):` comments for deferred abstractions and mirror anything
   non-trivial in BACKLOG.md.
+- A new server rule or collector ships with a co-located test (see
+  [docs/TESTING.md](docs/TESTING.md)) and a [docs/PROTOCOL.md](docs/PROTOCOL.md)
+  update in the same change, not a follow-up.
