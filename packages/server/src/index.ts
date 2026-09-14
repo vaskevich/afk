@@ -41,6 +41,7 @@ const appConfig: AppConfig = {
   webDistDir: config.webDistDir,
   limits: config.limits,
   sseKeepaliveMs: config.sseKeepaliveSeconds * MS_PER_SECOND,
+  minimumVersions: config.minimumVersions,
 };
 const app = createApp(appConfig, store);
 

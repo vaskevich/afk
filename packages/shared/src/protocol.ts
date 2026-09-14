@@ -11,7 +11,18 @@
  */
 import { z } from "zod";
 
+/**
+ * The wire contract's version. Bumped only for an incompatible change; additive changes
+ * (a new collector, an optional field, an endpoint) never bump it. See docs/VERSIONING.md.
+ */
 export const PROTOCOL_VERSION = 1;
+/** Oldest protocol version the server still accepts; anything in [min, current] is handled. */
+export const MIN_PROTOCOL_VERSION = 1;
+/**
+ * Oldest client (semver, from `X-Afk-Client: <name>/<semver>`) the server talks to. Raised
+ * only to retire a client release with known-bad behaviour, never because a newer one exists.
+ */
+export const MIN_CLIENT_VERSION = "0.1.0";
 
 /** Server-owned session policy. Returned on session create so clients never hardcode it. */
 export const DEFAULT_MAX_SESSION_DURATION_SECONDS = 60 * 60;
@@ -179,7 +190,16 @@ export const HostInfo = z.object({
 export type HostInfo = z.infer<typeof HostInfo>;
 
 export const CreateSessionRequest = z.object({
-  protocolVersion: z.literal(PROTOCOL_VERSION),
+  /** Must be in [MIN_PROTOCOL_VERSION, PROTOCOL_VERSION]; the server answers 426 otherwise. */
+  protocolVersion: z
+    .number()
+    .int()
+    .min(MIN_PROTOCOL_VERSION, {
+      message: `protocol version too old; this server accepts ${MIN_PROTOCOL_VERSION} to ${PROTOCOL_VERSION}`,
+    })
+    .max(PROTOCOL_VERSION, {
+      message: `protocol version too new; this server accepts ${MIN_PROTOCOL_VERSION} to ${PROTOCOL_VERSION}`,
+    }),
   clientVersion: z.string().min(1).max(64),
   host: HostInfo,
 });
@@ -241,6 +261,20 @@ export const ErrorResponse = z.object({
   details: z.unknown().optional(),
 });
 export type ErrorResponse = z.infer<typeof ErrorResponse>;
+
+/**
+ * `details` of a 426 Upgrade Required `ErrorResponse`, the same three fields whichever
+ * check failed (client version below the minimum, missing `X-Afk-Client` header, or a
+ * `protocolVersion` outside the accepted range) so a client prints one upgrade message.
+ * `yourVersion` is what the header said, or null when it was missing or unparsable.
+ * See docs/VERSIONING.md.
+ */
+export const UpgradeRequiredDetails = z.object({
+  minimumClientVersion: z.string(),
+  minimumProtocolVersion: z.number().int(),
+  yourVersion: z.string().nullable(),
+});
+export type UpgradeRequiredDetails = z.infer<typeof UpgradeRequiredDetails>;
 
 // ---------------------------------------------------------------------------
 // Reading a session (dashboard side)

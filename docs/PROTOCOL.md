@@ -21,9 +21,16 @@ auth: the session id is the unguessable share link (22 chars of base62, ~131 bit
 The ingest token never appears in the dashboard URL, so sharing a trace never shares
 write access.
 
-Every client request carries `X-Afk-Client: bash/<version>` so the server can refuse
-clients below a minimum version (planned; the header is sent and logged but not yet
-enforced).
+Every client request (create, ingest, end) carries `X-Afk-Client: <name>/<semver>`,
+`bash/0.2.0` today. The server refuses clients below its minimum version, and requests
+on those three endpoints with a missing or malformed header, with `426 Upgrade
+Required`; the body is an `ErrorResponse` whose `details` is `UpgradeRequiredDetails`
+(`minimumClientVersion`, `minimumProtocolVersion`, `yourVersion`). Read endpoints are
+never version-checked. See [VERSIONING.md](VERSIONING.md).
+
+Bodies are capped: 4 KiB on create and 1 MiB on ingest (a full 200-file client batch is
+roughly 130 KB). Anything larger gets `413` with an `ErrorResponse` whose `details.limit`
+is the cap in bytes.
 
 ### Create
 
@@ -65,6 +72,19 @@ minutes; `afk run` falls back to running the command without telemetry rather th
 block it. See [ARCHITECTURE.md](ARCHITECTURE.md) for the limits and why they are sized
 the way they are.
 
+Status codes on create:
+
+| code | meaning                                                                                     | client behaviour                                                            |
+| ---- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| 201  | session created                                                                             | start sampling                                                              |
+| 400  | the body failed validation (`details` is the Zod error, naming the field)                   | give up; a client bug                                                       |
+| 413  | the body is larger than the create limit                                                    | give up; a client bug                                                       |
+| 426  | this client version or `protocolVersion` is below what the server accepts (`details` above) | print the server's message and the update hint, exit 1                      |
+| 503  | at capacity (`Retry-After` in seconds)                                                      | `afk start` waits and retries; `afk run` runs the command without telemetry |
+
+A `protocolVersion` outside `[MIN_PROTOCOL_VERSION, PROTOCOL_VERSION]` is a 426, not a
+400, so an old client sees the upgrade message rather than "invalid request".
+
 ### Ingest
 
 `Content-Type: application/x-ndjson`, one frame per line. The client's spool file is
@@ -78,18 +98,23 @@ Frames whose `sequence` is at or below the server's latest for that stream are
 counted as duplicates and ignored. That makes retries idempotent: a batch that was
 received but whose acknowledgement was lost is resent and skipped. Status codes:
 
-| code                        | meaning                                              | client behaviour                   |
-| --------------------------- | ---------------------------------------------------- | ---------------------------------- |
-| 200                         | accepted                                             | delete the batch                   |
-| 400 / 401 / 404 / 413       | the server will never accept this batch              | park it in `rejected/`, keep going |
-| 410                         | session ended or past its maximum duration           | stop the session                   |
-| 422                         | a frame's stream would exceed `maxStreamsPerSession` | park it in `rejected/`, keep going |
-| anything else / no response | transient                                            | keep the batch, back off, retry    |
+| code                        | meaning                                              | client behaviour                        |
+| --------------------------- | ---------------------------------------------------- | --------------------------------------- |
+| 200                         | accepted                                             | delete the batch                        |
+| 400 / 401 / 404 / 413       | the server will never accept this batch              | park it in `rejected/`, keep going      |
+| 410                         | session ended or past its maximum duration           | stop the session                        |
+| 422                         | a frame's stream would exceed `maxStreamsPerSession` | park it in `rejected/`, keep going      |
+| 426                         | the server no longer talks to this client version    | stop the session, print the update hint |
+| anything else / no response | transient                                            | keep the batch, back off, retry         |
 
-422 means the batch was well formed (unlike the 400 row above) but would add a stream
-past the session's cap; the error body's `details` names the offending `stream` and
-the `limit`. The client cannot fix this by retrying, so the batch is parked the same
-way as a permanent rejection.
+413 means the body is over the ingest cap (1 MiB; `details.limit`), which a
+well-behaved client never reaches (see the arithmetic in `routes/frames.ts`). 422 means
+the batch was well formed (unlike the 400 row above) but would add a stream past the
+session's cap; the error body's `details` names the offending `stream` and the `limit`.
+The client cannot fix either by retrying, so the batch is parked the same way as a
+permanent rejection. 426 is the version check described under "Session lifecycle": a
+client that was fine when it created the session but has since been retired keeps its
+queue on disk and stops, like a 410, so nothing sampled is lost.
 
 ### End
 
@@ -365,8 +390,12 @@ no session id.
 
 ## Versioning
 
-`protocolVersion` is a literal in the create request; a server that does not
-understand it rejects the session with 400. Adding a collector or an optional field is
-backwards compatible. Renaming or removing a field, or changing a meaning, bumps the
-version. Schema drift between server and dashboard is caught by `safeParse` on the
-dashboard side and currently ignored per frame (TODO: surface it).
+Two independent numbers: the **protocol version** (`protocolVersion` in the create
+request, an integer, bumped only for an incompatible wire change; the server accepts
+`[MIN_PROTOCOL_VERSION, PROTOCOL_VERSION]`) and the **client version** (`clientVersion`
+and the `X-Afk-Client` header, semver, bumped on every client release; the server has a
+`MIN_CLIENT_VERSION` only for retiring clients with known-bad behaviour). A client the
+server will not talk to gets `426 Upgrade Required` with `details` naming both minimums.
+The policy, what each bump requires, and the checklist for a protocol bump are in
+[VERSIONING.md](VERSIONING.md). Schema drift between server and dashboard is caught by
+`safeParse` on the dashboard side and currently ignored per frame (TODO: surface it).

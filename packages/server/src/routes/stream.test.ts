@@ -1,39 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import type { AdmissionLimits } from "../env.ts";
-import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS } from "../env.ts";
+import { DEFAULT_LIMITS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
-import { createTestSession, postFrames } from "./test-helpers.ts";
-
-/** No dashboard build exists at this path; these tests only exercise the API routes. */
-const NO_DIST_DIR = "/nonexistent/afk-test-dist";
+import {
+  createTestSession,
+  endTestSession as endSession,
+  makeAppConfig,
+  postFrames,
+} from "./test-helpers.ts";
 
 /** Builds a fresh app and creates one active session in it. */
 async function startSession(limits: AdmissionLimits = DEFAULT_LIMITS) {
   const app = createApp(
-    {
-      publicBaseUrl: "https://afk.test",
-      webDistDir: NO_DIST_DIR,
-      limits,
-      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
-    },
+    makeAppConfig({ limits }),
     new SessionStore(new MemorySessionStorage(), { limits }),
   );
   const { sessionId, ingestToken } = await createTestSession(app);
   return { app, sessionId, ingestToken };
-}
-
-async function endSession(
-  app: ReturnType<typeof createApp>,
-  sessionId: string,
-  ingestToken: string,
-) {
-  await app.request(`/api/sessions/${sessionId}/end`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${ingestToken}` },
-  });
 }
 
 /** One parsed `event: ... \n data: ... \n id: ...` SSE message. */

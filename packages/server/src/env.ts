@@ -1,3 +1,4 @@
+import { MIN_CLIENT_VERSION, MIN_PROTOCOL_VERSION } from "@afk/shared";
 import type { Session, SessionStore } from "./store/sessions.ts";
 
 /**
@@ -12,9 +13,28 @@ export interface AppConfig {
   limits: AdmissionLimits;
   /** How often an SSE stream sends a comment so proxies and browsers keep it open. */
   sseKeepaliveMs: number;
+  minimumVersions: MinimumVersions;
 }
 
 export const DEFAULT_SSE_KEEPALIVE_MS = 15_000;
+
+/**
+ * The oldest client and protocol this deployment talks to; anything older gets 426
+ * Upgrade Required (see docs/VERSIONING.md). The shared constants are the defaults;
+ * `AFK_MIN_CLIENT_VERSION` / `AFK_MIN_PROTOCOL_VERSION` raise them per deployment,
+ * e.g. to retire one client release with a known-bad retry loop.
+ */
+export interface MinimumVersions {
+  /** Semver string; compared numerically against the `X-Afk-Client` header. */
+  clientVersion: string;
+  /** Integer; the create request's `protocolVersion` must be at least this. */
+  protocolVersion: number;
+}
+
+export const DEFAULT_MINIMUM_VERSIONS: MinimumVersions = {
+  clientVersion: MIN_CLIENT_VERSION,
+  protocolVersion: MIN_PROTOCOL_VERSION,
+};
 
 /**
  * Admission control. Sized for the smallest Lightsail container node (0.25 vCPU,
@@ -45,5 +65,7 @@ export type AppEnv = {
   Variables: {
     /** Set by `ingestAuth` once the bearer token has been checked. */
     session: Session;
+    /** Set by `clientVersion` from the `X-Afk-Client` header once it has passed the minimum. */
+    clientVersion: string;
   };
 };

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
+import {
+  DEFAULT_MAX_SESSION_DURATION_SECONDS,
+  MIN_CLIENT_VERSION,
+  MIN_PROTOCOL_VERSION,
+} from "@afk/shared";
 import { ConfigError, describeConfig, loadConfig, type ServerConfig } from "./config.ts";
 
 /** Fixed fallbacks so the expected values do not depend on where the tests run. */
@@ -32,6 +36,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   tickIntervalSeconds: 5,
   evictEndedAfterSeconds: 600,
   sseKeepaliveSeconds: 15,
+  minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
 };
 
 describe("loadConfig", () => {
@@ -83,6 +88,7 @@ describe("loadConfig", () => {
       tickIntervalSeconds: 1,
       evictEndedAfterSeconds: 0,
       sseKeepaliveSeconds: 30,
+      minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
     });
   });
 
@@ -165,5 +171,28 @@ describe("describeConfig", () => {
     expect(line).toContain("storage s3 (bucket test-bucket, region us-east-1)");
     expect(line).not.toContain("verySecretValue");
     expect(line).not.toContain("AKIATESTKEYID");
+  });
+});
+
+describe("minimum versions", () => {
+  it("raises the floors from the environment", () => {
+    const config = loadConfig(
+      { AFK_MIN_CLIENT_VERSION: "0.2.0", AFK_MIN_PROTOCOL_VERSION: "1" },
+      PATHS,
+    );
+
+    expect(config.minimumVersions).toEqual({ clientVersion: "0.2.0", protocolVersion: 1 });
+  });
+
+  it("rejects a client version that is not semver, naming the variable", () => {
+    expect(() => loadConfig({ AFK_MIN_CLIENT_VERSION: "latest" }, PATHS)).toThrow(
+      /AFK_MIN_CLIENT_VERSION: expected a version like 1.2.3/,
+    );
+  });
+
+  it("rejects a protocol floor above the current protocol version", () => {
+    expect(() => loadConfig({ AFK_MIN_PROTOCOL_VERSION: "99" }, PATHS)).toThrow(
+      /AFK_MIN_PROTOCOL_VERSION/,
+    );
   });
 });

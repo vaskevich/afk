@@ -17,9 +17,12 @@ import {
   FramesResponse,
   MemoryPressureLevel,
   PROCESSES_TOP_MAX,
+  MIN_CLIENT_VERSION,
+  MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   StoredFrame,
   StreamEventName,
+  UpgradeRequiredDetails,
 } from "./protocol.ts";
 
 /**
@@ -153,8 +156,43 @@ describe("CreateSessionRequest", () => {
     host: makeHost(),
   });
 
-  it("rejects a wrong protocolVersion", () => {
-    const result = CreateSessionRequest.safeParse({ ...valid(), protocolVersion: 999 });
+  it("accepts every protocolVersion in [MIN_PROTOCOL_VERSION, PROTOCOL_VERSION]", () => {
+    for (let version = MIN_PROTOCOL_VERSION; version <= PROTOCOL_VERSION; version += 1) {
+      const result = CreateSessionRequest.safeParse({ ...valid(), protocolVersion: version });
+
+      expect(result.success, `version ${version}`).toBe(true);
+    }
+  });
+
+  it("rejects a protocolVersion above PROTOCOL_VERSION, naming the field and the accepted range", () => {
+    const result = CreateSessionRequest.safeParse({
+      ...valid(),
+      protocolVersion: PROTOCOL_VERSION + 1,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["protocolVersion"]);
+      expect(result.error.issues[0]!.message).toContain(
+        `accepts ${MIN_PROTOCOL_VERSION} to ${PROTOCOL_VERSION}`,
+      );
+    }
+  });
+
+  it("rejects a protocolVersion below MIN_PROTOCOL_VERSION", () => {
+    const result = CreateSessionRequest.safeParse({
+      ...valid(),
+      protocolVersion: MIN_PROTOCOL_VERSION - 1,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["protocolVersion"]);
+    }
+  });
+
+  it("rejects a non-integer protocolVersion", () => {
+    const result = CreateSessionRequest.safeParse({ ...valid(), protocolVersion: 1.5 });
 
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -256,6 +294,42 @@ describe("MemoryPressureLevel", () => {
     expect(MemoryPressureLevel.Normal).toBe(1);
     expect(MemoryPressureLevel.Warn).toBe(2);
     expect(MemoryPressureLevel.Critical).toBe(4);
+  });
+});
+
+describe("version constants", () => {
+  it("accept a range whose floor is at most the current protocol version", () => {
+    expect(Number.isInteger(MIN_PROTOCOL_VERSION)).toBe(true);
+    expect(Number.isInteger(PROTOCOL_VERSION)).toBe(true);
+    expect(MIN_PROTOCOL_VERSION).toBeLessThanOrEqual(PROTOCOL_VERSION);
+  });
+
+  it("express the minimum client version as plain major.minor.patch semver", () => {
+    expect(MIN_CLIENT_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe("UpgradeRequiredDetails", () => {
+  it("accepts a null yourVersion for a client that sent no header", () => {
+    const result = UpgradeRequiredDetails.safeParse({
+      minimumClientVersion: MIN_CLIENT_VERSION,
+      minimumProtocolVersion: MIN_PROTOCOL_VERSION,
+      yourVersion: null,
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("requires yourVersion to be present", () => {
+    const result = UpgradeRequiredDetails.safeParse({
+      minimumClientVersion: MIN_CLIENT_VERSION,
+      minimumProtocolVersion: MIN_PROTOCOL_VERSION,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["yourVersion"]);
+    }
   });
 });
 

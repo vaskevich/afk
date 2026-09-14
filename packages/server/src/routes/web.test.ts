@@ -2,19 +2,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS } from "../env.ts";
+import { DEFAULT_LIMITS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
+import { makeAppConfig } from "./test-helpers.ts";
 
 function buildApp(webDistDir: string) {
   return createApp(
-    {
-      publicBaseUrl: "https://afk.test",
-      webDistDir,
-      limits: DEFAULT_LIMITS,
-      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
-    },
+    makeAppConfig({ webDistDir }),
     new SessionStore(new MemorySessionStorage(), { limits: DEFAULT_LIMITS }),
   );
 }
@@ -78,6 +74,20 @@ describe("web routes with a built dashboard", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("afk dashboard");
+  });
+
+  it("serves index.html with the content security policy and the other security headers", async () => {
+    const app = buildApp(distDir);
+
+    const res = await app.request("/s/abc");
+
+    expect(res.headers.get("content-security-policy")).toBe(
+      "default-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'self'; " +
+        "frame-ancestors 'none'; base-uri 'self'",
+    );
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
   });
 
   it("serves a static asset with a JavaScript content type", async () => {

@@ -67,6 +67,10 @@ object storage (S3-compatible API) for the hosted deployment.
 - [ ] Minimum client version check using the `X-Afk-Client` header -- the header is sent and logged but not enforced
 - [ ] Security headers (Hono `secureHeaders`)
 - [ ] Request body size limit on ingest -- `TODO(hardening)` in `routes/frames.ts`
+- [x] Minimum client version check using the `X-Afk-Client` header -- `middleware/client-version.ts`, 426 with `UpgradeRequiredDetails` on create/frames/end; floors from shared `MIN_CLIENT_VERSION` / `MIN_PROTOCOL_VERSION`, raised per deployment with `AFK_MIN_CLIENT_VERSION` / `AFK_MIN_PROTOCOL_VERSION`; policy in [docs/VERSIONING.md](docs/VERSIONING.md)
+- [x] Security headers (Hono `secureHeaders`) -- `middleware/security-headers.ts`, strict CSP verified against the built dashboard in the browser
+- [x] Request body size limit on ingest -- `middleware/body-limit.ts`, 1 MiB on ingest and 4 KiB on create, 413 with an `ErrorResponse`
+- [ ] Protocol version translation layer (`utils/protocol-v<N>.ts`) -- not needed until `PROTOCOL_VERSION` moves past `MIN_PROTOCOL_VERSION`; the checklist in [docs/VERSIONING.md](docs/VERSIONING.md) says where it goes
 - [ ] Rate limit session creation per client address; optional shared secret for private/self-hosted servers -- `TODO(hardening)` in `routes/sessions.ts`
 - [ ] Decide what to do with batches the server rejects (currently parked in `rejected/`)
 

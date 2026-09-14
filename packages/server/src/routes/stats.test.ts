@@ -1,23 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ServiceStats } from "@afk/shared";
 import type { AdmissionLimits } from "../env.ts";
-import { DEFAULT_SSE_KEEPALIVE_MS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
-import { createTestSession } from "./test-helpers.ts";
-
-/** No dashboard build exists at this path; these tests only exercise the API routes. */
-const NO_DIST_DIR = "/nonexistent/afk-test-dist";
+import { createTestSession, makeAppConfig } from "./test-helpers.ts";
 
 function buildApp(limits: AdmissionLimits) {
   return createApp(
-    {
-      publicBaseUrl: "https://afk.test",
-      webDistDir: NO_DIST_DIR,
-      limits,
-      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
-    },
+    makeAppConfig({ limits }),
     new SessionStore(new MemorySessionStorage(), { limits }),
   );
 }

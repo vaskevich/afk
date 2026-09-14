@@ -64,9 +64,14 @@ Rarely worth changing; exposed so a self-hoster can tune them without a code cha
 | `AFK_EVICT_ENDED_AFTER_SECONDS` | `600`   | How long an ended session with no viewers stays in the memory cache.                             | Evicted sessions are reloaded from storage on the next request. `0` evicts on the next tick.                       |
 | `AFK_SSE_KEEPALIVE_SECONDS`     | `15`    | Interval between `: keepalive` comments on an SSE stream.                                        | Keeps proxies and browsers from closing an idle stream; the Lightsail load balancer is the reason for the default. |
 
-<!-- RESERVED(versioning): AFK_MIN_CLIENT_VERSION and AFK_MIN_PROTOCOL_VERSION are being
-added in a separate change together with the minimum client version check. Document
-them in "Sessions and limits" when they land. -->
+## Client versions
+
+See [VERSIONING.md](VERSIONING.md) for the policy. Clients below either floor get `426 Upgrade Required`.
+
+| Variable                   | Default                                  | Meaning                                                                    | Notes                                                                                                            |
+| -------------------------- | ---------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `AFK_MIN_CLIENT_VERSION`   | `MIN_CLIENT_VERSION` in shared (`0.1.0`) | Oldest client release (`X-Afk-Client: bash/<semver>`) this server accepts. | Raise only to retire a release with known-bad behaviour, never just because a newer client exists.               |
+| `AFK_MIN_PROTOCOL_VERSION` | `MIN_PROTOCOL_VERSION` in shared (`1`)   | Oldest protocol version accepted in the create request.                    | Can only be raised; the shared schema already rejects anything below the shared floor, up to `PROTOCOL_VERSION`. |
 
 ## Not configurable yet
 

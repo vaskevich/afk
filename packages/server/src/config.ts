@@ -15,6 +15,9 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { MinimumVersions } from "./env.ts";
+import { MIN_CLIENT_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION } from "@afk/shared";
+import { parseSemver } from "./utils/semver.ts";
 import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS, type AdmissionLimits } from "./env.ts";
 import { DEFAULT_STORE_OPTIONS, DEFAULT_TICK_INTERVAL_MS } from "./store/sessions.ts";
 import { DEFAULT_RETENTION_DAYS, DEFAULT_SWEEP_INTERVAL_MS } from "./store/sweeper.ts";
@@ -77,6 +80,7 @@ export interface ServerConfig {
   tickIntervalSeconds: number;
   evictEndedAfterSeconds: number;
   sseKeepaliveSeconds: number;
+  minimumVersions: MinimumVersions;
 }
 
 /** Thrown by `loadConfig` with one line per problem, each naming the variable. */
@@ -129,6 +133,23 @@ function oneOf<const T extends readonly [string, ...string[]]>(values: T, defaul
   });
 }
 
+/** A semver string such as "0.2.0", with a default. */
+function semver(defaultValue: string) {
+  return optionalString.transform((raw, ctx) => {
+    if (raw === undefined) {
+      return defaultValue;
+    }
+    if (parseSemver(raw) === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `expected a version like 1.2.3, got "${raw}"`,
+      });
+      return z.NEVER;
+    }
+    return raw;
+  });
+}
+
 /** Variables that must be set when `AFK_STORAGE=s3`. */
 const S3_REQUIRED_VARIABLES = [
   "AFK_S3_BUCKET",
@@ -162,9 +183,10 @@ const EnvSchema = z
     AFK_EVICT_ENDED_AFTER_SECONDS: integer(CONFIG_DEFAULTS.evictEndedAfterSeconds, 0),
     AFK_SSE_KEEPALIVE_SECONDS: integer(CONFIG_DEFAULTS.sseKeepaliveSeconds, 1),
 
-    // RESERVED(versioning): AFK_MIN_CLIENT_VERSION and AFK_MIN_PROTOCOL_VERSION are
-    // being added in a separate change (minimum client version check, BACKLOG.md
-    // "Hardening (server)"). Add them here and to docs/CONFIGURATION.md together.
+    // Per-deployment floors for clients (docs/VERSIONING.md). The env can only raise the
+    // protocol floor: the shared schema already rejects anything below MIN_PROTOCOL_VERSION.
+    AFK_MIN_CLIENT_VERSION: semver(MIN_CLIENT_VERSION),
+    AFK_MIN_PROTOCOL_VERSION: integer(MIN_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
   })
   .superRefine((env, ctx) => {
     if (env.AFK_STORAGE !== "s3") {
@@ -229,6 +251,10 @@ export function loadConfig(
     tickIntervalSeconds: value.AFK_TICK_INTERVAL_SECONDS,
     evictEndedAfterSeconds: value.AFK_EVICT_ENDED_AFTER_SECONDS,
     sseKeepaliveSeconds: value.AFK_SSE_KEEPALIVE_SECONDS,
+    minimumVersions: {
+      clientVersion: value.AFK_MIN_CLIENT_VERSION,
+      protocolVersion: value.AFK_MIN_PROTOCOL_VERSION,
+    },
   };
 }
 
@@ -254,5 +280,6 @@ export function describeConfig(config: ServerConfig): string {
     `tick ${config.tickIntervalSeconds}s`,
     `evict ended after ${config.evictEndedAfterSeconds}s`,
     `sse keepalive ${config.sseKeepaliveSeconds}s`,
+    `minimum client ${config.minimumVersions.clientVersion} / protocol ${config.minimumVersions.protocolVersion}`,
   ].join(", ");
 }
