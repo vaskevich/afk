@@ -2874,6 +2874,19 @@ describe("cmd_run owning a session that reaches its cap", () => {
       .filter((frame): frame is RunFrame => frame.collector === "run");
   }
 
+  /** The sequences a server that de-duplicates per stream would keep, in arrival order. */
+  function dedupeBySequence(frames: RunFrame[]): number[] {
+    const seen = new Set<number>();
+    const kept: number[] = [];
+    for (const frame of frames) {
+      if (!seen.has(frame.sequence)) {
+        seen.add(frame.sequence);
+        kept.push(frame.sequence);
+      }
+    }
+    return kept;
+  }
+
   // Regression: the owning run's sampler stopped at the cap and its remaining frames
   // stayed in the old session's queue. Runs the real collectors, so macOS only.
   it.skipIf(process.platform !== "darwin")(
@@ -2921,9 +2934,11 @@ describe("cmd_run owning a session that reaches its cap", () => {
       expect(inFirst.length).toBeGreaterThan(0);
       expect(inSecond.at(-1)?.data).toMatchObject({ state: "exited", exitCode: 0 });
       expect(new Set([...inFirst, ...inSecond].map((frame) => frame.stream)).size).toBe(1);
-      const sequences = [...inFirst, ...inSecond].map((frame) => frame.sequence);
+      // Delivery is at least once: the chain kills the sender's in-flight request, so a
+      // batch the stub already recorded can be sent again (the real server drops the
+      // repeat by sequence; this stub records everything). Judge what the server keeps.
+      const sequences = dedupeBySequence([...inFirst, ...inSecond]);
       expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
-      expect(new Set(sequences).size).toBe(sequences.length);
       expect(inSecond[0]!.sequence).toBeGreaterThan(inFirst.at(-1)!.sequence);
       // The successor is the session the run ends; the first was ended by the chain.
       const ends = server.requests.filter((req) => req.url.endsWith("/end")).map((req) => req.url);
