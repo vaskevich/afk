@@ -1335,11 +1335,14 @@ describe("cmd_qr", () => {
   });
 });
 
-/** A run directory as `afk run` leaves it: the captured stdout and stderr of the command. */
+/**
+ * A run directory as `afk run` keeps it while the command runs: the captured stdout and
+ * stderr, each as the chunk files `split` writes (one chunk here).
+ */
 async function makeRunDir(stdout: string, stderr: string): Promise<string> {
   const runDir = await makeTempDir();
-  await writeFile(join(runDir, "stdout"), stdout);
-  await writeFile(join(runDir, "stderr"), stderr);
+  await writeFile(join(runDir, "stdout.aaaaaa"), stdout);
+  await writeFile(join(runDir, "stderr.aaaaaa"), stderr);
   return runDir;
 }
 
@@ -1516,6 +1519,63 @@ describe("cmd_run", () => {
     );
   }
 
+  /** The names of whatever `afk run` left of the command's output in its run directory. */
+  async function leftoverCaptures(afkHome: string): Promise<string[]> {
+    const runsDir = join(afkHome, "sessions", SESSION_ID, "runs");
+    const leftovers: string[] = [];
+    for (const runId of await readdir(runsDir)) {
+      for (const name of await readdir(join(runsDir, runId))) {
+        if (name.startsWith("stdout") || name.startsWith("stderr")) {
+          leftovers.push(name);
+        }
+      }
+    }
+    return leftovers;
+  }
+
+  /** The path of the wrapped command's stdout chunks, from inside the command (it knows AFK_HOME). */
+  const STDOUT_CHUNKS_GLOB = '"$AFK_HOME"/sessions/*/runs/*/stdout.*';
+
+  it.skipIf(process.platform !== "darwin")(
+    "caps the captured output on disk, still counts every byte, and deletes the capture on exit",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+      const chunkSizesFile = join(await makeTempDir(), "chunk-sizes");
+      const capBytes = 4096;
+      const outputBytes = 20 * 1024;
+      // Prints 20 KB, then waits for a sampler tick or two to prune the chunks and lists
+      // what is left; the listing is a best effort since the sampler may delete a chunk
+      // between `stat` and its read.
+      const command =
+        `yes | head -c ${outputBytes}; sleep 2.5; ` +
+        `stat -f %z ${STDOUT_CHUNKS_GLOB} > "$1" 2>/dev/null || true`;
+
+      const { code, stderr } = await runBash(
+        `cmd_run -- sh -c '${command}' sh "${chunkSizesFile}"`,
+        {
+          AFK_HOME: afkHome,
+          AFK_SERVER: server.url,
+          AFK_RUN_CAPTURE_MAX_BYTES: String(capBytes),
+        },
+      );
+
+      expect(code, stderr).toBe(0);
+      const chunkSizes = (await readFile(chunkSizesFile, "utf8"))
+        .split("\n")
+        .filter((line) => line !== "")
+        .map(Number);
+      expect(chunkSizes.length).toBeGreaterThan(0);
+      expect(chunkSizes.length).toBeLessThanOrEqual(2);
+      expect(Math.max(...chunkSizes)).toBeLessThanOrEqual(capBytes);
+      expect(exitedRunFrame(server)?.data.output).toMatchObject({
+        stdoutBytes: outputBytes,
+        stderrBytes: 0,
+      });
+      expect(await leftoverCaptures(afkHome)).toEqual([]);
+    },
+  );
+
   // Runs the real collectors for the session it owns, so macOS only.
   it.skipIf(process.platform !== "darwin")(
     "puts the command's last output on the final frame when it fails",
@@ -1533,6 +1593,8 @@ describe("cmd_run", () => {
         exitCode: 3,
         output: { tail: { stdout: ["out"], stderr: ["err"], truncated: false } },
       });
+      // The tail was the last use of the captured output.
+      expect(await leftoverCaptures(afkHome)).toEqual([]);
     },
   );
 

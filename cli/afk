@@ -30,6 +30,11 @@
 #   AFK_NO_QR            set to 1 to never print the QR code (same as --no-qr)
 #   AFK_RUN_TAIL_LINES   how many of the last lines of stdout and stderr a failed `afk run`
 #                        reports, default 20; 0 sends no output at all (exit 0 never sends any)
+#   AFK_RUN_CAPTURE_MAX_BYTES
+#                        how much of a wrapped command's stdout and stderr `afk run` keeps
+#                        on disk while it runs, per chunk, default 64 MiB; at most two
+#                        chunks per stream are kept, and all of it is deleted when the
+#                        command exits (see run_capture_sink)
 #
 # Layout of ~/.afk:
 #   current                        the active session (id, token, server) so other
@@ -42,8 +47,9 @@
 #   sessions/<id>/done             written when the session ended; `afk start` removes
 #                                  session directories a day after this (two days
 #                                  after their last change if it is missing)
-#   sessions/<id>/runs/<runId>/    an `afk run`: captured stdout/stderr, pid, and (when it
-#                                  joined an existing session) its own queue
+#   sessions/<id>/runs/<runId>/    an `afk run`: its pid, the newest chunks of its stdout
+#                                  and stderr (capped, and deleted when it exits), and
+#                                  (when it joined an existing session) its own queue
 # The directory and everything in it are readable by the user alone (mode 700 and 600).
 #
 # The client is deliberately dumb: it ships raw measurements and lets the server
@@ -88,6 +94,18 @@ PROCESS_COMMAND_MAX_LENGTH=512
 RUN_TAIL_MAX_LINES=20
 RUN_TAIL_MAX_LINE_CHARS=200
 AFK_RUN_TAIL_LINES="${AFK_RUN_TAIL_LINES:-$RUN_TAIL_MAX_LINES}"
+# `afk run` keeps the wrapped command's stdout and stderr on disk in chunks of exactly
+# this many bytes, only the newest RUN_CAPTURE_KEEP_CHUNKS of them, so a command that
+# prints gigabytes costs at most two chunks per stream (see run_capture_sink). Anything
+# but a positive integer falls back to the default.
+RUN_CAPTURE_DEFAULT_MAX_BYTES=67108864
+case "${AFK_RUN_CAPTURE_MAX_BYTES:-}" in
+  ''|*[!0-9]*|0) RUN_CAPTURE_MAX_BYTES=$RUN_CAPTURE_DEFAULT_MAX_BYTES ;;
+  *) RUN_CAPTURE_MAX_BYTES=$AFK_RUN_CAPTURE_MAX_BYTES ;;
+esac
+RUN_CAPTURE_KEEP_CHUNKS=2
+# split names chunks with this many letters after the prefix: 26^6 chunks of 64 MiB.
+RUN_CAPTURE_SUFFIX_LENGTH=6
 SEND_INTERVAL_SECONDS=1
 SEND_MAX_BACKOFF_SECONDS=30
 SEND_MAX_FILES_PER_BATCH=200
@@ -279,8 +297,61 @@ collect_processes() {
 # has written. The basic "volume" flavor only counts bytes, which is enough to tell
 # "still going" from "hung". Richer flavors (progress lines, JSON records) can be
 # added later under output.flavor without changing the rest of the frame.
-# Set up by cmd_run: RUN_ID, RUN_DIR (stdout, stderr, pid, seq), RUN_STARTED, RUN_COMMAND_JSON.
+# Set up by cmd_run: RUN_ID, RUN_DIR (output chunks, pid, seq), RUN_STARTED, RUN_COMMAND_JSON.
 # ---------------------------------------------------------------------------
+
+# Where the wrapped command's output goes, once per stream (cmd_run wires stdout and
+# stderr through `tee`, which mirrors them to the terminal and hands a copy here).
+# split writes chunk files `<name>.aaaaaa`, `<name>.aaaaab`, ... of exactly
+# RUN_CAPTURE_MAX_BYTES each, only the newest one still filling, and the collector
+# deletes all but the newest RUN_CAPTURE_KEEP_CHUNKS on every tick (run_capture_bytes),
+# so disk use stays under two chunks per stream however much the command prints.
+#
+# The byte count on every frame is `deleted chunks x chunk size + bytes still on disk`.
+# That is exact and only ever grows: split finishes a chunk only when it is exactly the
+# chunk size, and a chunk is only ever deleted once split has finished it. (The obvious
+# alternative, one file truncated in place when it grows too large, would lose whatever
+# tee wrote between measuring and truncating.) Two chunks are kept rather than one so
+# the tail of a failure still has its last lines when a chunk boundary just went by.
+# Everything here is deleted once the final frame has been built (remove_run_captures).
+run_capture_sink() { # stdout|stderr
+  split -b "$RUN_CAPTURE_MAX_BYTES" -a "$RUN_CAPTURE_SUFFIX_LENGTH" - "$RUN_DIR/$1."
+}
+
+# Cumulative bytes the command has written to the stream, after deleting the chunks
+# beyond the newest RUN_CAPTURE_KEEP_CHUNKS. Glob order is split's naming order, which
+# is the order the chunks were written, so the loop deletes the oldest first. The
+# number deleted so far lives in `<name>-deleted` because the sampler that deletes
+# during the run and the main process that builds the final frame are different
+# processes.
+run_capture_bytes() { # stdout|stderr
+  local deleted_file="$RUN_DIR/$1-deleted" deleted count=0 f total
+  deleted=$(cat "$deleted_file" 2>/dev/null || echo 0)
+  for f in "$RUN_DIR/$1".*; do
+    [ -e "$f" ] && count=$((count + 1))
+  done
+  for f in "$RUN_DIR/$1".*; do
+    [ "$count" -gt "$RUN_CAPTURE_KEEP_CHUNKS" ] || break
+    rm -f "$f"
+    count=$((count - 1))
+    deleted=$((deleted + 1))
+    echo "$deleted" > "$deleted_file"
+  done
+  total=$((deleted * RUN_CAPTURE_MAX_BYTES))
+  for f in "$RUN_DIR/$1".*; do
+    [ -e "$f" ] && total=$((total + $(file_size "$f")))
+  done
+  echo "$total"
+}
+
+# The chunks of a stream still on disk, oldest first, as one stream of bytes.
+run_capture_cat() { # stdout|stderr
+  cat "$RUN_DIR/$1".* 2>/dev/null
+}
+
+remove_run_captures() {
+  rm -f "$RUN_DIR"/stdout.* "$RUN_DIR"/stderr.* "$RUN_DIR/stdout-deleted" "$RUN_DIR/stderr-deleted"
+}
 
 # The `output.tail` object for the final frame of a failed run: the last
 # AFK_RUN_TAIL_LINES lines of the captured stdout and stderr, each cut to
@@ -293,7 +364,7 @@ collect_processes() {
 run_output_tail() { # exit-code
   (
     export LC_ALL=C
-    local lines name file count line json first truncated=false stdout_json="" stderr_json="" esc
+    local lines name count line json first truncated=false stdout_json="" stderr_json="" esc
     esc=$(printf '\033')
     [ "${1:-0}" -ne 0 ] 2>/dev/null || exit 0
     case "$AFK_RUN_TAIL_LINES" in
@@ -303,16 +374,18 @@ run_output_tail() { # exit-code
     [ "$lines" -gt "$RUN_TAIL_MAX_LINES" ] && lines=$RUN_TAIL_MAX_LINES
     [ "$lines" -gt 0 ] || exit 0
     for name in stdout stderr; do
-      file="$RUN_DIR/$name"
-      # NR counts a final line without a newline too, which is what tail keeps.
-      count=$(awk 'END { print NR }' "$file" 2>/dev/null || echo 0)
+      # NR counts a final line without a newline too, which is what tail keeps. Only the
+      # newest chunks are still on disk, so a run that printed more than they hold is
+      # truncated whatever the count says; the count decides the rest.
+      count=$(run_capture_cat "$name" | awk 'END { print NR }')
       [ "${count:-0}" -gt "$lines" ] && truncated=true
+      [ "$(cat "$RUN_DIR/$name-deleted" 2>/dev/null || echo 0)" -gt 0 ] && truncated=true
       json=""; first=1
       while IFS= read -r line || [ -n "$line" ]; do
         [ "$first" = 1 ] || json="$json,"
         first=0
         json="$json\"$(json_string "$line")\""
-      done < <(tail -n "$lines" "$file" 2>/dev/null | sed "s/$esc\[[0-9;]*[a-zA-Z]//g" \
+      done < <(run_capture_cat "$name" | tail -n "$lines" | sed "s/$esc\[[0-9;]*[a-zA-Z]//g" \
         | cut -c "1-$RUN_TAIL_MAX_LINE_CHARS" | tr -d '\000-\010\013-\037\177')
       if [ "$name" = stdout ]; then stdout_json=$json; else stderr_json=$json; fi
     done
@@ -323,8 +396,8 @@ run_output_tail() { # exit-code
 collect_run() { # state [exitCode] [output-tail-json]
   local state=$1 exit_code=${2:-null} tail=${3:-} pid out err cpu rss elapsed
   pid=$(cat "$RUN_DIR/pid" 2>/dev/null || echo 0)
-  out=$(file_size "$RUN_DIR/stdout")
-  err=$(file_size "$RUN_DIR/stderr")
+  out=$(run_capture_bytes stdout)
+  err=$(run_capture_bytes stderr)
   elapsed=$(( $(now_seconds) - RUN_STARTED ))
   # ps reports rss in KiB; both read as 0 once the process is gone.
   # shellcheck disable=SC2046 # splitting the two columns into $1 and $2 is the point
@@ -842,10 +915,10 @@ cmd_run() {
   # would normally exit when a foreground child dies of SIGINT; trapping it lets us
   # still report the exit. The sh wrapper records the pid the sampler should watch,
   # then gives the command the caller's umask back (this script's own is private).
-  # TODO(run): tee adds a little latency to the final byte counts; a short pause covers it.
+  # TODO(run): tee and split add a little latency to the final byte counts; a short pause covers it.
   trap ':' INT TERM
   sh -c 'echo $$ > "$1"; umask "$2"; shift 2; exec "$@"' sh "$RUN_DIR/pid" "$ORIGINAL_UMASK" "$@" \
-    > >(tee -a "$RUN_DIR/stdout") 2> >(tee -a "$RUN_DIR/stderr" >&2)
+    > >(tee >(run_capture_sink stdout)) 2> >(tee >(run_capture_sink stderr) >&2)
   EXIT_CODE=$?
   trap - INT TERM
 
@@ -853,8 +926,10 @@ cmd_run() {
   sleep 0.3
   local seq
   seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
-  # Only a failure ships any output, and only its tail (empty for exit code 0).
+  # Only a failure ships any output, and only its tail (empty for exit code 0). The
+  # captured output has served its purpose once the final frame is built.
   emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE" "$(run_output_tail "$EXIT_CODE")")"
+  remove_run_captures
   log "command exited with status $EXIT_CODE"
 
   if [ -n "$SYSTEM_PID" ]; then
