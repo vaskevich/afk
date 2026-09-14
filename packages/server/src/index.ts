@@ -7,5 +7,7 @@ const publicBaseUrl = process.env.AFK_PUBLIC_BASE_URL ?? `http://localhost:${por
 const app = createApp({ publicBaseUrl });
 
 serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`afk server listening on http://localhost:${info.port} (public base ${publicBaseUrl})`);
+  console.log(
+    `afk server listening on http://localhost:${info.port} (public base ${publicBaseUrl})`,
+  );
 });

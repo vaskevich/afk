@@ -11,7 +11,9 @@ export function describeFrame(frame: Frame): string {
   switch (frame.collector) {
     case "system": {
       const { cpu, loadAverage, memory } = frame.data;
-      const pressure = { 1: "normal", 2: "warn", 4: "critical" }[memory.pressureLevel] ?? `level ${memory.pressureLevel}`;
+      const pressure =
+        { 1: "normal", 2: "warn", 4: "critical" }[memory.pressureLevel] ??
+        `level ${memory.pressureLevel}`;
       const used = memory.activeBytes + memory.wiredBytes + memory.compressedBytes;
       return (
         `${frame.stream} #${frame.sequence} ` +
