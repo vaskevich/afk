@@ -58,7 +58,7 @@ object storage (S3-compatible API) for the hosted deployment.
 - [ ] Mark a session ended after the client goes silent for N minutes -- the server has `client.stale` as an anomaly event but does not end the session on it
 - [ ] Multiple processes joining one session: only the first runs the long-lived collectors -- `afk run` already distinguishes owner vs joiner (see ARCHITECTURE.md), but no second `afk start` guard exists yet
 - [ ] Per-collector sampling intervals (not everything needs 1 Hz)
-- [ ] Sampling drift: subtract collector runtime from the sleep
+- [x] Sampling drift: subtract collector runtime from the sleep -- `system_sampler_loop` schedules ticks against a deadline; average rate is 1 Hz, single gaps still vary because stock macOS has no sub-second clock (see the hardening item below)
 
 ## Hardening (server)
 
@@ -71,8 +71,18 @@ object storage (S3-compatible API) for the hosted deployment.
 
 ## Hardening (client)
 
-- [ ] Spool rotate race: no `flock` on macOS; currently a 100 ms pause after rename
-- [ ] Verify behavior across sleep/wake and wifi loss end-to-end (design says it retries; test it)
+- [x] Spool rotate race: no `flock` on macOS; currently a 100 ms pause after rename -- gone: `emit_frame` writes one file per frame through a temp file and an atomic rename into `queue/<sequence>-<stream>.ndjson`; there is no shared spool file any more
+- [x] Cap the on-disk queue so an offline night cannot fill the disk -- `SPOOL_MAX_BYTES` (50 MiB, `AFK_SPOOL_MAX_BYTES`), oldest frames dropped, logged at most once a minute
+- [x] Crashed owner leaves `~/.afk/current` behind and makes the next `afk run` wait on the network -- `owner.pid` next to it; a dead owner marks the file stale locally; an EXIT trap removes both on every owner exit path
+- [x] `afk status` and `afk stop`; sweep old session directories on `afk start` (a day after the `done` marker, two days without one)
+- [x] curl: `--fail-with-body` when supported, `--retry 0` so curl's retries never double up with the sender's; a second Ctrl-C during the final flush exits at once
+- [x] shellcheck clean, `pnpm lint:sh`, and a shellcheck step in CI
+- [ ] `afk stop` can take up to one request timeout (about 25 s) to take effect while the owner is mid-request, because bash runs a trap only after the command in flight returns; Ctrl-C in the owner's terminal is immediate since curl gets the signal too
+- [ ] Frames dropped by the spool cap vanish silently from the dashboard; the server only shows the gap through `client.stale` when it is long enough
+- [ ] Unsent frames of a session that ended offline are deleted with its directory a day later; nothing resends them on the next `afk start` (the server would still accept them until the session expires)
+- [ ] Sub-second tick scheduling: single gaps still vary by collector runtime (only the average is 1 Hz) because stock macOS `date` has no `%N`; `perl -MTime::HiRes` is on every Mac but is one more dependency
+- [ ] `afk status` counts only the owner's queue, not the queues of `afk run` joiners under `runs/<runId>/`
+- [ ] Verify behavior across sleep/wake and wifi loss end-to-end (design says it retries; test it) -- the sampler re-bases its schedule after a clock jump rather than bursting, but that is unit-tested with a fake clock only
 - [ ] Clock skew between client `timestamp` and server `receivedAt`
 - [ ] Linux support for collectors (`/proc`)
 - [ ] Plugin collectors: any executable that prints JSON

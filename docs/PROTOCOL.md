@@ -67,8 +67,9 @@ the way they are.
 
 ### Ingest
 
-`Content-Type: application/x-ndjson`, one frame per line. The client's spool file is
-already in this shape, so a batch is just the file body. Response:
+`Content-Type: application/x-ndjson`, one frame per line. The client queues each
+frame as one file in this shape, so a batch is just the oldest files concatenated
+(up to 200 of them). Response:
 
 ```json
 { "accepted": 12, "duplicates": 0, "latestSequence": { "system": 42 } }
