@@ -121,7 +121,41 @@ queue_bytes() {
 check_platform() {
   [ "$(uname -s)" = "Darwin" ] || die "only macOS is supported right now (TODO: linux)"
   command -v curl >/dev/null || die "curl is required"
+  detect_curl_features
   mkdir -p "$AFK_HOME"
+}
+
+# --fail-with-body (curl 7.76+, so every macOS 8.x) makes a 4xx/5xx response exit 22
+# while still saving the body; older curls fall back to the status code alone, which
+# http_request reads either way.
+CURL_FAIL_FLAG=""
+detect_curl_features() {
+  if curl --help all 2>/dev/null | grep -q -- --fail-with-body; then
+    CURL_FAIL_FLAG="--fail-with-body"
+  fi
+}
+
+# Every request goes through here. curl's own retries are off so they never double
+# up with the sender's. Leaves the HTTP status in HTTP_STATUS and returns 0 for any
+# response; when there was none HTTP_STATUS is 000, HTTP_ERROR is curl's reason, and
+# it returns 1. (Not a `$(...)` helper on purpose: those variables must reach the caller.)
+HTTP_STATUS=000
+HTTP_ERROR=""
+http_request() { # curl args...
+  local rc errors
+  errors=$(mktemp "${TMPDIR:-/tmp}/afk-curl.XXXXXX")
+  # shellcheck disable=SC2086 # CURL_FAIL_FLAG is empty or one flag, never quoted text
+  HTTP_STATUS=$(curl -sS --retry 0 $CURL_FAIL_FLAG -w '%{http_code}' \
+    -H "X-Afk-Client: bash/$AFK_VERSION" "$@" 2>"$errors"); rc=$?
+  HTTP_ERROR=""
+  case "$rc" in
+    0|22) rm -f "$errors" ;;
+    *)
+      HTTP_STATUS=000
+      HTTP_ERROR=$(cat "$errors" 2>/dev/null); rm -f "$errors"
+      : "${HTTP_ERROR:=curl exited with $rc}"
+      return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -248,9 +282,10 @@ create_session() {
     "$AFK_PROTOCOL_VERSION" "$AFK_VERSION" "$(json_string "$HOST_NAME")" "$(json_string "$HOST_PLATFORM")" \
     "$(json_string "$HOST_OS_VERSION")" "$HOST_CPU_COUNT" "$HOST_MEMORY_BYTES")
 
-  status=$(curl -sS -o "$response_file" -w '%{http_code}' --connect-timeout 5 --max-time 15 \
-    -H 'Content-Type: application/json' -H "X-Afk-Client: bash/$AFK_VERSION" \
-    --data "$body" "$AFK_SERVER/api/sessions") || die "could not reach $AFK_SERVER"
+  http_request -o "$response_file" --connect-timeout 5 --max-time 15 \
+    -H 'Content-Type: application/json' \
+    --data "$body" "$AFK_SERVER/api/sessions" || die "could not reach $AFK_SERVER: $HTTP_ERROR"
+  status=$HTTP_STATUS
   response=$(cat "$response_file" 2>/dev/null)
   rm -f "$response_file"
   case "$status" in
@@ -274,6 +309,15 @@ create_session() {
   printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
     "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$AFK_HOME/current"
   echo "$$" > "$AFK_HOME/owner.pid"
+  # Whatever way this process ends (Ctrl-C, `afk stop`, a die), the files that let
+  # others join it must not outlive it. Bash resets traps in subshells, so the sender
+  # and samplers running in the background do not trigger this when they are killed.
+  trap remove_owner_state EXIT
+}
+
+remove_owner_state() {
+  remove_current_session_files
+  rm -f "$AFK_HOME/create-response.json"
 }
 
 # For `afk start`: a machine you are about to leave should get a session eventually,
@@ -315,7 +359,7 @@ read_current_file() {
 # round trip), or the server says it is over, and 2 if the session is live but already
 # has as many streams as the server allows.
 load_current_session() {
-  local summary status stream_count max_streams pid
+  local summary summary_file status stream_count max_streams pid
   read_current_file || return 1
   pid=$(owner_pid)
   if [ -n "$pid" ] && ! pid_alive "$pid"; then
@@ -323,7 +367,11 @@ load_current_session() {
     remove_current_session_files
     return 1
   fi
-  summary=$(curl -sS --connect-timeout 5 --max-time 10 "$AFK_SERVER/api/sessions/$SESSION_ID" 2>/dev/null) || return 1
+  summary_file=$(mktemp "${TMPDIR:-/tmp}/afk-summary.XXXXXX")
+  http_request -o "$summary_file" --connect-timeout 5 --max-time 10 \
+    "$AFK_SERVER/api/sessions/$SESSION_ID" || { rm -f "$summary_file"; return 1; }
+  summary=$(cat "$summary_file" 2>/dev/null)
+  rm -f "$summary_file"
   status=$(json_get_string "$summary" status)
   if [ "$status" != "active" ]; then
     log "ignoring stale session file (session is ${status:-unknown})"
@@ -341,9 +389,10 @@ load_current_session() {
 }
 
 end_session() {
-  curl -sS -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
-    -H "Authorization: Bearer $INGEST_TOKEN" -H "X-Afk-Client: bash/$AFK_VERSION" \
-    "$AFK_SERVER/api/sessions/$SESSION_ID/end" 2>/dev/null || true
+  http_request -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
+    -H "Authorization: Bearer $INGEST_TOKEN" \
+    "$AFK_SERVER/api/sessions/$SESSION_ID/end" >/dev/null \
+    || log "could not tell the server the session ended ($HTTP_ERROR); it will expire on its own"
   remove_current_session_files
   rm -f "$SESSION_DIR/response.json" "$SESSION_DIR/batch.ndjson"
   # Tells the startup cleanup this directory is finished with.
@@ -425,11 +474,11 @@ send_oldest_batch() {
 
   # shellcheck disable=SC2086
   cat $files > "$batch"
-  status=$(curl -sS -o "$SESSION_DIR/response.json" -w '%{http_code}' \
+  http_request -o "$SESSION_DIR/response.json" \
     --connect-timeout 5 --max-time 20 \
     -H "Authorization: Bearer $INGEST_TOKEN" -H 'Content-Type: application/x-ndjson' \
-    -H "X-Afk-Client: bash/$AFK_VERSION" \
-    --data-binary "@$batch" "$AFK_SERVER/api/sessions/$SESSION_ID/frames" 2>/dev/null) || status=000
+    --data-binary "@$batch" "$AFK_SERVER/api/sessions/$SESSION_ID/frames"
+  status=$HTTP_STATUS
 
   case "$status" in
     2*)
@@ -489,7 +538,7 @@ sender_loop() {
     case "$rc" in
       0) backoff=1; sleep "$SEND_INTERVAL_SECONDS" ;;
       1) enforce_spool_cap
-         log "send failed, retrying in ${backoff}s (queued: $(queue_count) frames)"
+         log "send failed (${HTTP_ERROR:-HTTP $HTTP_STATUS}), retrying in ${backoff}s (queued: $(queue_count) frames)"
          sleep "$backoff"
          backoff=$((backoff * 2)); [ "$backoff" -gt "$SEND_MAX_BACKOFF_SECONDS" ] && backoff=$SEND_MAX_BACKOFF_SECONDS ;;
       2) touch "$SESSION_DIR/stop"; return ;;
@@ -552,14 +601,22 @@ cmd_start() {
   sender_loop &
   SENDER_PID=$!
 
+  # One Ctrl-C (or `afk stop`) sends what is still queued and tells the server; a
+  # second one during that gives up on the flush and exits at once (the EXIT trap
+  # set by create_session still removes the owner's state files).
   finish() {
-    trap - INT TERM
-    log "ending session..."
+    trap abandon INT TERM
+    log "ending session... (Ctrl-C again to skip sending what is still queued)"
     kill "$SENDER_PID" 2>/dev/null; wait "$SENDER_PID" 2>/dev/null
     flush_queue
     end_session
     log "session ended. Dashboard stays available at $DASHBOARD_URL"
     exit 0
+  }
+  abandon() {
+    trap - INT TERM
+    log "interrupted again; leaving $(queue_count) queued frames unsent in $SESSION_DIR"
+    exit 130
   }
   trap finish INT TERM
 

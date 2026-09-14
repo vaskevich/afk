@@ -67,6 +67,20 @@ async function runBash(snippet: string, env: NodeJS.ProcessEnv = {}): Promise<Ba
   }
 }
 
+/** Runs cli/afk itself (not sourced), the way a user would, with `env` merged in. */
+async function runAfk(args: string[], env: NodeJS.ProcessEnv = {}): Promise<BashResult> {
+  try {
+    const { stdout, stderr } = await execFileAsync("/bin/bash", [AFK_SCRIPT, ...args], {
+      env: { ...process.env, AFK_SOURCED: "0", ...env },
+      timeout: 5000,
+    });
+    return { stdout, stderr, code: 0 };
+  } catch (error) {
+    const failure = error as { stdout?: string; stderr?: string; code?: number };
+    return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", code: failure.code ?? 1 };
+  }
+}
+
 /** Parses the `key=value` lines a test snippet prints back out of a bash function's variables. */
 function parseKeyValueLines(stdout: string): Record<string, string> {
   const result: Record<string, string> = {};
@@ -405,6 +419,47 @@ describe("send_oldest_batch", () => {
     expect(kept).toBe("AAA\n");
   });
 
+  // With --fail-with-body curl exits 22 on these; the status must still be read.
+  it("still returns 1 on a 500 and 2 on a 410 with --fail-with-body enabled", async () => {
+    const sessionDir = await makeQueue();
+    await writeFile(join(sessionDir, "queue", "0000000001.ndjson"), "AAA\n");
+    let status = 500;
+    const server = await startServer(() => ({ status, body: '{"error":"boom"}' }));
+
+    const first = await runBash('detect_curl_features; send_oldest_batch; printf "RC=%d" "$?"', {
+      ...baseEnv,
+      SESSION_DIR: sessionDir,
+      AFK_SERVER: server.url,
+    });
+    status = 410;
+    const second = await runBash('detect_curl_features; send_oldest_batch; printf "RC=%d" "$?"', {
+      ...baseEnv,
+      SESSION_DIR: sessionDir,
+      AFK_SERVER: server.url,
+    });
+
+    expect(parseKeyValueLines(first.stdout), first.stderr).toMatchObject({ RC: "1" });
+    expect(parseKeyValueLines(second.stdout), second.stderr).toMatchObject({ RC: "2" });
+    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(true);
+  });
+
+  it("returns 1 and records curl's reason when the server is unreachable", async () => {
+    const sessionDir = await makeQueue();
+    await writeFile(join(sessionDir, "queue", "0000000001.ndjson"), "AAA\n");
+
+    const { stdout, stderr } = await runBash(
+      'send_oldest_batch; printf "RC=%d\\nSTATUS=%s\\nERROR=%s\\n" "$?" "$HTTP_STATUS" "$HTTP_ERROR"',
+      { ...baseEnv, SESSION_DIR: sessionDir, AFK_SERVER: "http://127.0.0.1:1" },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({
+      RC: "1",
+      STATUS: "000",
+      ERROR: expect.stringMatching(/connect/i),
+    });
+    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(true);
+  });
+
   it("moves the queued files to rejected/ on a 400 response", async () => {
     const sessionDir = await makeQueue();
     await writeFile(join(sessionDir, "queue", "0000000001.ndjson"), "AAA\n");
@@ -478,22 +533,27 @@ describe("enforce_spool_cap", () => {
     return sessionDir;
   }
 
-  it("drops the oldest frames until the queue is back under the cap", async () => {
-    const sessionDir = await makeOverfullQueue();
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "drops the oldest frames until the queue is back under the cap",
+    async () => {
+      const sessionDir = await makeOverfullQueue();
 
-    const { code, stderr } = await runBash("enforce_spool_cap", {
-      SESSION_DIR: sessionDir,
-      AFK_SPOOL_MAX_BYTES: "100",
-    });
+      const { code, stderr } = await runBash("enforce_spool_cap", {
+        SESSION_DIR: sessionDir,
+        AFK_SPOOL_MAX_BYTES: "100",
+      });
 
-    expect(code, stderr).toBe(0);
-    expect(await queueFiles(sessionDir)).toEqual([
-      "0000000004-system.ndjson",
-      "0000000005-system.ndjson",
-    ]);
-  });
+      expect(code, stderr).toBe(0);
+      expect(await queueFiles(sessionDir)).toEqual([
+        "0000000004-system.ndjson",
+        "0000000005-system.ndjson",
+      ]);
+    },
+  );
 
-  it("leaves a queue under the cap alone", async () => {
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")("leaves a queue under the cap alone", async () => {
     const sessionDir = await makeOverfullQueue();
 
     const { code, stderr } = await runBash("enforce_spool_cap", {
@@ -506,26 +566,30 @@ describe("enforce_spool_cap", () => {
     expect(stderr).toBe("");
   });
 
-  it("reports what it dropped at most once a minute", async () => {
-    const sessionDir = await makeOverfullQueue();
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "reports what it dropped at most once a minute",
+    async () => {
+      const sessionDir = await makeOverfullQueue();
 
-    const { code, stderr } = await runBash(
-      [
-        "enforce_spool_cap",
-        'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000006-system.ndjson"',
-        'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000007-system.ndjson"',
-        "enforce_spool_cap",
-      ].join("\n"),
-      { SESSION_DIR: sessionDir, AFK_SPOOL_MAX_BYTES: "100" },
-    );
+      const { code, stderr } = await runBash(
+        [
+          "enforce_spool_cap",
+          'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000006-system.ndjson"',
+          'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000007-system.ndjson"',
+          "enforce_spool_cap",
+        ].join("\n"),
+        { SESSION_DIR: sessionDir, AFK_SPOOL_MAX_BYTES: "100" },
+      );
 
-    expect(code, stderr).toBe(0);
-    expect(stderr.split("\n").filter((line) => line.includes("dropped"))).toHaveLength(1);
-    expect(await queueFiles(sessionDir)).toEqual([
-      "0000000006-system.ndjson",
-      "0000000007-system.ndjson",
-    ]);
-  });
+      expect(code, stderr).toBe(0);
+      expect(stderr.split("\n").filter((line) => line.includes("dropped"))).toHaveLength(1);
+      expect(await queueFiles(sessionDir)).toEqual([
+        "0000000006-system.ndjson",
+        "0000000007-system.ndjson",
+      ]);
+    },
+  );
 });
 
 describe("system_sampler_loop", () => {
@@ -627,6 +691,9 @@ describe("create_session", () => {
         'printf "MAX_DURATION_SECONDS=%s\\n" "$MAX_DURATION_SECONDS"',
         'printf "SESSION_DIR=%s\\n" "$SESSION_DIR"',
         'printf "PID=%s\\n" "$$"',
+        // The owner removes both files when it exits, so read them while it is alive.
+        'printf "CURRENT_FILE=%s\\n" "$(tr "\\n" "|" < "$AFK_HOME/current")"',
+        'printf "OWNER_PID_FILE=%s\\n" "$(cat "$AFK_HOME/owner.pid")"',
       ].join("\n"),
       { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
     );
@@ -639,19 +706,95 @@ describe("create_session", () => {
       MAX_DURATION_SECONDS: "3600",
       SESSION_DIR: `${afkHome}/sessions/D3FzMqK8qOLVva9LoHF9uc`,
       PID: expect.stringMatching(/^[0-9]+$/),
+      CURRENT_FILE:
+        "sessionId=D3FzMqK8qOLVva9LoHF9uc|" +
+        "ingestToken=tok-abc|" +
+        `server=${server.url}|` +
+        "dashboardUrl=http://example.test/s/D3FzMqK8qOLVva9LoHF9uc|",
+      // The creating process is the owner; afk status/stop and joiners check it is alive.
+      OWNER_PID_FILE: values.PID,
     });
-    // The creating process is the owner; afk status/stop and joiners check it is alive.
-    expect(await readFile(join(afkHome, "owner.pid"), "utf8")).toBe(`${values.PID}\n`);
-
-    const current = await readFile(join(afkHome, "current"), "utf8");
-    expect(current).toBe(
-      "sessionId=D3FzMqK8qOLVva9LoHF9uc\n" +
-        "ingestToken=tok-abc\n" +
-        `server=${server.url}\n` +
-        "dashboardUrl=http://example.test/s/D3FzMqK8qOLVva9LoHF9uc\n",
-    );
     const queueStat = await stat(join(afkHome, "sessions", "D3FzMqK8qOLVva9LoHF9uc", "queue"));
     expect(queueStat.isDirectory()).toBe(true);
+  });
+});
+
+describe("create_session failures", () => {
+  const hostEnv = {
+    HOST_NAME: "test-host",
+    HOST_PLATFORM: "darwin",
+    HOST_OS_VERSION: "26.0",
+    HOST_CPU_COUNT: "8",
+    HOST_MEMORY_BYTES: "17179869184",
+  };
+
+  it("returns 2 when the server is at capacity, with --fail-with-body enabled", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 503, body: '{"error":"at capacity"}' }));
+
+    const { stdout, stderr } = await runBash(
+      'detect_curl_features; create_session; printf "RC=%d" "$?"',
+      { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "2" });
+    expect(await exists(join(afkHome, "current"))).toBe(false);
+  });
+
+  it("dies naming curl's reason when the server is unreachable", async () => {
+    const afkHome = await makeTempDir();
+
+    const { code, stderr } = await runBash("create_session", {
+      ...hostEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: "http://127.0.0.1:1",
+    });
+
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/could not reach http:\/\/127\.0\.0\.1:1: .*connect/i);
+  });
+});
+
+describe("owner exit", () => {
+  const hostEnv = {
+    HOST_NAME: "test-host",
+    HOST_PLATFORM: "darwin",
+    HOST_OS_VERSION: "26.0",
+    HOST_CPU_COUNT: "8",
+    HOST_MEMORY_BYTES: "17179869184",
+  };
+  const created =
+    '{"sessionId":"abc123","ingestToken":"tok-abc","dashboardUrl":"http://example.test/s/abc123","maxDurationSeconds":3600}';
+
+  it("removes current and owner.pid however the owner exits, including through die", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 201, body: created }));
+
+    const { code } = await runBash('create_session; die "something broke"', {
+      ...hostEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(1);
+    expect(await exists(join(afkHome, "current"))).toBe(false);
+    expect(await exists(join(afkHome, "owner.pid"))).toBe(false);
+  });
+
+  it("leaves them in place when only a background subshell of the owner exits", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 201, body: created }));
+
+    const { stdout, stderr } = await runBash(
+      [
+        "create_session",
+        '( : ) & wait "$!"; x=$(true)',
+        'printf "CURRENT=%s\\nOWNER=%s\\n" "$(test -f "$AFK_HOME/current" && echo yes || echo no)" "$(test -f "$AFK_HOME/owner.pid" && echo yes || echo no)"',
+      ].join("\n"),
+      { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ CURRENT: "yes", OWNER: "yes" });
   });
 });
 
@@ -806,18 +949,22 @@ describe("cleanup_old_sessions", () => {
     );
   }
 
-  it("removes sessions that ended over a day ago and orphans untouched for over two days", async () => {
-    const afkHome = await makeTempDir();
-    await makeAgedSessions(afkHome);
+  // Ages files with BSD date -v and reads them back with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "removes sessions that ended over a day ago and orphans untouched for over two days",
+    async () => {
+      const afkHome = await makeTempDir();
+      await makeAgedSessions(afkHome);
 
-    const { code, stderr } = await runBash("cleanup_old_sessions", { AFK_HOME: afkHome });
+      const { code, stderr } = await runBash("cleanup_old_sessions", { AFK_HOME: afkHome });
 
-    expect(code, stderr).toBe(0);
-    expect((await readdir(join(afkHome, "sessions"))).sort()).toEqual([
-      "ended-fresh",
-      "orphan-fresh",
-    ]);
-  });
+      expect(code, stderr).toBe(0);
+      expect((await readdir(join(afkHome, "sessions"))).sort()).toEqual([
+        "ended-fresh",
+        "orphan-fresh",
+      ]);
+    },
+  );
 
   it("does nothing when there is no sessions directory yet", async () => {
     const afkHome = await makeTempDir();
@@ -838,28 +985,32 @@ describe("afk status", () => {
     expect(stdout).toBe("no session running on this machine\n");
   });
 
-  it("prints the session, dashboard, a live owner, and the queue size", async () => {
-    const afkHome = await makeTempDir();
-    const queue = join(afkHome, "sessions", "abc123", "queue");
-    await mkdir(queue, { recursive: true });
-    await writeFile(join(queue, "0000000001-system.ndjson"), "x".repeat(10));
-    await writeFile(join(queue, "0000000002-system.ndjson"), "x".repeat(30));
-    await writeFile(
-      join(afkHome, "current"),
-      "sessionId=abc123\ningestToken=tok-abc\nserver=http://example.test\ndashboardUrl=http://example.test/s/abc123\n",
-    );
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "prints the session, dashboard, a live owner, and the queue size",
+    async () => {
+      const afkHome = await makeTempDir();
+      const queue = join(afkHome, "sessions", "abc123", "queue");
+      await mkdir(queue, { recursive: true });
+      await writeFile(join(queue, "0000000001-system.ndjson"), "x".repeat(10));
+      await writeFile(join(queue, "0000000002-system.ndjson"), "x".repeat(30));
+      await writeFile(
+        join(afkHome, "current"),
+        "sessionId=abc123\ningestToken=tok-abc\nserver=http://example.test\ndashboardUrl=http://example.test/s/abc123\n",
+      );
 
-    const { stdout, stderr, code } = await runBash(
-      'echo "$$" > "$AFK_HOME/owner.pid"; main status',
-      { AFK_HOME: afkHome },
-    );
+      const { stdout, stderr, code } = await runBash(
+        'echo "$$" > "$AFK_HOME/owner.pid"; main status',
+        { AFK_HOME: afkHome },
+      );
 
-    expect(code, stderr).toBe(0);
-    expect(stdout).toMatch(/^session\s+abc123\n/);
-    expect(stdout).toMatch(/\ndashboard\s+http:\/\/example.test\/s\/abc123\n/);
-    expect(stdout).toMatch(/\nowner\s+pid [0-9]+, running\n/);
-    expect(stdout).toMatch(/\nqueue\s+2 frames, 40 bytes\n$/);
-  });
+      expect(code, stderr).toBe(0);
+      expect(stdout).toMatch(/^session\s+abc123\n/);
+      expect(stdout).toMatch(/\ndashboard\s+http:\/\/example.test\/s\/abc123\n/);
+      expect(stdout).toMatch(/\nowner\s+pid [0-9]+, running\n/);
+      expect(stdout).toMatch(/\nqueue\s+2 frames, 40 bytes\n$/);
+    },
+  );
 
   it("says when the owner is no longer running", async () => {
     const afkHome = await makeTempDir();
@@ -915,5 +1066,47 @@ describe("afk stop", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("no session running");
+  });
+});
+
+describe("afk with no state", () => {
+  it("help prints the usage and exits 0", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stdout, stderr, code } = await runAfk(["help"], { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toContain("afk start");
+    expect(stdout).toContain("afk status");
+    expect(stdout).toContain("afk stop");
+  });
+
+  it("status exits 1 with a message and no unbound variable", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stdout, stderr, code } = await runAfk(["status"], { AFK_HOME: afkHome });
+
+    expect(code).toBe(1);
+    expect(stdout).toContain("no session running");
+    expect(stderr).not.toContain("unbound");
+  });
+
+  it("stop exits 1 with a message and no unbound variable", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stderr, code } = await runAfk(["stop"], { AFK_HOME: afkHome });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("no session running");
+    expect(stderr).not.toContain("unbound");
+  });
+
+  it("rejects an unknown command", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stderr, code } = await runAfk(["bogus"], { AFK_HOME: afkHome });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("unknown command: bogus");
   });
 });
