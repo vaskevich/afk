@@ -8,6 +8,7 @@ import type {
 } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import { DEFAULT_LIMITS, type AdmissionLimits } from "../env.ts";
+import { log } from "../log/logger.ts";
 import { RuleEngine } from "../rules/engine.ts";
 import { randomId, randomToken } from "../utils/ids.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
@@ -331,6 +332,15 @@ export class SessionStore {
   }
 
   /**
+   * Resolves once every storage append queued so far, on every session in memory, has
+   * settled. Shutdown waits on this so an accepted batch is never left half-written.
+   */
+  async drainWrites(): Promise<void> {
+    const drains = [...this.sessions.values()].map((session) => session.writeQueue.drain());
+    await Promise.all(drains);
+  }
+
+  /**
    * Drops a session from the in-memory cache without touching storage. Used by the
    * retention sweeper after it has deleted the session's data, so a later `get` does
    * not serve a copy of something that no longer exists. Returns whether it was cached.
@@ -345,9 +355,9 @@ export class SessionStore {
     }
     for (const event of events) {
       const state = event.endedAt === null ? "open" : "closed";
-      console.log(
-        `[session ${session.sessionId}] ${state} ${event.kind} (${event.severity}): ${event.message}`,
-      );
+      log.info(`${state} ${event.kind} (${event.severity}): ${event.message}`, {
+        session: session.sessionId,
+      });
     }
     this.emit(session, { type: "events", events });
   }

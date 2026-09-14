@@ -130,7 +130,10 @@ aws-vault exec osv_im_admin -- infra/deploy.sh
 `deploy.sh`:
 
 1. Builds an image (tag from the first argument, else `$IMAGE_TAG`, else
-   `afk:latest`) from the repo root's `Dockerfile`.
+   `afk:latest`) from the repo root's `Dockerfile`, passing
+   `--build-arg GIT_SHA=$(git rev-parse --short HEAD)` and `BUILD_TIME` so the
+   image reports what it was built from at `GET /versionz`
+   ([docs/PROTOCOL.md](../docs/PROTOCOL.md)).
 2. Pushes it to the service's private registry with
    `aws lightsail push-container-image` and captures the registered image name
    (e.g. `:afk.server.3`) from its output. This needs the `lightsailctl` plugin
@@ -148,6 +151,17 @@ aws-vault exec osv_im_admin -- infra/deploy.sh
    `AFK_STORAGE`, the `AFK_S3_*` set) are the only variables production sets;
    limits and retention run on their defaults. Every variable the server reads is
    documented in [docs/CONFIGURATION.md](../docs/CONFIGURATION.md).
+4. Waits for the rollout: polls `aws lightsail get-container-services` every
+   15 s for up to 10 minutes until the deployment it just created is the
+   current one and `ACTIVE`. If Lightsail marks it `FAILED` (the health check
+   on `/api/health` never passed; the previous deployment keeps serving), the
+   script prints the last 50 lines of the container log
+   (`get-container-log`) and exits 1, so `deploy.yml` goes red instead of
+   green. Running out of attempts fails the same way.
+5. Verifies the code that is live: fetches `https://afk.osv.im/versionz`,
+   retrying for up to a minute while the endpoint catches up, and fails unless
+   `server.commit` equals the commit it built. That catches a deployment
+   Lightsail accepted that is somehow still serving the old build.
 
 Run it through `aws-vault` (`aws-vault exec osv_im_admin -- infra/deploy.sh`) --
 it never embeds credentials itself, it relies on the AWS CLI picking up

@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, rename, rm, appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { StoredFrame } from "@afk/shared";
+import { log } from "../log/logger.ts";
 import { SessionRecord, parseStoredFrameLine, type SessionStorage } from "./storage.ts";
 
 const SESSION_FILE = "session.json";
@@ -79,7 +80,7 @@ export class DiskSessionStorage implements SessionStorage {
       if (frame) {
         frames.push(frame);
       } else {
-        console.warn(`[storage] skipping unreadable frame in session ${sessionId}`);
+        log.warn("skipping unreadable frame", { session: sessionId });
       }
     }
     return frames;

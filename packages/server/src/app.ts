@@ -3,6 +3,7 @@ import type { AppConfig, AppDeps } from "./env.ts";
 import type { SessionStore } from "./store/sessions.ts";
 import { healthRoutes } from "./routes/health.ts";
 import { statsRoutes } from "./routes/stats.ts";
+import { versionRoutes } from "./routes/version.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
@@ -36,6 +37,8 @@ export function createApp(config: AppConfig, store: SessionStore) {
       .use("*", securityHeaders())
       .use("/api/sessions/:sessionId/*", sessionIdParam())
       .route("/api/health", healthRoutes)
+      .route("/versionz", versionRoutes(deps))
+      .route("/api/version", versionRoutes(deps))
       .route("/api/stats", statsRoutes(deps))
       .route("/api/sessions", sessionRoutes(deps))
       .route("/api/sessions", frameRoutes(deps))

@@ -6,9 +6,8 @@ reads `process.env`. A bad value stops the server before it listens, with one li
 problem naming the variable:
 
 ```
-invalid configuration:
-  AFK_PORT: expected a whole number between 1 and 65535, got "abc"
-  AFK_S3_BUCKET: required when AFK_STORAGE=s3
+2026-09-15T10:00:00.000Z error invalid configuration problem="AFK_PORT: expected a whole number between 1 and 65535, got \"abc\""
+2026-09-15T10:00:00.000Z error invalid configuration problem="AFK_S3_BUCKET: required when AFK_STORAGE=s3"
 ```
 
 An empty value counts as unset. On a successful start the server logs the effective
@@ -54,7 +53,7 @@ so the numbers below are the numbers the code uses.
 | Variable                     | Default | Meaning                                                          | Notes                                                                                                                                                                                                                 |
 | ---------------------------- | ------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AFK_RETENTION_DAYS`         | `7`     | How long a session's data is kept after it ends before deletion. | A session that never received an explicit end counts as ended when it hit its cap. Active sessions are never deleted. `0` deletes on the next sweep after a session ends. Runs on every backend (`store/sweeper.ts`). |
-| `AFK_SWEEP_INTERVAL_SECONDS` | `3600`  | How often the retention sweeper runs.                            | The first sweep runs 10 s after startup. Runs never overlap. Each run logs `[sweeper] scanned N sessions, deleted M`.                                                                                                 |
+| `AFK_SWEEP_INTERVAL_SECONDS` | `3600`  | How often the retention sweeper runs.                            | The first sweep runs 10 s after startup. Runs never overlap. Each run logs `sweeper ran scanned=N deleted=M`.                                                                                                         |
 
 ## Internals
 
@@ -75,11 +74,29 @@ See [VERSIONING.md](VERSIONING.md) for the policy. Clients below either floor ge
 | `AFK_MIN_CLIENT_VERSION`   | `MIN_CLIENT_VERSION` in shared (`0.1.0`) | Oldest client release (`X-Afk-Client: bash/<semver>`) this server accepts. | Raise only to retire a release with known-bad behaviour, never just because a newer client exists.               |
 | `AFK_MIN_PROTOCOL_VERSION` | `MIN_PROTOCOL_VERSION` in shared (`1`)   | Oldest protocol version accepted in the create request.                    | Can only be raised; the shared schema already rejects anything below the shared floor, up to `PROTOCOL_VERSION`. |
 
-## Not configurable yet
+## Logging
 
-- **Log level.** The server logs with `console.log` directly and has no logger to
-  thread a level through, so there is no `AFK_LOG_LEVEL`. Add one together with a
-  logger module if debug output is ever needed.
+The server logs one line per event to stdout (`debug`, `info`) or stderr (`warn`,
+`error`): an ISO timestamp, the level, a message, and context as `key=value` pairs
+(`log/logger.ts`). Session ids appear at `info` so an operator can find a session;
+see the "Hardening" section of [ARCHITECTURE.md](ARCHITECTURE.md) for what that means.
+
+| Variable        | Default | Meaning                                                    | Notes                                                                                                                                                                                                                                                                         |
+| --------------- | ------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AFK_LOG_LEVEL` | `info`  | Lowest level written: `debug`, `info`, `warn`, or `error`. | `info` is one line per accepted batch, session lifecycle step, anomaly event, and sweeper run. `debug` adds one line per accepted frame, including the `afk run` command line, which is otherwise never logged; expect tens of thousands of lines an hour at the session cap. |
+
+## Build identity
+
+Reported by `GET /versionz` and `GET /api/version` (see [PROTOCOL.md](PROTOCOL.md)) and,
+as `serverVersion`, by `GET /api/stats`. The server's own version is not a variable: it
+is `packages/server/package.json`'s `version`, read once at startup. The dashboard's
+version and commit come from `packages/web/dist/version.json`, which Vite writes at
+build time (`packages/web/vite.config.ts`).
+
+| Variable         | Default | Meaning                                             | Notes                                                                                                                                                                                                     |
+| ---------------- | ------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AFK_BUILD_SHA`  | unset   | Short git commit the running image was built from.  | The Dockerfile sets it from `--build-arg GIT_SHA`, which `infra/deploy.sh` passes; Vite reads the same variable during the image build for the dashboard's commit. Reported as `commit`, null when unset. |
+| `AFK_BUILD_TIME` | unset   | When the image was built, as an ISO 8601 timestamp. | From `--build-arg BUILD_TIME`, also set by `infra/deploy.sh`. Free-form; reported as `builtAt`, null when unset.                                                                                          |
 
 ## Client
 
@@ -98,5 +115,6 @@ The installer itself reads `AFK_INSTALL_DIR` (where to put `afk`, default `~/.lo
 
 `infra/deploy.sh` sets `AFK_PORT`, `AFK_PUBLIC_BASE_URL`, `AFK_STORAGE=s3`, and the four
 `AFK_S3_*` variables in the container deployment spec (see [infra/README.md](../infra/README.md));
-everything else runs on its default. Add a variable there only when production needs a
-non-default value.
+everything else runs on its default. `AFK_BUILD_SHA` and `AFK_BUILD_TIME` are baked into
+the image by `docker build --build-arg` rather than set in the spec. Add a variable to
+the spec only when production needs a non-default value.

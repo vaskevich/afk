@@ -11,6 +11,7 @@ import {
   upgradeRequired,
 } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
+import { log } from "../log/logger.ts";
 import { renderQrSvg, renderQrText } from "../utils/qr.ts";
 
 /** Parses the request body as JSON, or null if it isn't valid JSON. */
@@ -101,10 +102,13 @@ export function sessionRoutes(deps: AppDeps) {
         clientVersion: parsed.data.clientVersion,
       });
       const dashboardUrl = dashboardUrlFor(config.publicBaseUrl, session.sessionId);
-      console.log(
-        `[session ${session.sessionId}] created for ${session.host.hostname} ` +
-          `(client ${session.clientVersion}, ${session.host.cpuCount} cpus) -> ${dashboardUrl}`,
-      );
+      log.info("session created", {
+        session: session.sessionId,
+        host: session.host.hostname,
+        client: session.clientVersion,
+        cpus: session.host.cpuCount,
+        url: dashboardUrl,
+      });
       const body: CreateSessionResponse = {
         sessionId: session.sessionId,
         ingestToken: session.ingestToken,
@@ -125,9 +129,10 @@ export function sessionRoutes(deps: AppDeps) {
     .post("/:sessionId/end", clientVersion(deps), ingestAuth(deps), async (c) => {
       const session = c.get("session");
       await store.end(session);
-      console.log(
-        `[session ${session.sessionId}] ended by client after ${session.frames.length} frames`,
-      );
+      log.info("session ended by client", {
+        session: session.sessionId,
+        frames: session.frames.length,
+      });
       return c.json(store.summary(session));
     })
     .get("/:sessionId/qr", clientVersion(deps), ingestAuth(deps), (c) => {

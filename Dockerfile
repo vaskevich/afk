@@ -26,6 +26,12 @@ RUN corepack enable && \
 # makes it into the final image; this whole stage is discarded afterwards.
 # -----------------------------------------------------------------------------
 FROM base AS build
+# The commit this image is built from, passed by infra/deploy.sh. .git is not in the
+# build context, so Vite cannot ask git itself; it reads AFK_BUILD_SHA instead and
+# writes it into packages/web/dist/version.json. Empty when not passed, which the
+# server and Vite both treat as unset.
+ARG GIT_SHA=""
+ENV AFK_BUILD_SHA=${GIT_SHA}
 COPY . .
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
@@ -60,6 +66,11 @@ RUN pnpm install --frozen-lockfile --prod --filter "@afk/server..."
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Build identity, reported by GET /versionz and compared by infra/deploy.sh after a
+# rollout. Both come from --build-arg (see deploy.sh); empty means unset.
+ARG GIT_SHA=""
+ARG BUILD_TIME=""
+ENV AFK_BUILD_SHA=${GIT_SHA} AFK_BUILD_TIME=${BUILD_TIME}
 
 COPY --from=base /app/package.json ./package.json
 COPY pnpm-workspace.yaml ./pnpm-workspace.yaml
@@ -80,11 +91,23 @@ COPY packages/shared/src ./packages/shared/src
 COPY --from=build /app/packages/web/dist ./packages/web/dist
 COPY cli/afk ./cli/afk
 
-# corepack's activation from the `base` stage doesn't carry over a fresh
-# `FROM node:22-alpine`; re-pin pnpm the same way.
-RUN corepack enable && \
-    PNPM_VERSION="$(node -p "require('./package.json').packageManager.split('@')[1]")" && \
-    corepack prepare "pnpm@${PNPM_VERSION}" --activate
+# The default `disk` storage writes to packages/server/data (config.ts resolves it
+# from its own directory). Production uses the bucket, but an image run without
+# AFK_STORAGE=s3 still has to be able to write there as the unprivileged user.
+RUN mkdir -p packages/server/data && chown node:node packages/server/data
 
+# Run as the image's unprivileged user: nothing here needs root, and a bug in the
+# server should not hand out root in the container.
+USER node
+
+# node is PID 1, with no pnpm or shell in front of it, so SIGTERM from a deploy
+# reaches the server's own handler (packages/server/src/shutdown.ts) and it can
+# drain its writes before exiting. `--import tsx` resolves the specifier from the
+# working directory, and tsx is a dependency of @afk/server, so run from there;
+# config.ts resolves every path from its own file, not from the cwd, and the
+# dashboard route derives its cwd-relative static root, so the layout still holds.
+# No pnpm in this stage: the workspace symlinks pnpm made in prod-deps are all
+# node needs to resolve @afk/shared.
+WORKDIR /app/packages/server
 EXPOSE 4141
-CMD ["pnpm", "--filter", "@afk/server", "start"]
+CMD ["node", "--import", "tsx", "src/index.ts"]

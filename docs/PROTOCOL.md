@@ -14,6 +14,8 @@ GET  /api/sessions/:id                  anyone            summary
 GET  /api/sessions/:id/frames?after=N   dashboard         history
 GET  /api/sessions/:id/stream           dashboard         SSE, live + replay
 GET  /api/stats                         anyone            whole-service numbers
+GET  /versionz                          anyone            what is running (server, dashboard, protocol)
+GET  /api/version                       anyone            the same body as /versionz
 GET  /s/:id                             browser           the dashboard itself
 ```
 
@@ -445,7 +447,8 @@ no session id.
   "sessionsInMemory": 5,
   "framesInMemory": 48213,
   "uptimeSeconds": 401222,
-  "serverVersion": "0.1.0"
+  "serverVersion": "0.1.0",
+  "webCommit": "abc1234"
 }
 ```
 
@@ -457,7 +460,36 @@ no session id.
 | `sessionsInMemory`     | sessions held in the in-memory cache, active or recently viewed    |
 | `framesInMemory`       | frames summed across sessions in memory (a count, not a byte size) |
 | `uptimeSeconds`        | since the process started                                          |
-| `serverVersion`        | the running server's version string                                |
+| `serverVersion`        | `packages/server`'s package.json version                           |
+| `webCommit`            | short git commit of the served dashboard build; null without one   |
+
+## GET /versionz
+
+What is running, for a deploy to verify its rollout and for a bug report to say which
+build it is about. Unauthenticated, cheap, no session id. `GET /api/version` returns
+the same body under the API prefix the dashboard's dev proxy forwards.
+
+```json
+{
+  "server": { "version": "0.1.0", "commit": "abc1234", "builtAt": "2026-09-15T10:00:00Z" },
+  "web": { "version": "0.1.0", "commit": "abc1234" },
+  "protocolVersion": 1
+}
+```
+
+| field             | meaning                                                                                                                                                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `server.version`  | `packages/server`'s package.json version, read at startup                                                                                                          |
+| `server.commit`   | short git commit the image was built from (`AFK_BUILD_SHA`, see CONFIGURATION.md); null when not set, as in a local run                                            |
+| `server.builtAt`  | when the image was built (`AFK_BUILD_TIME`, ISO 8601); null when not set                                                                                           |
+| `web`             | `packages/web`'s package.json version and the commit its build was made from, read from `dist/version.json` (written by Vite); null when no dashboard build exists |
+| `web.commit`      | `"unknown"` when the build ran outside a git checkout without `AFK_BUILD_SHA`                                                                                      |
+| `protocolVersion` | `PROTOCOL_VERSION` in shared                                                                                                                                       |
+
+`infra/deploy.sh` polls this after a rollout until `server.commit` equals the commit it
+built, so a deployment Lightsail accepted but that never served the new code fails
+the deploy instead of passing silently. Schemas: `VersionResponse`, `ServerBuildInfo`,
+`WebBuildInfo` in `packages/shared/src/protocol.ts`.
 
 ## Versioning
 

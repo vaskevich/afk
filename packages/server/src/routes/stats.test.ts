@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ServiceStats } from "@afk/shared";
-import type { AdmissionLimits } from "../env.ts";
+import { DEFAULT_LIMITS, type AdmissionLimits, type AppConfig } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
-import { createTestSession, makeAppConfig } from "./test-helpers.ts";
+import { TEST_BUILD, createTestSession, makeAppConfig } from "./test-helpers.ts";
 
-function buildApp(limits: AdmissionLimits) {
+function buildApp(limits: AdmissionLimits, webBuild: AppConfig["webBuild"] = null) {
   return createApp(
-    makeAppConfig({ limits }),
+    makeAppConfig({ limits, webBuild }),
     new SessionStore(new MemorySessionStorage(), { limits }),
   );
 }
@@ -35,5 +35,21 @@ describe("GET /api/stats", () => {
       framesInMemory: 0,
     });
     expect(Number.isInteger(body.uptimeSeconds)).toBe(true);
+  });
+
+  it("reports the server package version and the served dashboard's commit", async () => {
+    const app = buildApp(DEFAULT_LIMITS, { version: "0.2.0", commit: "def5678" });
+
+    const body = ServiceStats.parse(await (await app.request("/api/stats")).json());
+
+    expect(body).toMatchObject({ serverVersion: TEST_BUILD.version, webCommit: "def5678" });
+  });
+
+  it("reports a null dashboard commit when no dashboard build is present", async () => {
+    const app = buildApp(DEFAULT_LIMITS, null);
+
+    const body = ServiceStats.parse(await (await app.request("/api/stats")).json());
+
+    expect(body.webCommit).toBeNull();
   });
 });

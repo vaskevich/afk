@@ -32,11 +32,8 @@ import {
 } from "@afk/shared";
 import type { HostInfo, RunFrame } from "@afk/shared";
 import { createApp } from "../packages/server/src/app.ts";
-import {
-  DEFAULT_LIMITS,
-  DEFAULT_MINIMUM_VERSIONS,
-  DEFAULT_SSE_KEEPALIVE_MS,
-} from "../packages/server/src/env.ts";
+import { DEFAULT_LIMITS } from "../packages/server/src/env.ts";
+import { makeAppConfig } from "../packages/server/src/routes/test-helpers.ts";
 import type { AdmissionLimits } from "../packages/server/src/env.ts";
 import { SessionStore } from "../packages/server/src/store/sessions.ts";
 import { MemorySessionStorage } from "../packages/server/src/store/storage.ts";
@@ -156,14 +153,7 @@ async function startServer(limits: AdmissionLimits, webDistDir: string): Promise
   const port = await listen(0);
   const url = `http://${LOOPBACK}:${port}`;
   wiring.app = createApp(
-    {
-      publicBaseUrl: url,
-      webDistDir,
-      clientScriptPath: AFK_SCRIPT,
-      limits,
-      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
-      minimumVersions: DEFAULT_MINIMUM_VERSIONS,
-    },
+    makeAppConfig({ publicBaseUrl: url, webDistDir, clientScriptPath: AFK_SCRIPT, limits }),
     store,
   );
 
