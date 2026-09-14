@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { T0_MS, makeEvent } from "@afk/shared/testing";
+import { formatClock } from "../format.ts";
 import { NearbyEvents } from "./NearbyEvents.tsx";
 
 afterEach(() => {
@@ -20,7 +21,6 @@ describe("NearbyEvents", () => {
     render(
       <NearbyEvents
         events={[event]}
-        t0={T0_MS}
         latest={T0_MS + minutes(10) + 15_000}
         cursor={T0_MS + minutes(10)}
         radiusMs={5_000}
@@ -28,8 +28,9 @@ describe("NearbyEvents", () => {
       />,
     );
 
-    // "since", not a bare "+00:00": an unlabeled offset read like a duration of nothing.
-    expect(screen.getByText("since 00:00")).toBeTruthy();
+    // Wall-clock start, labelled: a bare "+00:00" read like a duration of nothing, and an
+    // offset from session start meant nothing to someone reading the page later.
+    expect(screen.getByText(`since ${formatClock(T0_MS)}`)).toBeTruthy();
     expect(screen.getByText("ongoing for 10m 15s")).toBeTruthy();
   });
 
@@ -39,7 +40,6 @@ describe("NearbyEvents", () => {
     render(
       <NearbyEvents
         events={[event]}
-        t0={T0_MS}
         latest={T0_MS + minutes(10)}
         cursor={T0_MS + minutes(2)}
         radiusMs={5_000}
@@ -47,7 +47,7 @@ describe("NearbyEvents", () => {
       />,
     );
 
-    expect(screen.getByText("since 01:00")).toBeTruthy();
+    expect(screen.getByText(`since ${formatClock(T0_MS + minutes(1))}`)).toBeTruthy();
     expect(screen.getByText("2m 00s")).toBeTruthy();
   });
 });

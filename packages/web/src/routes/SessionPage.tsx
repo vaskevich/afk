@@ -81,7 +81,6 @@ export function SessionPage() {
       />
       <NearbyEvents
         events={model.events}
-        t0={model.t0}
         latest={model.latest}
         cursor={effectiveCursor}
         radiusMs={nearbyRadiusMs}

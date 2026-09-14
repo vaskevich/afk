@@ -82,7 +82,6 @@ describe("event lists", () => {
     render(
       <NearbyEvents
         events={[failed]}
-        t0={failed.startedAt}
         latest={failed.startedAt}
         cursor={failed.startedAt}
         radiusMs={1000}

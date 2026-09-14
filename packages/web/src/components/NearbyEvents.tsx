@@ -1,14 +1,13 @@
 import type { AnomalyEvent } from "@afk/shared";
 import { eventEndMs } from "../events.ts";
-import { formatDuration, formatOffset } from "../format.ts";
+import { formatClock, formatDuration } from "../format.ts";
 import { OutputTail } from "./OutputTail.tsx";
 import { TopProcesses } from "./TopProcesses.tsx";
 
 interface Props {
   /** Every event of the session, sorted by start. */
   events: readonly AnomalyEvent[];
-  /** Session start and the live edge. */
-  t0: number;
+  /** The live edge, which is how long an event still open has been going on. */
   latest: number;
   cursor: number;
   /** How far from the cursor still counts as "near", in ms. */
@@ -22,10 +21,9 @@ function isNear(event: AnomalyEvent, cursor: number, latest: number, radiusMs: n
 
 function EventList({
   events,
-  t0,
   latest,
   onSelectEvent,
-}: Pick<Props, "events" | "t0" | "latest" | "onSelectEvent">) {
+}: Pick<Props, "events" | "latest" | "onSelectEvent">) {
   return (
     <ul className="event-list">
       {events.map((event) => (
@@ -41,7 +39,7 @@ function EventList({
               )}
             </span>
             <span className="event-row-when">
-              since {formatOffset((event.startedAt - t0) / 1000)}
+              since {formatClock(event.startedAt)}
               <small>
                 {event.endedAt === null
                   ? `ongoing for ${formatDuration(Math.max(0, latest - event.startedAt))}`
@@ -61,7 +59,7 @@ function EventList({
  * what was going on around the moment they are looking at. Falls back to the full list
  * when nothing is nearby so any event is still one click away.
  */
-export function NearbyEvents({ events, t0, latest, cursor, radiusMs, onSelectEvent }: Props) {
+export function NearbyEvents({ events, latest, cursor, radiusMs, onSelectEvent }: Props) {
   if (events.length === 0) {
     return null;
   }
@@ -74,7 +72,7 @@ export function NearbyEvents({ events, t0, latest, cursor, radiusMs, onSelectEve
     <section className="nearby" aria-label="Anomalies near the cursor">
       {nearby.length === 0 && <p className="hint nearby-empty">No anomalies near the cursor.</p>}
       <h2>{heading}</h2>
-      <EventList events={listed} t0={t0} latest={latest} onSelectEvent={onSelectEvent} />
+      <EventList events={listed} latest={latest} onSelectEvent={onSelectEvent} />
     </section>
   );
 }
