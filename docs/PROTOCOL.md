@@ -159,8 +159,19 @@ queue on disk and stops, like a 410, so nothing sampled is lost.
 
 ### End
 
-Marks the session ended and returns the session summary. Sessions that never receive
-an end become `expired` once past `maxDurationSeconds`.
+Marks the session ended and returns the session summary. A session's `status` is:
+
+- `active`: accepting frames.
+- `ended`: `endedAt` is set. The client said so (this endpoint), or it chained to a
+  successor (`endedAt` is the moment of the chain, `nextSessionId` names it), or the
+  server ended it after `AFK_END_AFTER_SILENT_SECONDS` (600) without a frame, in which
+  case `endedAt` is the newest frame's server receipt plus that silence, not the moment
+  the server noticed. Ended sessions answer 410 on ingest.
+- `expired`: never ended, and past `maxDurationSeconds` since it started; also 410.
+
+A silent session gets a `client.stale` event after 60 s as the early warning, then the
+end; both reach an open dashboard over the stream. Retention counts from `endedAt`, or
+from the cap for an expired session.
 
 ### QR code
 

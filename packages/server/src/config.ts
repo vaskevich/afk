@@ -49,6 +49,7 @@ export const CONFIG_DEFAULTS = {
   sweepIntervalSeconds: DEFAULT_SWEEP_INTERVAL_MS / MS_PER_SECOND,
   tickIntervalSeconds: DEFAULT_TICK_INTERVAL_MS / MS_PER_SECOND,
   evictEndedAfterSeconds: DEFAULT_STORE_OPTIONS.evictEndedAfterMs / MS_PER_SECOND,
+  endAfterSilentSeconds: DEFAULT_STORE_OPTIONS.endAfterSilentMs / MS_PER_SECOND,
   sseKeepaliveSeconds: DEFAULT_SSE_KEEPALIVE_MS / MS_PER_SECOND,
 } as const;
 
@@ -87,6 +88,8 @@ export interface ServerConfig {
   /** How often time-based rules run and idle ended sessions are evicted from memory. */
   tickIntervalSeconds: number;
   evictEndedAfterSeconds: number;
+  /** How long an active session may go without a frame before the server ends it. */
+  endAfterSilentSeconds: number;
   sseKeepaliveSeconds: number;
   minimumVersions: MinimumVersions;
 }
@@ -191,6 +194,7 @@ const EnvSchema = z
 
     AFK_TICK_INTERVAL_SECONDS: integer(CONFIG_DEFAULTS.tickIntervalSeconds, 1),
     AFK_EVICT_ENDED_AFTER_SECONDS: integer(CONFIG_DEFAULTS.evictEndedAfterSeconds, 0),
+    AFK_END_AFTER_SILENT_SECONDS: integer(CONFIG_DEFAULTS.endAfterSilentSeconds, 1),
     AFK_SSE_KEEPALIVE_SECONDS: integer(CONFIG_DEFAULTS.sseKeepaliveSeconds, 1),
 
     // Per-deployment floors for clients (docs/VERSIONING.md). The env can only raise the
@@ -262,6 +266,7 @@ export function loadConfig(
     sweepIntervalSeconds: value.AFK_SWEEP_INTERVAL_SECONDS,
     tickIntervalSeconds: value.AFK_TICK_INTERVAL_SECONDS,
     evictEndedAfterSeconds: value.AFK_EVICT_ENDED_AFTER_SECONDS,
+    endAfterSilentSeconds: value.AFK_END_AFTER_SILENT_SECONDS,
     sseKeepaliveSeconds: value.AFK_SSE_KEEPALIVE_SECONDS,
     minimumVersions: {
       clientVersion: value.AFK_MIN_CLIENT_VERSION,
@@ -292,6 +297,7 @@ export function describeConfig(config: ServerConfig): string {
     `retention ${config.retentionDays}d (sweep every ${config.sweepIntervalSeconds}s)`,
     `tick ${config.tickIntervalSeconds}s`,
     `evict ended after ${config.evictEndedAfterSeconds}s`,
+    `end after silent ${config.endAfterSilentSeconds}s`,
     `sse keepalive ${config.sseKeepaliveSeconds}s`,
     `minimum client ${config.minimumVersions.clientVersion} / protocol ${config.minimumVersions.protocolVersion}`,
   ].join(", ");

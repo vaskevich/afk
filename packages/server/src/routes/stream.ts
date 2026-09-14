@@ -124,8 +124,10 @@ export function streamRoutes(deps: AppDeps) {
       }
 
       if (store.status(session) !== "active") {
-        // TODO(sessions): a session that hits the max duration without an explicit end never
-        // emits "ended"; the stream stays open until the client disconnects.
+        // TODO(sessions): a session that runs into its cap while still sending frames (an
+        // old client that does not chain) expires without an "ended" event; the stream
+        // stays open until the client disconnects. A session that goes quiet is ended by
+        // the store's tick and does emit one.
         await queue.drain();
         await writeSummary(StreamEventName.End);
         return;

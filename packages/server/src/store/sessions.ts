@@ -44,12 +44,18 @@ export interface SessionStoreOptions {
   maxSessionDurationSeconds: number;
   /** How long an ended session with no viewers stays in memory before `tick` evicts it. */
   evictEndedAfterMs: number;
+  /**
+   * An active session that has received nothing for this long is ended by `tick`, at
+   * the moment the silence began plus this. `client.stale` (60 s) is the early warning.
+   */
+  endAfterSilentMs: number;
 }
 
 export const DEFAULT_STORE_OPTIONS: SessionStoreOptions = {
   limits: DEFAULT_LIMITS,
   maxSessionDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
   evictEndedAfterMs: 10 * 60 * 1000,
+  endAfterSilentMs: 10 * 60 * 1000,
 };
 
 /** How often `startTicker` runs time-based rules and evicts idle ended sessions. */
@@ -331,17 +337,28 @@ export class SessionStore {
 
   /**
    * Gives time-based rules (client silent) a chance to fire on every active session
-   * in memory. Returns a function that stops the ticker.
+   * in memory, and ends sessions that have gone quiet. Returns a function that stops
+   * the ticker.
    */
   startTicker(intervalMs: number): () => void {
-    const timer = setInterval(() => this.tick(Date.now()), intervalMs);
+    const timer = setInterval(() => void this.tick(Date.now()), intervalMs);
     return () => clearInterval(timer);
   }
 
-  /** One pass of the periodic work: time-based rules for live sessions, eviction for idle ended ones. */
-  tick(now: number): void {
+  /**
+   * One pass of the periodic work: time-based rules for live sessions, an end for
+   * those silent past `endAfterSilentMs`, eviction for idle ended ones. Silence is
+   * measured on the server clock (`receivedAt` of the newest frame, or the session's
+   * start), so a client with a skewed clock is not ended for it.
+   */
+  async tick(now: number): Promise<void> {
     for (const [sessionId, session] of this.sessions) {
       if (this.status(session, now) === "active") {
+        const lastHeardAt = session.frames.at(-1)?.receivedAt ?? session.startedAt;
+        if (now - lastHeardAt > this.options.endAfterSilentMs) {
+          await this.endAfterSilence(session, lastHeardAt + this.options.endAfterSilentMs);
+          continue;
+        }
         this.emitEvents(session, session.engine.onTick(now));
       } else if (
         session.listeners.size === 0 &&
@@ -349,6 +366,22 @@ export class SessionStore {
       ) {
         this.sessions.delete(sessionId);
       }
+    }
+  }
+
+  /** Ends a session the client went quiet on; a failed write is logged and retried on the next tick. */
+  private async endAfterSilence(session: Session, endedAt: number): Promise<void> {
+    try {
+      await this.end(session, endedAt);
+      console.log(
+        `[session ${session.sessionId}] ended after ${this.options.endAfterSilentMs / 1000}s of silence`,
+      );
+    } catch (err) {
+      // `end` set endedAt before the write; undo so the next tick tries again.
+      session.endedAt = null;
+      console.error(
+        `[session ${session.sessionId}] could not persist the silent end: ${String(err)}`,
+      );
     }
   }
 

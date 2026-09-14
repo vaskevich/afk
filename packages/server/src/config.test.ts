@@ -40,6 +40,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   sweepIntervalSeconds: 3600,
   tickIntervalSeconds: 5,
   evictEndedAfterSeconds: 600,
+  endAfterSilentSeconds: 600,
   sseKeepaliveSeconds: 15,
   minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
 };
@@ -77,6 +78,7 @@ describe("loadConfig", () => {
         AFK_SWEEP_INTERVAL_SECONDS: "5",
         AFK_TICK_INTERVAL_SECONDS: "1",
         AFK_EVICT_ENDED_AFTER_SECONDS: "0",
+        AFK_END_AFTER_SILENT_SECONDS: "45",
         AFK_SSE_KEEPALIVE_SECONDS: "30",
       },
       PATHS,
@@ -94,6 +96,7 @@ describe("loadConfig", () => {
       sweepIntervalSeconds: 5,
       tickIntervalSeconds: 1,
       evictEndedAfterSeconds: 0,
+      endAfterSilentSeconds: 45,
       sseKeepaliveSeconds: 30,
       minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
     });

@@ -534,7 +534,7 @@ describe("SessionStore", () => {
       await store.ingest(session, [makeSystemFrame(0)]);
 
       vi.setSystemTime(T0_MS + 90_000);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(session.engine.events).toEqual([
         expect.objectContaining({
@@ -545,6 +545,96 @@ describe("SessionStore", () => {
       ]);
     });
 
+    it("ends a session silent for longer than endAfterSilentMs at the newest frame's receipt plus the silence, persisted, with ended emitted", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage, { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      vi.setSystemTime(T0_MS + 5_000);
+      await store.ingest(session, [makeSystemFrame(5)]);
+      const received: SessionEvent[] = [];
+      store.subscribe(session, (event) => received.push(event));
+      // The early warning opens on a tick well before the end.
+      vi.setSystemTime(T0_MS + 95_000);
+      await store.tick(Date.now());
+
+      vi.setSystemTime(T0_MS + 5_000 + 600_001);
+      await store.tick(Date.now());
+
+      expect(store.summary(session)).toMatchObject({ status: "ended", endedAt: T0_MS + 605_000 });
+      await expect(storage.getSession(session.sessionId)).resolves.toMatchObject({
+        endedAt: T0_MS + 605_000,
+      });
+      expect(received).toContainEqual({
+        type: "ended",
+        summary: expect.objectContaining({ status: "ended", endedAt: T0_MS + 605_000 }),
+      });
+      // The early warning is closed at the same moment the session ends.
+      expect(session.engine.events).toEqual([
+        expect.objectContaining({ kind: "client.stale", endedAt: T0_MS + 605_000 }),
+      ]);
+    });
+
+    it("keeps a session that has been silent for exactly the limit, still warning through client.stale", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      vi.setSystemTime(T0_MS + 600_000);
+      await store.tick(Date.now());
+
+      expect(store.status(session)).toBe("active");
+      expect(session.engine.events).toEqual([
+        expect.objectContaining({ kind: "client.stale", endedAt: null }),
+      ]);
+    });
+
+    it("counts the silence of a session that never sent a frame from its start", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      vi.setSystemTime(T0_MS + 600_001);
+      await store.tick(Date.now());
+
+      expect(store.summary(session)).toMatchObject({ status: "ended", endedAt: T0_MS + 600_000 });
+    });
+
+    it("measures silence on the server clock, so a frame with an old client timestamp keeps the session alive", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS + 3_600_000);
+      const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      // Client clock an hour behind: the frame says T0 but arrives now.
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      vi.setSystemTime(T0_MS + 3_600_000 + 1_000);
+      await store.tick(Date.now());
+
+      expect(store.status(session)).toBe("active");
+    });
+
+    it("uses ten minutes of silence by default", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage());
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.endAfterSilentMs);
+      await store.tick(Date.now());
+      const stillActive = store.status(session);
+      vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.endAfterSilentMs + 1);
+      await store.tick(Date.now());
+
+      expect(stillActive).toBe("active");
+      expect(store.status(session)).toBe("ended");
+    });
+
     it("evicts an ended session with no listeners after the configured idle window", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
@@ -553,7 +643,7 @@ describe("SessionStore", () => {
       await store.end(session);
 
       vi.setSystemTime(T0_MS + 1_001);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(store.stats().sessionsInMemory).toBe(0);
     });
@@ -566,7 +656,7 @@ describe("SessionStore", () => {
       await store.end(session);
 
       vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.evictEndedAfterMs);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(store.stats().sessionsInMemory).toBe(1);
     });
@@ -580,7 +670,7 @@ describe("SessionStore", () => {
       await store.end(session);
 
       vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.evictEndedAfterMs + 1);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(store.stats().sessionsInMemory).toBe(1);
     });
