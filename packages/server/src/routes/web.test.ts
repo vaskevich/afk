@@ -79,7 +79,7 @@ describe("web routes with a built dashboard", () => {
   it("answers an unknown API path with a JSON 404, never the dashboard's index.html", async () => {
     const app = buildApp(distDir);
 
-    const res = await app.request("/api/sessions/abc/no-such-endpoint");
+    const res = await app.request("/api/nope/no-such-endpoint");
 
     expect(res.status).toBe(404);
     expect(res.headers.get("content-type")).toContain("application/json");

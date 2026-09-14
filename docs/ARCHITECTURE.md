@@ -75,9 +75,14 @@ under `sessions/<id>/runs/<runId>/` so its sender and the owner's never contend 
 the same files.
 
 The wrapped command runs in the foreground (not backgrounded) so Ctrl-C, stdin, and
-exit status behave the way they would unwrapped; `tee` mirrors stdout/stderr to the
-run's own files so the run collector can size them. A final frame with
-`state: "exited"` and the exit code closes the row.
+exit status behave the way they would unwrapped, with the caller's umask (the script's
+own is `077`, so everything under `~/.afk` is private to the user); `tee` mirrors
+stdout/stderr to the run's own capture so the run collector can size them. The capture
+is `split` into chunks of `AFK_RUN_CAPTURE_MAX_BYTES` (64 MiB) and only the newest two
+per stream are kept on disk, the collector counting the deleted ones, so a command that
+prints gigabytes costs a bounded amount of disk and the byte counts stay exact; the
+whole capture is deleted once the final frame, with `state: "exited"`, the exit code,
+and on failure the output tail, has closed the row.
 
 Telemetry must never get in the way of the command: if the server is at capacity, or
 the session it would join already has `maxStreams` streams, `afk run` logs it and
@@ -94,7 +99,9 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
 - `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end),
   `frames` (ingest), `stream` (history + SSE), `install` (the `/install` one-liner and
   `/cli/afk`, the client itself), `web` (built dashboard).
-- `middleware/ingest-auth.ts` resolves the session, checks the bearer ingest token,
+- `middleware/session-id.ts` answers 404 for a `:sessionId` that is not the 22 base62
+  characters the server issues, before any route or storage backend sees it.
+  `middleware/ingest-auth.ts` resolves the session, checks the bearer ingest token,
   rejects non-active sessions with 410. `middleware/client-version.ts` checks the
   `X-Afk-Client` header on the client-facing routes (426 below the minimum),
   `middleware/body-limit.ts` caps request bodies (413), and
@@ -317,6 +324,16 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** Session ids are validated at the route layer (`middleware/session-id.ts`,
+  the pattern next to `randomId` in `utils/ids.ts`) and unknown ids are remembered by
+  `SessionStore.get` for a minute, instead of each storage backend defending itself:
+  a malformed id was a 500 on the bucket backend and a 404 on disk, and every probe of
+  an unknown id cost a bucket read. On the client, `umask 077` plus `chmod 700` of
+  `~/.afk` make the ingest token, spool, and captures private, and the run capture is
+  chunked with `split` (newest two chunks kept, deleted ones counted) rather than one
+  file truncated in place, because truncating loses whatever `tee` wrote between
+  measuring and truncating, while a finished chunk has a known size and can be deleted
+  without touching the count. The client's own tests run in CI on a macOS runner.
 - **2026-09-15** QR rendering of the dashboard URL lives on the server for the CLI
   (`GET /api/sessions/:id/qr`, `utils/qr.ts`, behind the ingest token because the URL
   is the share link) and in the browser for the dashboard (`SharePanel.tsx`, from

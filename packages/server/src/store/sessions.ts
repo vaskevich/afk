@@ -55,6 +55,15 @@ export const DEFAULT_STORE_OPTIONS: SessionStoreOptions = {
 /** How often `startTicker` runs time-based rules and evicts idle ended sessions. */
 export const DEFAULT_TICK_INTERVAL_MS = 5_000;
 
+/**
+ * How long `get` remembers that an id was not in storage before asking again. Read
+ * routes take no auth, so a well-formed unknown id would otherwise cost one storage
+ * read (an S3 GetObject on the hosted instance) per probe.
+ */
+export const UNKNOWN_ID_TTL_MS = 60_000;
+/** Bound on remembered unknown ids; past it the oldest entry is forgotten first. */
+export const UNKNOWN_ID_CACHE_MAX_ENTRIES = 4096;
+
 /** Whether a record is still accepting frames, was ended by the client, or ran past its cap. */
 export function sessionStatus(record: SessionRecord, now: number): SessionStatus {
   if (record.endedAt !== null) {
@@ -103,6 +112,8 @@ export class TooManyStreamsError extends Error {
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
   private readonly loading = new Map<string, Promise<Session | undefined>>();
+  /** Ids storage did not know, each with the time its entry expires. Insertion order is age. */
+  private readonly unknownIds = new Map<string, number>();
   private readonly options: SessionStoreOptions;
 
   constructor(
@@ -155,35 +166,68 @@ export class SessionStore {
     await this.storage.putSession(record);
     const session = this.hydrate(record, []);
     this.sessions.set(session.sessionId, session);
+    this.unknownIds.delete(session.sessionId);
     return session;
   }
 
-  async get(sessionId: string): Promise<Session | undefined> {
+  /**
+   * The session, from memory or storage; undefined when it exists nowhere. An id that
+   * storage did not know is remembered for `UNKNOWN_ID_TTL_MS` so repeated probes of
+   * it do not each cost a storage read.
+   */
+  async get(sessionId: string, now = Date.now()): Promise<Session | undefined> {
     const cached = this.sessions.get(sessionId);
     if (cached) {
-      cached.lastAccessAt = Date.now();
+      cached.lastAccessAt = now;
       return cached;
+    }
+    if (this.isRememberedUnknown(sessionId, now)) {
+      return undefined;
     }
     // Coalesce concurrent loads of the same session so it is only read once.
     let pending = this.loading.get(sessionId);
     if (!pending) {
-      pending = this.loadAndUntrack(sessionId);
+      pending = this.loadAndUntrack(sessionId, now);
       this.loading.set(sessionId, pending);
     }
     return pending;
   }
 
-  private async loadAndUntrack(sessionId: string): Promise<Session | undefined> {
+  private isRememberedUnknown(sessionId: string, now: number): boolean {
+    const expiresAt = this.unknownIds.get(sessionId);
+    if (expiresAt === undefined) {
+      return false;
+    }
+    if (expiresAt <= now) {
+      this.unknownIds.delete(sessionId);
+      return false;
+    }
+    return true;
+  }
+
+  private rememberUnknown(sessionId: string, now: number): void {
+    // A Map iterates in insertion order, so its first key is the oldest entry.
+    if (this.unknownIds.size >= UNKNOWN_ID_CACHE_MAX_ENTRIES) {
+      const oldest = this.unknownIds.keys().next().value;
+      if (oldest !== undefined) {
+        this.unknownIds.delete(oldest);
+      }
+    }
+    this.unknownIds.set(sessionId, now + UNKNOWN_ID_TTL_MS);
+  }
+
+  private async loadAndUntrack(sessionId: string, now: number): Promise<Session | undefined> {
     try {
-      return await this.load(sessionId);
+      return await this.load(sessionId, now);
     } finally {
       this.loading.delete(sessionId);
     }
   }
 
-  private async load(sessionId: string): Promise<Session | undefined> {
+  private async load(sessionId: string, now: number): Promise<Session | undefined> {
     const record = await this.storage.getSession(sessionId);
     if (!record) {
+      this.rememberUnknown(sessionId, now);
       return undefined;
     }
     const frames = await this.storage.readFrames(sessionId);
