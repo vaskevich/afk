@@ -5,11 +5,13 @@
 crash.log
 crash.*.log
 
-# Real variable files (SSH public key, profile overrides, etc). The lock file
+# Real variable files (bucket name, profile overrides, etc). The lock file
 # (.terraform.lock.hcl) and terraform.tfvars.example are NOT ignored -- both
 # should be committed.
 *.tfvars
 *.tfvars.json
 
-# Deploy SSH key pair generated locally (see README). Never committed.
+# Leftover deploy SSH key pair from the old instance-based design. No longer used
+# (the container service has no SSH access) but left in place and gitignored
+# rather than deleted -- see README.
 .ssh/

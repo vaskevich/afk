@@ -4,6 +4,6 @@
 # aws_vault_profile      = "osv_im_admin"
 # aws_terraform_role_arn = ""
 
-ssh_public_key = "ssh-ed25519 AAAA... you@yourmachine"
-
-# ssh_allowed_cidrs = ["203.0.113.4/32"]
+# Bucket names are global across all of Lightsail/S3, so "afk-sessions" itself is
+# almost certainly taken. Pick something unique, e.g. your handle or account id.
+bucket_name = "afk-sessions-osv-im"

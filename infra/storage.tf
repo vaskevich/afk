@@ -1,44 +1,24 @@
 /**
- * Future session storage in S3 (BACKLOG.md "Storage & retention"). Disabled by
- * default -- sessions currently live on the instance's local disk at
- * var.data_dir. Set enable_s3_storage = true once the server actually writes
- * to S3, then wire AFK_* env vars / IAM access as a follow-up.
+ * Session storage: a Lightsail object storage bucket (S3-compatible), used by
+ * packages/server/src/store/s3-storage.ts via AFK_STORAGE=s3.
+ *
+ * Lightsail's "resource access" (bucket <-> compute) only wires up instances, not
+ * container services, so the container gets credentials the ordinary way: an access
+ * key handed to it as environment variables (AFK_S3_ACCESS_KEY_ID /
+ * AFK_S3_SECRET_ACCESS_KEY), read from `tofu output` by deploy.sh. Lightsail buckets
+ * have no lifecycle rules, so expiry is the server's own sweeper (see BACKLOG.md),
+ * not a bucket setting.
  */
 
-resource "aws_s3_bucket" "sessions" {
-  count = var.enable_s3_storage ? 1 : 0
-
-  bucket = var.s3_bucket_name
+resource "aws_lightsail_bucket" "sessions" {
+  name      = var.bucket_name
+  bundle_id = "small_1_0" # smallest bundle: 5 GB storage / 25 GB transfer, plenty for NDJSON session files
 
   tags = {
     Project = "afk"
   }
 }
 
-resource "aws_s3_bucket_public_access_block" "sessions" {
-  count = var.enable_s3_storage ? 1 : 0
-
-  bucket = aws_s3_bucket.sessions[0].id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "sessions" {
-  count = var.enable_s3_storage ? 1 : 0
-
-  bucket = aws_s3_bucket.sessions[0].id
-
-  rule {
-    id     = "expire-sessions"
-    status = "Enabled"
-
-    filter {}
-
-    expiration {
-      days = var.s3_lifecycle_expiration_days
-    }
-  }
+resource "aws_lightsail_bucket_access_key" "sessions" {
+  bucket_name = aws_lightsail_bucket.sessions.name
 }
