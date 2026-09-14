@@ -317,3 +317,19 @@ bucket key in plain text. Two ways to stop depending on one laptop, pick one:
   laptop (via `aws-vault`) and `deploy.yml` -- see "CI and deploys" above.
 - `terraform.tfvars.example` -- copy to `terraform.tfvars` (gitignored) and fill
   in `bucket_name`.
+
+## Reading the container log
+
+The service is `afk` but the container inside its deployment is `server` (the key in
+`deploy.sh`'s containers JSON); `get-container-log` with any other `--container-name`
+returns an empty list rather than an error. Events come back tab-separated in text
+output and paginated, so give a window:
+
+```bash
+aws-vault exec osv_im_admin -- aws lightsail get-container-log --service-name afk \
+  --container-name server --region us-west-2 \
+  --start-time "$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --query 'logEvents[].message' --output text | tr '\t' '\n'
+```
+
+`--filter-pattern compacted` (or a session id) narrows it server-side.
