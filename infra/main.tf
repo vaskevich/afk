@@ -29,8 +29,11 @@ resource "aws_lightsail_container_service" "afk" {
 # deployment exists -- see deploy.sh) the custom domain won't serve traffic, but the
 # service's own generated `*.cs.amazonlightsail.com` URL (aws_lightsail_container_service.afk.url)
 # works as soon as a deployment is created.
+# NOTE: Lightsail resource names are unique per region across ALL resource types
+# (instances, certificates, buckets, container services...), so this must not
+# collide with the container service's name above.
 resource "aws_lightsail_certificate" "afk" {
-  name        = "afk"
+  name        = "afk-osv-im-cert"
   domain_name = var.domain_name
 
   tags = {
