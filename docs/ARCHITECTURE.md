@@ -113,8 +113,14 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
 - `config.ts` parses every `AFK_*` variable once at startup into a validated
   `ServerConfig` (see [CONFIGURATION.md](CONFIGURATION.md)); `index.ts` turns that into
   the in-process shapes (`AppConfig` in `env.ts`, the store's options, the sweeper's).
-- `log/describe.ts` formats frames for server logs; interpretation constants such as
-  memory pressure labels live here or in shared.
+- `log/logger.ts` is the one logger every module writes through (levels, one line per
+  call, `key=value` context; see "Hardening" below); `log/describe.ts` formats frames
+  for its debug lines, and interpretation constants such as memory pressure labels live
+  there or in shared.
+- `shutdown.ts` is the SIGTERM/SIGINT sequence (see "Hardening" below); `index.ts`
+  wires the signals. `routes/version.ts` reports the build (`GET /versionz`) from the
+  package version and `AFK_BUILD_SHA` in config plus the dashboard's
+  `dist/version.json` (`utils/web-version.ts`).
 - `rules/` is the anomaly-detection engine, described below.
 
 #### Rules engine
@@ -221,6 +227,27 @@ resource:
   through the CSSOM, which CSP does not govern; verified in the browser against the
   built dashboard, including the canvas timeline and a live SSE session.
 
+Two process-level ones:
+
+- **Logging** (`log/logger.ts`). One line per event, `<ISO timestamp> <level> <message>
+key=value ...`, threshold from `AFK_LOG_LEVEL` (default `info`). `info` is one line
+  per accepted batch, session lifecycle step, anomaly event, and sweeper run; `debug`
+  adds one line per frame. Session ids appear at `info` on purpose: an operator needs
+  one to find a session, and the alternative (hashing or omitting them) would make the
+  logs useless for exactly the cases they exist for. The consequence is that the logs
+  identify sessions for as long as they are kept, and that retention is Lightsail's
+  (the container service's log, not something the server controls), not the seven-day
+  session retention. The `afk run` command line, which a user types and can contain a
+  secret, appears only at `debug`; `describeFrame` never includes it.
+- **Graceful shutdown** (`shutdown.ts`). On SIGTERM or SIGINT the server stops the
+  ticker and sweeper, closes the listener, waits for every in-memory session's write
+  queue to drain so no accepted batch is half-written, closes the remaining
+  connections (open SSE streams end here and the dashboard reconnects with
+  `Last-Event-ID`), logs each step, and exits 0; after `SHUTDOWN_TIMEOUT_MS` (10 s) it
+  exits 1 with an error line instead, so a stuck storage write cannot hang a deploy. The
+  Dockerfile runs node directly as PID 1, as the unprivileged `node` user, so the
+  signal actually reaches the handler.
+
 Still open: rate limiting session creation per client address, and an optional shared
 secret for private servers (BACKLOG.md).
 
@@ -304,16 +331,29 @@ the server so it works on every backend (Lightsail buckets have no lifecycle rul
 ## Deployment
 
 Hosted at `afk.osv.im` on a Lightsail container service with a Lightsail bucket for
-storage; the server is one Docker image that builds the dashboard and runs Node. The
-`AFK_SERVER` variable points the client at any other server, including one on a
-private network, and a client installed with `curl -fsSL <origin>/install | sh`
-defaults to the server it came from. See `infra/` and the Deployment section of
-BACKLOG.md.
+storage; the server is one Docker image that builds the dashboard and runs Node
+directly as PID 1, as the unprivileged `node` user, so a deploy's SIGTERM reaches the
+shutdown handler. The image carries its build identity (`--build-arg GIT_SHA`, exposed
+as `AFK_BUILD_SHA`, plus the dashboard's `dist/version.json`) and reports it at
+`GET /versionz`; `infra/deploy.sh` waits for the Lightsail deployment to become
+`ACTIVE` and then checks that endpoint for the commit it built, so a rollout that
+fails its health check or serves the old build fails the deploy. The `AFK_SERVER`
+variable points the client at any other server, including one on a private network,
+and a client installed with `curl -fsSL <origin>/install | sh` defaults to the server
+it came from. See `infra/` and the Deployment section of BACKLOG.md.
 
 ## Decision log
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** Operability over a logging library: a forty-line logger with levels
+  (`AFK_LOG_LEVEL`), one summary line per batch instead of one per frame, session ids
+  kept at `info` and the `afk run` command line demoted to `debug`; graceful shutdown
+  that drains writes within a 10 s deadline, with node as PID 1 and a non-root
+  container so the signal arrives; real versions (`package.json`, `AFK_BUILD_SHA`,
+  Vite-written `dist/version.json`) at `GET /versionz`, which `infra/deploy.sh` now
+  polls after waiting for the Lightsail deployment to become `ACTIVE`, so a failed
+  rollout fails the deploy instead of showing green.
 - **2026-09-15** QR rendering of the dashboard URL lives on the server for the CLI
   (`GET /api/sessions/:id/qr`, `utils/qr.ts`, behind the ingest token because the URL
   is the share link) and in the browser for the dashboard (`SharePanel.tsx`, from
