@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { SSEStreamingApi } from "hono/streaming";
 import { StreamEventName } from "@afk/shared";
-import type { FramesResponse, StoredFrame } from "@afk/shared";
+import type { AnomalyEvent, FramesResponse, StoredFrame } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
 import { errorResponse } from "../http/errors.ts";
 import type { Session, SessionEvent } from "../store/sessions.ts";
@@ -35,6 +35,7 @@ export function streamRoutes(deps: AppDeps) {
       const body: FramesResponse = {
         session: store.summary(session),
         frames: store.framesAfter(session, after),
+        events: session.engine.events,
       };
       return c.json(body);
     })
@@ -56,8 +57,14 @@ export function streamRoutes(deps: AppDeps) {
       });
     const writeSummary = (event: string) =>
       stream.writeSSE({ event, data: JSON.stringify(store.summary(session)) });
+    const writeEvent = (e: AnomalyEvent) =>
+      stream.writeSSE({ event: StreamEventName.Event, data: JSON.stringify(e) });
 
     await writeSummary(StreamEventName.Session);
+    // Events are few and consumers upsert by id, so the full set is sent every time.
+    for (const e of session.engine.events) {
+      await writeEvent(e);
+    }
 
     // Subscribe before replaying so nothing that arrives mid-replay is lost. Live events are
     // buffered until the replay finishes, then everything is written through one serial
@@ -80,6 +87,10 @@ export function streamRoutes(deps: AppDeps) {
                 }
                 await writeFrame(f);
                 sent = f.index;
+              }
+            } else if (event.type === "events") {
+              for (const e of event.events) {
+                await writeEvent(e);
               }
             } else {
               await writeSummary(StreamEventName.End);

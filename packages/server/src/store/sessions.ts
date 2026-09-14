@@ -1,5 +1,13 @@
-import type { Frame, HostInfo, SessionSummary, SessionStatus, StoredFrame } from "@afk/shared";
+import type {
+  AnomalyEvent,
+  Frame,
+  HostInfo,
+  SessionSummary,
+  SessionStatus,
+  StoredFrame,
+} from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
+import { RuleEngine } from "../rules/engine.ts";
 import { randomId, randomToken } from "../utils/ids.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
 import type { SessionRecord, SessionStorage } from "./storage.ts";
@@ -8,7 +16,9 @@ export type { StoredFrame };
 
 /** Something that happened to a session that live subscribers (SSE) care about. */
 export type SessionEvent =
-  { type: "frames"; frames: StoredFrame[] } | { type: "ended"; summary: SessionSummary };
+  | { type: "frames"; frames: StoredFrame[] }
+  | { type: "events"; events: AnomalyEvent[] }
+  | { type: "ended"; summary: SessionSummary };
 export type SessionListener = (event: SessionEvent) => void;
 
 /** A session held in memory: the persisted record plus live bookkeeping. */
@@ -20,6 +30,8 @@ export interface Session extends SessionRecord {
   listeners: Set<SessionListener>;
   /** Serializes storage appends so frames land on disk in index order. */
   writeQueue: SerialQueue;
+  /** Anomaly rules and the events they have produced. Derived from frames, never persisted. */
+  engine: RuleEngine;
 }
 
 export interface IngestResult {
@@ -96,13 +108,26 @@ export class SessionStore {
         latestSequence.set(frame.stream, frame.sequence);
       }
     }
-    return {
+    // Replay history through fresh rules so improved rules apply to old sessions too.
+    const engine = new RuleEngine();
+    engine.onFrames(frames);
+    const session: Session = {
       ...record,
       latestSequence,
       frames,
       listeners: new Set(),
       writeQueue: new SerialQueue(),
+      engine,
     };
+    if (this.status(session) !== "active") {
+      engine.closeAll(this.sessionEndMs(session));
+    }
+    return session;
+  }
+
+  /** When a non-active session stopped: its explicit end, or the moment it hit the cap. */
+  private sessionEndMs(session: Session): number {
+    return session.endedAt ?? session.startedAt + session.maxDurationSeconds * 1000;
   }
 
   private record(session: Session): SessionRecord {
@@ -139,6 +164,7 @@ export class SessionStore {
     }
     session.endedAt = Date.now();
     await this.storage.putSession(this.record(session));
+    this.emitEvents(session, session.engine.closeAll(session.endedAt));
     this.emit(session, { type: "ended", summary: this.summary(session) });
   }
 
@@ -151,6 +177,35 @@ export class SessionStore {
   subscribe(session: Session, listener: SessionListener): () => void {
     session.listeners.add(listener);
     return () => session.listeners.delete(listener);
+  }
+
+  /**
+   * Gives time-based rules (client silent) a chance to fire on every active session
+   * in memory. Returns a function that stops the ticker.
+   */
+  startTicker(intervalMs: number): () => void {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      for (const session of this.sessions.values()) {
+        if (this.status(session, now) === "active") {
+          this.emitEvents(session, session.engine.onTick(now));
+        }
+      }
+    }, intervalMs);
+    return () => clearInterval(timer);
+  }
+
+  private emitEvents(session: Session, events: AnomalyEvent[]): void {
+    if (events.length === 0) {
+      return;
+    }
+    for (const event of events) {
+      const state = event.endedAt === null ? "open" : "closed";
+      console.log(
+        `[session ${session.sessionId}] ${state} ${event.kind} (${event.severity}): ${event.message}`,
+      );
+    }
+    this.emit(session, { type: "events", events });
   }
 
   private emit(session: Session, event: SessionEvent): void {
@@ -191,6 +246,7 @@ export class SessionStore {
     session.latestSequence = nextSequence;
     session.frames.push(...accepted);
     this.emit(session, { type: "frames", frames: accepted });
+    this.emitEvents(session, session.engine.onFrames(accepted));
     return { accepted, duplicates };
   }
 }

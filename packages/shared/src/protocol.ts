@@ -170,23 +170,55 @@ export const StoredFrame = z.object({
 });
 export type StoredFrame = z.infer<typeof StoredFrame>;
 
-/** GET /api/sessions/:id/frames?after=<index> */
+// ---------------------------------------------------------------------------
+// Anomaly events
+// ---------------------------------------------------------------------------
+
+export const EventSeverity = z.enum(["info", "warning", "critical"]);
+export type EventSeverity = z.infer<typeof EventSeverity>;
+
+/**
+ * Something the server's rules decided is worth calling out. Events are derived from
+ * frames on the server (never persisted, recomputed on load, so improved rules apply
+ * to old sessions too) and belong to a stream, i.e. a timeline row.
+ */
+export const AnomalyEvent = z.object({
+  /** Stable across recomputation: `<stream>:<kind>:<startedAt>`. Live updates upsert by id. */
+  id: z.string(),
+  stream: z.string(),
+  /** Rule identifier, dotted, e.g. "cpu.high", "memory.pressure", "client.stale". */
+  kind: z.string(),
+  severity: EventSeverity,
+  /** One readable sentence, e.g. "cpu above 90% for 45s (peak 97%)". */
+  message: z.string(),
+  /** Unix milliseconds, derived from frame timestamps. */
+  startedAt: z.number().int(),
+  /** Null while the condition is still ongoing. */
+  endedAt: z.number().int().nullable(),
+});
+export type AnomalyEvent = z.infer<typeof AnomalyEvent>;
+
+/** GET /api/sessions/:id/frames?after=<index>. Events are always the complete current set. */
 export const FramesResponse = z.object({
   session: SessionSummary,
   frames: z.array(StoredFrame),
+  events: z.array(AnomalyEvent),
 });
 export type FramesResponse = z.infer<typeof FramesResponse>;
 
 /**
  * GET /api/sessions/:id/stream (text/event-stream). Events, in order of appearance:
  *   session  data = SessionSummary; sent on connect and whenever the status changes
+ *   event    data = AnomalyEvent; every existing event is sent after `session` as a
+ *            snapshot, then one per change (an event opening, updating, or closing);
+ *            consumers upsert by id. No SSE id, so it never disturbs frame resumption.
  *   frame    data = StoredFrame; id = StoredFrame.index
  *   end      data = SessionSummary; sent once the session is over, then the stream closes
  * Reconnect with `Last-Event-ID` (or `?after=<index>`) to replay what was missed.
- * TODO(events): an `event` event for server-detected anomalies once rules exist.
  */
 export const StreamEventName = {
   Session: "session",
+  Event: "event",
   Frame: "frame",
   End: "end",
 } as const;

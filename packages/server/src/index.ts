@@ -15,6 +15,10 @@ const webDistDir = process.env.AFK_WEB_DIST ?? path.resolve(here, "../../web/dis
 const dataDir = process.env.AFK_DATA_DIR ?? path.resolve(here, "../data");
 const store = new SessionStore(new DiskSessionStorage(dataDir));
 
+/** How often time-based rules (client silent) get to run on live sessions. */
+const RULE_TICK_INTERVAL_MS = 5_000;
+store.startTicker(RULE_TICK_INTERVAL_MS);
+
 const app = createApp({ publicBaseUrl, webDistDir }, store);
 
 serve({ fetch: app.fetch, port }, (info) => {
