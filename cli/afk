@@ -134,9 +134,17 @@ now_seconds() { date +%s; }
 
 random_id() { head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
-file_size() { stat -f %z "$1" 2>/dev/null || echo 0; }
+# BSD stat (macOS) and GNU stat (Linux, where the unit tests also run) spell these
+# differently; `-f` on GNU stat means the filesystem, so the two cannot be chained.
+if [ "$(uname -s)" = "Darwin" ]; then
+  file_size() { stat -f %z "$1" 2>/dev/null || echo 0; }
+  file_mtime() { stat -f %m "$1" 2>/dev/null || now_seconds; }
+else
+  file_size() { stat -c %s "$1" 2>/dev/null || echo 0; }
+  file_mtime() { stat -c %Y "$1" 2>/dev/null || now_seconds; }
+fi
 
-file_age_seconds() { echo $(( $(now_seconds) - $(stat -f %m "$1" 2>/dev/null || now_seconds) )); }
+file_age_seconds() { echo $(( $(now_seconds) - $(file_mtime "$1") )); }
 
 pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
@@ -149,7 +157,7 @@ remove_current_session_files() { rm -f "$AFK_HOME/current" "$AFK_HOME/owner.pid"
 # sender's log, `afk status`, and the disk cap.
 queue_count() { find "$SESSION_DIR/queue" -name '*.ndjson' -type f 2>/dev/null | wc -l | tr -d ' '; }
 queue_bytes() {
-  find "$SESSION_DIR/queue" -name '*.ndjson' -type f -exec stat -f %z {} + 2>/dev/null \
+  find "$SESSION_DIR/queue" -name '*.ndjson' -type f -exec sh -c 'wc -c < "$1"' _ {} \; 2>/dev/null \
     | awk '{ s += $1 } END { print s + 0 }'
 }
 
