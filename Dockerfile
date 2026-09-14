@@ -1,9 +1,6 @@
-# afk server image: builds the dashboard, then runs the server through tsx.
-#
-# TODO(deploy): compile packages/server to plain JS instead of running it through
-# tsx in production, once the server has a build step (see BACKLOG.md
-# "Deployment"). Until then, tsx has to ship in the runtime image, which is why
-# it's a "dependency" of @afk/server rather than a "devDependency" -- see below.
+# afk server image: builds the dashboard and compiles the server, then runs the
+# compiled server with node alone. tsx is a devDependency and only used by
+# `pnpm dev:server`; it is not in this image.
 
 # The tag is kept for readability; the digest is what is actually pulled. It is the
 # multi-arch manifest list (OCI image index) for node:22-alpine, not one platform's
@@ -21,9 +18,10 @@ RUN corepack enable && \
     corepack prepare "pnpm@${PNPM_VERSION}" --activate
 
 # -----------------------------------------------------------------------------
-# `build`: a full install (including devDependencies -- vite, typescript, eslint,
-# ...) so `pnpm build` can build the dashboard. Only its output (packages/web/dist)
-# makes it into the final image; this whole stage is discarded afterwards.
+# `build`: a full install (including devDependencies -- typescript, vite, eslint,
+# ...) so `pnpm build` can compile @afk/shared and @afk/server (tsc, see their
+# tsconfig.build.json) and build the dashboard (vite). Only the three dist
+# directories make it into the final image; this whole stage is discarded.
 # -----------------------------------------------------------------------------
 FROM base AS build
 # The commit this image is built from, passed by infra/deploy.sh. .git is not in the
@@ -43,11 +41,6 @@ RUN pnpm build
 # carrying react/vite/eslint/etc: a plain `pnpm install --prod` at the workspace
 # root would still pull in @afk/web's *dependencies* (react, tanstack, ...) even
 # though nothing at runtime needs them.
-#
-# `tsx` ships here rather than being pruned with the rest of the devDependencies
-# because the server still runs through it in production -- see the TODO above.
-# It was moved from "devDependencies" to "dependencies" in packages/server's own
-# package.json for exactly this reason.
 # -----------------------------------------------------------------------------
 FROM base AS prod-deps
 # The lockfile is required for --frozen-lockfile; the manifests alone are not enough.
@@ -58,10 +51,10 @@ COPY packages/web/package.json ./packages/web/package.json
 RUN pnpm install --frozen-lockfile --prod --filter "@afk/server..."
 
 # -----------------------------------------------------------------------------
-# Runtime: pruned node_modules from `prod-deps`, the source the server actually
-# needs to run (its own src plus @afk/shared's, since neither is compiled), and
-# the built dashboard from `build`. No vite/react/eslint/typescript anywhere in
-# this image.
+# Runtime: pruned node_modules from `prod-deps`, the compiled server and shared
+# package and the built dashboard from `build`, the client script, and the two
+# package manifests node needs to resolve them. No TypeScript source, no
+# typescript/tsx/vite/react/eslint anywhere in this image.
 # -----------------------------------------------------------------------------
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 WORKDIR /app
@@ -72,28 +65,33 @@ ARG GIT_SHA=""
 ARG BUILD_TIME=""
 ENV AFK_BUILD_SHA=${GIT_SHA} AFK_BUILD_TIME=${BUILD_TIME}
 
-COPY --from=base /app/package.json ./package.json
-COPY pnpm-workspace.yaml ./pnpm-workspace.yaml
+# pnpm's layout: the real packages under /app/node_modules/.pnpm, and each workspace
+# package's node_modules holding symlinks into it (plus the @afk/shared workspace
+# link). node follows the symlinks; no pnpm is needed at runtime.
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=prod-deps /app/packages/server/node_modules ./packages/server/node_modules
 COPY --from=prod-deps /app/packages/shared/node_modules ./packages/shared/node_modules
 
-COPY packages/server/package.json packages/server/tsconfig.json ./packages/server/
-COPY packages/server/src ./packages/server/src
-COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
-COPY packages/shared/src ./packages/shared/src
+# packages/server/package.json is read at startup for the version /versionz reports;
+# packages/shared/package.json is the `exports` map through which the compiled server's
+# `import "@afk/shared"` reaches packages/shared/dist (its `afk-compiled` condition,
+# selected by the --conditions flag in CMD below).
+COPY packages/server/package.json ./packages/server/package.json
+COPY packages/shared/package.json ./packages/shared/package.json
+COPY --from=build /app/packages/server/dist ./packages/server/dist
+COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 
-# packages/server/src/config.ts resolves the dashboard at "../../web/dist" and the
-# client script at "../../../cli/afk" relative to its own directory, i.e.
-# packages/web/dist and cli/afk from the repo root -- keep that same relative
-# layout here rather than flattening it. The client is served at /cli/afk and by
-# the /install one-liner, so it has to ship in the image.
+# packages/server/src/paths.ts derives the repo root from its own location (three
+# directories up from dist/paths.js) and expects the dashboard at packages/web/dist
+# and the client at cli/afk under it -- so the image keeps the repo layout rather
+# than flattening it. The client is served at /cli/afk and by the /install
+# one-liner, so it has to ship in the image.
 COPY --from=build /app/packages/web/dist ./packages/web/dist
 COPY cli/afk ./cli/afk
 
-# The default `disk` storage writes to packages/server/data (config.ts resolves it
-# from its own directory). Production uses the bucket, but an image run without
-# AFK_STORAGE=s3 still has to be able to write there as the unprivileged user.
+# The default `disk` storage writes to packages/server/data (also from paths.ts).
+# Production uses the bucket, but an image run without AFK_STORAGE=s3 still has to
+# be able to write there as the unprivileged user.
 RUN mkdir -p packages/server/data && chown node:node packages/server/data
 
 # Run as the image's unprivileged user: nothing here needs root, and a bug in the
@@ -102,12 +100,8 @@ USER node
 
 # node is PID 1, with no pnpm or shell in front of it, so SIGTERM from a deploy
 # reaches the server's own handler (packages/server/src/shutdown.ts) and it can
-# drain its writes before exiting. `--import tsx` resolves the specifier from the
-# working directory, and tsx is a dependency of @afk/server, so run from there;
-# config.ts resolves every path from its own file, not from the cwd, and the
-# dashboard route derives its cwd-relative static root, so the layout still holds.
-# No pnpm in this stage: the workspace symlinks pnpm made in prod-deps are all
-# node needs to resolve @afk/shared.
-WORKDIR /app/packages/server
+# drain its writes before exiting. --conditions=afk-compiled makes `@afk/shared`
+# resolve to its compiled dist (see packages/shared/package.json); without it node
+# would land on the TypeScript source and refuse the .ts extension.
 EXPOSE 4141
-CMD ["node", "--import", "tsx", "src/index.ts"]
+CMD ["node", "--conditions=afk-compiled", "packages/server/dist/index.js"]
