@@ -56,6 +56,8 @@ describe("createStorage", () => {
       endpoint: undefined,
       accessKeyId: "key",
       secretAccessKey: "secret",
+      slabFlushSeconds: 60,
+      slabMaxFrames: 100,
     });
 
     expect(storage).toBeInstanceOf(S3SessionStorage);

@@ -26,8 +26,14 @@ export type SessionRecord = z.infer<typeof SessionRecord>;
  * an S3-compatible bucket (Lightsail object storage) for the hosted deployment.
  *
  * Frames are append-only and always arrive in index order, so `appendFrames` can be a
- * file append on disk or one new object per batch in a bucket; `readFrames` returns them
+ * file append on disk or a buffered slab object in a bucket; `readFrames` returns them
  * concatenated in order either way.
+ *
+ * The two optional methods exist for backends that hold frames in memory or keep them
+ * in a shape that is cheap to write but costly to read back (the bucket backend does
+ * both): `flush` is called from graceful shutdown, `compactSession` once a session is
+ * over. A backend that writes through and reads back in one go (disk, memory) leaves
+ * them out.
  *
  * Retention is `store/sweeper.ts`, built on listSessionIds/getSession/deleteSession so it
  * works the same against every backend.
@@ -36,10 +42,29 @@ export interface SessionStorage {
   /** Creates or replaces the session record (called on create and on end). */
   putSession(record: SessionRecord): Promise<void>;
   getSession(sessionId: string): Promise<SessionRecord | null>;
+  /**
+   * Persists frames that were accepted, in index order. Resolving is the backend's
+   * promise that a later `readFrames` from this process returns them; it may still be
+   * buffering them for durable storage (see `flush`).
+   */
   appendFrames(sessionId: string, frames: StoredFrame[]): Promise<void>;
   readFrames(sessionId: string): Promise<StoredFrame[]>;
   listSessionIds(): Promise<string[]>;
   deleteSession(sessionId: string): Promise<void>;
+  /**
+   * Writes everything still buffered in memory, for every session, to durable storage.
+   * Shutdown calls it after the store's write queues have drained.
+   */
+  flush?(): Promise<void>;
+  /**
+   * Rewrites an ended or expired session into whatever shape reads back cheapest, given
+   * the session's frames when the caller already holds them (the store does at end) so
+   * they need not be read back first. Resolves to whether anything was rewritten; a
+   * session that is already compact, or has no frames, is a no-op. Runs in the
+   * background at end and from the sweeper: it must be safe to call more than once,
+   * concurrently with reads, and to fail part way (reads must still be correct).
+   */
+  compactSession?(sessionId: string, frames?: readonly StoredFrame[]): Promise<boolean>;
 }
 
 /**

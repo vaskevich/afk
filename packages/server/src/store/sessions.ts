@@ -380,6 +380,29 @@ export class SessionStore {
     await this.storage.putSession(this.record(session));
     this.emitEvents(session, session.engine.closeAll(session.endedAt));
     this.emit(session, { type: "ended", summary: this.summary(session) });
+    void this.compactAfterEnd(session);
+  }
+
+  /**
+   * Hands an ended session's frames to a storage backend that compacts, once any
+   * append still queued has settled so the compaction sees every frame. Detached from
+   * `end` on purpose: the request that ended the session (or the tick, or a chain)
+   * must not wait on a bucket rewrite, and a failure is a warning, not an error to the
+   * caller; the sweeper retries it within the hour.
+   */
+  private async compactAfterEnd(session: Session): Promise<void> {
+    if (!this.storage.compactSession) {
+      return;
+    }
+    try {
+      await session.writeQueue.drain();
+      await this.storage.compactSession(session.sessionId, session.frames);
+    } catch (err) {
+      log.warn("could not compact ended session", {
+        session: session.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /** Frames after the given session-wide index (0 = everything). */
@@ -450,6 +473,16 @@ export class SessionStore {
   async drainWrites(): Promise<void> {
     const drains = [...this.sessions.values()].map((session) => session.writeQueue.drain());
     await Promise.all(drains);
+  }
+
+  /**
+   * Writes whatever the storage backend still holds in memory (the bucket backend's
+   * slabs) to durable storage; nothing to do for a backend that writes through.
+   * Shutdown calls it after `drainWrites`, so every accepted batch is in the buffer
+   * it flushes.
+   */
+  async flushStorage(): Promise<void> {
+    await this.storage.flush?.();
   }
 
   /**

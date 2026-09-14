@@ -347,16 +347,40 @@ For UI work the Vite dev server proxies `/api` to the server.
 
 `sessions/<id>/session.json` holds the session record; `sessions/<id>/frames.ndjson`
 is append-only, one stored frame per line, in index order. Per-stream sequence state
-is rebuilt from the frames on load rather than persisted. The bucket layout
-(`store/s3-storage.ts`) is the same except that each ingested batch becomes its own
-object under `sessions/<id>/frames/`, since object stores cannot append; a session is
-therefore thousands of small objects, and `readFrames` fetches them `READ_CONCURRENCY`
-(16) at a time, since the round trips, not the bytes, are what a cold load costs (see
-the 2026-09-14 entry in the decision log). Retention is
-`store/sweeper.ts`: every `AFK_SWEEP_INTERVAL_SECONDS` (one hour) it lists the stored
-sessions and deletes those that ended more than `AFK_RETENTION_DAYS` (7) ago, counting
-a session that never received an explicit end as ended when it hit its cap. It runs on
-the server so it works on every backend (Lightsail buckets have no lifecycle rules).
+is rebuilt from the frames on load rather than persisted.
+
+The bucket layout (`store/s3-storage.ts`) reaches the same shape in two steps, since
+object stores cannot append. While a session is live, `appendFrames` buffers accepted
+frames in memory and writes them as one **slab** object,
+`sessions/<id>/frames/<first index, zero padded>.ndjson`, every
+`AFK_S3_SLAB_FLUSH_SECONDS` (60) or `AFK_S3_SLAB_MAX_FRAMES` (100), whichever comes
+first (`flushed slab session= frames= trigger= ms=` at info); a graceful shutdown, a
+read of the session from the same process, and the session's end also flush it. A slab
+that fails to write is kept and retried, and the failure surfaces on the session's
+next `appendFrames` so the client spools and retries rather than the buffer growing.
+When the session ends (`SessionStore.end`, in the background after the end is
+recorded) or the sweeper finds it over, `compactSession` writes every frame as the one
+`sessions/<id>/frames.ndjson` object and deletes the slabs
+(`compacted session= frames= objects= ms=` at info, a warning on failure). `readFrames`
+prefers the compacted object and falls back to listing the `frames/` parts and fetching
+them `READ_CONCURRENCY` (16) at a time, so a session in either layout, one written
+before slabs existed (one object per ingested batch, same key scheme), or one caught
+between the two steps of a compaction all read the same. A cold load is therefore one
+GET for an ended session and at most a minute's worth of objects per hour for a live
+one (see the 2026-09-14 entries in the decision log).
+
+The slab interval is a durability window: a hard crash of the container (not a deploy
+or a restart, which flush on SIGTERM) loses up to that much of each live session, and
+the client, having been told those frames were accepted, does not resend them. Accepted
+on purpose; the "durable watermark" item under Storage & retention in BACKLOG.md is the
+fix if it ever matters.
+
+Retention is `store/sweeper.ts`: every `AFK_SWEEP_INTERVAL_SECONDS` (one hour) it lists
+the stored sessions, deletes those that ended more than `AFK_RETENTION_DAYS` (7) ago,
+counting a session that never received an explicit end as ended when it hit its cap,
+and compacts the over sessions it keeps that are still in parts (one cheap listing per
+kept session per run when there is nothing to do). It runs on the server so it works on
+every backend (Lightsail buckets have no lifecycle rules).
 
 ## Deployment
 
@@ -388,6 +412,29 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** Slabs on write, one object at end; a one-minute durability window is
+  accepted. The follow-up to the cold-load entry below: one bucket object per ingested
+  batch was the wrong layout, not just a slow read. `S3SessionStorage.appendFrames` now
+  buffers frames in memory and writes a slab every 60 s or 100 frames (whichever first,
+  `AFK_S3_SLAB_FLUSH_SECONDS` / `AFK_S3_SLAB_MAX_FRAMES`), and once a session is over
+  it is compacted into one `frames.ndjson` object with the slabs deleted, in the
+  background from `SessionStore.end` and from the sweeper for sessions that expired
+  without an end (a restart before the silence rule fired, or a client that hit the cap
+  without chaining) or whose compaction at end failed. A one-hour session is ~60 objects
+  while live and one afterwards, against ~3,600 before; a cold load of an ended session
+  is one GET. The read path handles both layouts and a compaction that failed between
+  its two steps, and the sweeper's per-session cost when there is nothing to do is one
+  listing. The price is durability: `appendFrames` acknowledges a batch once it is
+  buffered, so a hard crash (SIGKILL, a node reboot) loses up to one slab interval of
+  each live session, and the client, told those frames were accepted, does not resend
+  them. Accepted because every planned restart (deploys, `SIGTERM`) flushes in the
+  shutdown sequence, the end of a session flushes, a hard crash of the container has
+  not happened, and the alternative (a per-stream durable watermark the client resends
+  against) is client and protocol work that is only worth doing if a crash ever does
+  lose frames; it is written up under Storage & retention in BACKLOG.md. The
+  single-writer assumptions in the SRE review's data item are unchanged: slabs and the
+  compacted object are keyed the same way the parts were, and one server per bucket is
+  still required.
 - **2026-09-14** A cold dashboard load costs round trips, not bytes. The first visit to
   `/s/DbTEUHkKfXpo7biKEmk7XC` after the cache had let the session go took 40 s on the
   hosted instance, every reload after it milliseconds: the session was 4,320 frames in

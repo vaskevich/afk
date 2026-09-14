@@ -27,6 +27,19 @@ function gateAppends(storage: MemorySessionStorage): () => void {
   return release;
 }
 
+/** A storage that buffers, the way the bucket backend does, whose flush the test controls. */
+class BufferingStorage extends MemorySessionStorage {
+  flushCalls = 0;
+  failFlush = false;
+
+  async flush(): Promise<void> {
+    this.flushCalls++;
+    if (this.failFlush) {
+      throw new Error("simulated flush failure");
+    }
+  }
+}
+
 /** A store with one active session whose first batch is stuck behind the returned gate. */
 async function storeWithPendingWrite() {
   const storage = new MemorySessionStorage();
@@ -103,6 +116,45 @@ describe("shutdown", () => {
 
     expect(deps.exit).toHaveBeenCalledExactlyOnceWith(EXIT_CODE_CLEAN);
     await expect(storage.readFrames(session.sessionId)).resolves.toHaveLength(1);
+  });
+
+  it("flushes what storage still buffers once the writes have drained", async () => {
+    vi.spyOn(log, "info").mockImplementation(() => {});
+    const storage = new BufferingStorage();
+    const store = new SessionStore(storage);
+    const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+    const release = gateAppends(storage);
+    const ingest = store.ingest(session, [makeSystemFrame(0)]);
+    const server = await listeningServer();
+    const deps = makeDeps();
+
+    const done = shutdown("SIGTERM", { server, store, ...deps });
+    await settle();
+    expect(storage.flushCalls).toBe(0);
+    release();
+    await done;
+    await ingest;
+
+    expect(storage.flushCalls).toBe(1);
+    expect(deps.exit).toHaveBeenCalledExactlyOnceWith(EXIT_CODE_CLEAN);
+  });
+
+  it("still exits cleanly when the storage flush fails, logging the failure", async () => {
+    vi.spyOn(log, "info").mockImplementation(() => {});
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const storage = new BufferingStorage();
+    storage.failFlush = true;
+    const store = new SessionStore(storage);
+    const server = await listeningServer();
+    const deps = makeDeps();
+
+    await shutdown("SIGTERM", { server, store, ...deps });
+
+    expect(error).toHaveBeenCalledExactlyOnceWith("storage flush failed", {
+      signal: "SIGTERM",
+      error: "simulated flush failure",
+    });
+    expect(deps.exit).toHaveBeenCalledExactlyOnceWith(EXIT_CODE_CLEAN);
   });
 
   it("exits with the forced code once the timeout passes while a drain is still pending", async () => {

@@ -7,7 +7,8 @@
  *   1. stop the ticker and the sweeper, so no new periodic work starts;
  *   2. stop accepting connections and drop idle keep-alive ones;
  *   3. wait for every in-memory session's write queue to drain, so no batch that
- *      was accepted is left half-written;
+ *      was accepted is left half-written, then flush what storage still buffers
+ *      (the bucket backend's slabs), so nothing accepted is lost to the restart;
  *   4. close whatever connections remain (SSE streams end here; the dashboard
  *      reconnects with Last-Event-ID) and wait for the server to close;
  *   5. exit 0.
@@ -84,6 +85,16 @@ export async function shutdown(signal: string, deps: ShutdownDeps): Promise<void
 
   const { sessionsInMemory: sessions } = store.stats();
   await store.drainWrites();
+  try {
+    await store.flushStorage();
+  } catch (err) {
+    // What did not flush stays in the bucket as the last slab written; the session
+    // reads short of those frames. Still worth closing cleanly.
+    log.error("storage flush failed", {
+      signal,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   log.info("writes drained", { sessions });
 
   // Ends SSE streams and any request still open; the dashboard reconnects on its own.

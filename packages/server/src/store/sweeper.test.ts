@@ -7,6 +7,7 @@ import { log } from "../log/logger.ts";
 import { DiskSessionStorage } from "./disk-storage.ts";
 import { SessionStore } from "./sessions.ts";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
+import type { StoredFrame } from "@afk/shared";
 import { MS_PER_DAY, startSweeper, sweepExpiredSessions } from "./sweeper.ts";
 
 const RETENTION_MS = 7 * MS_PER_DAY;
@@ -71,6 +72,32 @@ class BrokenReadStorage implements SessionStorage {
   }
 }
 
+/**
+ * A storage that can compact, the way the bucket backend can: records each call, reports
+ * the first compaction of a session as work done and later ones as nothing to do, and
+ * fails for one session if told to.
+ */
+class CompactingStorage extends MemorySessionStorage {
+  readonly compactCalls: { sessionId: string; frames: readonly StoredFrame[] | undefined }[] = [];
+  private readonly compacted = new Set<string>();
+
+  constructor(private readonly brokenSessionId?: string) {
+    super();
+  }
+
+  async compactSession(sessionId: string, frames?: readonly StoredFrame[]): Promise<boolean> {
+    this.compactCalls.push({ sessionId, frames });
+    if (sessionId === this.brokenSessionId) {
+      throw new Error("simulated compaction failure");
+    }
+    if (this.compacted.has(sessionId)) {
+      return false;
+    }
+    this.compacted.add(sessionId);
+    return true;
+  }
+}
+
 /** Wraps a storage so each `listSessionIds` call blocks until the test releases it. */
 class GatedListStorage implements SessionStorage {
   listCalls = 0;
@@ -118,7 +145,7 @@ describe("sweepExpiredSessions", () => {
 
     const result = await sweepExpiredSessions(storage, store, T0_MS + RETENTION_MS, RETENTION_MS);
 
-    expect(result).toEqual({ scanned: 1, deleted: 1 });
+    expect(result).toEqual({ scanned: 1, deleted: 1, compacted: 0 });
     await expect(storage.getSession(record.sessionId)).resolves.toBeNull();
     expect(store.stats().sessionsInMemory).toBe(0);
   });
@@ -136,7 +163,7 @@ describe("sweepExpiredSessions", () => {
       RETENTION_MS,
     );
 
-    expect(result).toEqual({ scanned: 1, deleted: 0 });
+    expect(result).toEqual({ scanned: 1, deleted: 0, compacted: 0 });
     await expect(storage.getSession(record.sessionId)).resolves.toEqual(record);
   });
 
@@ -148,7 +175,7 @@ describe("sweepExpiredSessions", () => {
 
     const result = await sweepExpiredSessions(storage, store, T0_MS + 1_000, 0);
 
-    expect(result).toEqual({ scanned: 1, deleted: 0 });
+    expect(result).toEqual({ scanned: 1, deleted: 0, compacted: 0 });
     await expect(storage.getSession(record.sessionId)).resolves.toEqual(record);
   });
 
@@ -167,8 +194,8 @@ describe("sweepExpiredSessions", () => {
     );
     const swept = await sweepExpiredSessions(storage, store, cappedAt + RETENTION_MS, RETENTION_MS);
 
-    expect(kept).toEqual({ scanned: 1, deleted: 0 });
-    expect(swept).toEqual({ scanned: 1, deleted: 1 });
+    expect(kept).toEqual({ scanned: 1, deleted: 0, compacted: 0 });
+    expect(swept).toEqual({ scanned: 1, deleted: 1, compacted: 0 });
     await expect(storage.getSession(record.sessionId)).resolves.toBeNull();
   });
 
@@ -183,8 +210,61 @@ describe("sweepExpiredSessions", () => {
 
     const result = await sweepExpiredSessions(storage, store, T0_MS + RETENTION_MS, RETENTION_MS);
 
-    expect(result).toEqual({ scanned: 3, deleted: 2 });
+    expect(result).toEqual({ scanned: 3, deleted: 2, compacted: 0 });
     await expect(inner.listSessionIds()).resolves.toEqual(["broken"]);
+  });
+
+  it("compacts an over session it keeps when storage can, and only the first time", async () => {
+    const storage = new CompactingStorage();
+    await storage.putSession(makeRecord({ sessionId: "ended", endedAt: T0_MS }));
+    await storage.putSession(makeRecord({ sessionId: "capped", endedAt: null }));
+    await storage.putSession(
+      makeRecord({ sessionId: "live", endedAt: null, startedAt: T0_MS + MAX_DURATION_MS }),
+    );
+    const store = new SessionStore(storage);
+    const now = T0_MS + MAX_DURATION_MS + 1;
+
+    const first = await sweepExpiredSessions(storage, store, now, RETENTION_MS);
+    const second = await sweepExpiredSessions(storage, store, now, RETENTION_MS);
+
+    expect(first).toEqual({ scanned: 3, deleted: 0, compacted: 2 });
+    expect(second).toEqual({ scanned: 3, deleted: 0, compacted: 0 });
+    // Without frames: the sweeper holds none, storage reads them back itself.
+    expect(storage.compactCalls.map((call) => call.sessionId).sort()).toEqual([
+      "capped",
+      "capped",
+      "ended",
+      "ended",
+    ]);
+    expect(storage.compactCalls.every((call) => call.frames === undefined)).toBe(true);
+  });
+
+  it("does not compact a session it deletes", async () => {
+    const storage = new CompactingStorage();
+    await storage.putSession(makeRecord({ endedAt: T0_MS }));
+    const store = new SessionStore(storage);
+
+    const result = await sweepExpiredSessions(storage, store, T0_MS + RETENTION_MS, RETENTION_MS);
+
+    expect(result).toEqual({ scanned: 1, deleted: 1, compacted: 0 });
+    expect(storage.compactCalls).toEqual([]);
+  });
+
+  it("carries on with the other sessions when compacting one of them fails", async () => {
+    const storage = new CompactingStorage("broken");
+    await storage.putSession(makeRecord({ sessionId: "endedA", endedAt: T0_MS }));
+    await storage.putSession(makeRecord({ sessionId: "broken", endedAt: T0_MS }));
+    await storage.putSession(makeRecord({ sessionId: "endedB", endedAt: T0_MS }));
+    const store = new SessionStore(storage);
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+    const result = await sweepExpiredSessions(storage, store, T0_MS + 1, RETENTION_MS);
+
+    expect(result).toEqual({ scanned: 3, deleted: 0, compacted: 2 });
+    expect(warn).toHaveBeenCalledExactlyOnceWith("sweeper could not compact a session", {
+      session: "broken",
+      error: "simulated compaction failure",
+    });
   });
 
   it("removes a swept session's directory from disk storage", async () => {
