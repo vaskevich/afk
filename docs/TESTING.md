@@ -53,10 +53,15 @@ rules below are what it demonstrates.
 - **server store** (`store/`): `SessionStore` with `MemorySessionStorage`; `DiskSessionStorage`
   against a temp dir; the S3 backend against a small fake client object implementing only
   the commands it uses. Cover de-duplication, write-before-advance, lazy load, hydrate.
-- **server routes** (`routes/`, `middleware/`): build the app with `createApp(config, new
-SessionStore(new MemorySessionStorage()))` and call `app.request(path, init)`. For the SSE
-  route read the response body as text with a bounded number of events. Cover auth, 410
-  on ended sessions, NDJSON validation errors naming the line, resume from an index.
+- **server routes** (`routes/`, `middleware/`): build the app with
+  `createApp(makeAppConfig(overrides), new SessionStore(new MemorySessionStorage()))` and
+  call `app.request(path, init)`. `routes/test-helpers.ts` has `makeAppConfig`,
+  `createTestSession`, `postFrames` / `postFrameBody`, and `endTestSession`, all sending
+  the `X-Afk-Client` header the client-facing routes require (pass `{}` as the headers
+  argument to test its absence). For the SSE route read the response body as text with a
+  bounded number of events. Cover auth, 410 on ended sessions, 426 on old clients, 413
+  at the body limit boundary, NDJSON validation errors naming the line, resume from an
+  index.
 - **server utils** (`utils/`): small and exhaustive.
 - **web** (`packages/web/src`): pure modules first (`timeline/model.ts`, `clusters.ts`,
   `viewport.ts`, `events.ts`, `format.ts`, the fixture generator). Hooks and components

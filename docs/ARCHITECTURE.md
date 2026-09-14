@@ -77,7 +77,11 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
 - `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end),
   `frames` (ingest), `stream` (history + SSE), `web` (built dashboard).
 - `middleware/ingest-auth.ts` resolves the session, checks the bearer ingest token,
-  rejects non-active sessions with 410.
+  rejects non-active sessions with 410. `middleware/client-version.ts` checks the
+  `X-Afk-Client` header on the client-facing routes (426 below the minimum),
+  `middleware/body-limit.ts` caps request bodies (413), and
+  `middleware/security-headers.ts` sets the CSP and the rest of the security headers
+  on every response. See "Hardening" below.
 - `store/sessions.ts` is the in-memory working set: active sessions, per-stream
   sequence bookkeeping, SSE listeners. It writes through to `store/storage.ts`, the
   `SessionStorage` interface, and lazily loads sessions it does not have in memory.
@@ -158,6 +162,40 @@ max streams per session, sessions and frames currently in memory, uptime, and th
 server version — unauthenticated and cheap, for the landing page and for operators
 checking headroom.
 
+#### Hardening
+
+Three request-level guards, each a middleware so route handlers stay about their
+resource:
+
+- **Minimum client version** (`middleware/client-version.ts`). The client-facing
+  routes (create, frames, end) parse `X-Afk-Client: <name>/<semver>` and answer
+  `426 Upgrade Required` when the version is below `minimumVersions.clientVersion`, or
+  when the header is missing or malformed (every real client sends one; a browser never
+  hits these routes). Create additionally answers 426 for a `protocolVersion` outside
+  `[minimumVersions.protocolVersion, PROTOCOL_VERSION]`, intercepted before the schema
+  so an old client sees an upgrade message rather than a validation error. Every 426
+  carries the same `UpgradeRequiredDetails` so the client prints one hint. The floors
+  default to the shared `MIN_CLIENT_VERSION` / `MIN_PROTOCOL_VERSION` and are raised per
+  deployment with `AFK_MIN_CLIENT_VERSION` / `AFK_MIN_PROTOCOL_VERSION`; the policy for
+  when to raise them is [VERSIONING.md](VERSIONING.md). Semver comparison is a
+  three-integer helper in `utils/semver.ts`, no dependency.
+- **Body limits** (`middleware/body-limit.ts`, Hono's `bodyLimit` answering 413 with an
+  `ErrorResponse`). 1 MiB on ingest: a client batch is at most 200 one-second queue
+  files of a system frame plus at most one run frame each, roughly 130 KB, so the cap is
+  far above anything a working client sends and far below anything worth buffering. 4
+  KiB on create, whose body is a few hundred bytes at the schema's maximums. The client
+  already parks a 413 batch in `rejected/`.
+- **Security headers** (`middleware/security-headers.ts`, Hono's `secureHeaders` on
+  the whole app). The CSP is `default-src 'self'; img-src 'self' data:; style-src
+'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'` with
+  `X-Frame-Options: DENY`. No `'unsafe-inline'` is needed for styles because Vite
+  extracts the dashboard's CSS into a hashed file and React applies `style` props
+  through the CSSOM, which CSP does not govern; verified in the browser against the
+  built dashboard, including the canvas timeline and a live SSE session.
+
+Still open: rate limiting session creation per client address, and an optional shared
+secret for private servers (BACKLOG.md).
+
 ### Dashboard (`packages/web`)
 
 Vite + React 19 + TanStack Router and Query. Plain CSS, no chart library. The page
@@ -230,6 +268,17 @@ private network. See `infra/` and the Deployment section of BACKLOG.md.
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** Two version numbers, not one: the protocol version (wire contract,
+  bumped only for incompatible changes, server accepts a range) and the client version
+  (semver, bumped every release, with a server minimum used only to retire clients with
+  known-bad behaviour). Rejections are `426` with one shared details shape so the bash
+  client prints one upgrade hint. Reasoning: people download `cli/afk` once, so the
+  server must keep old clients working for as long as possible; conflating the two
+  numbers would force upgrades on every client release. See [VERSIONING.md](VERSIONING.md).
+- **2026-09-14** Server hardening as middleware: minimum client version (426), body
+  limits (1 MiB ingest, 4 KiB create, 413), and Hono's `secureHeaders` with a strict
+  CSP (`style-src 'self'`, no `'unsafe-inline'`, since Vite extracts CSS and React uses
+  the CSSOM). Verified in the browser against the built dashboard.
 - **2026-09-14** Tests are Vitest, one config at the repo root, co-located with the
   code they cover (`foo.test.ts` next to `foo.ts`), builders (`makeSystemFrame`,
   `makeEvent`, …) over literals, real implementations (`MemorySessionStorage`,
