@@ -59,7 +59,7 @@ object storage (S3-compatible API) for the hosted deployment.
 
 - [x] vitest for shared schemas and server routes -- one config at the repo root, co-located tests; see [docs/TESTING.md](docs/TESTING.md)
 - [x] bats tests for the bash client (json helpers, collector output validates against the schema) -- done via Vitest instead of bats: `cli/afk` is sourced with `AFK_SOURCED=1` and its functions called directly, per docs/TESTING.md
-- [ ] Contract test: run the real `afk` collector output through the Zod schema (current cli tests validate `collect_system`'s output against the shared schema; running the actual compiled binary end-to-end through it is still open)
+- [x] Contract test: run the real `afk` collector output through the Zod schema -- `cli/contract.test.ts` runs the real `cli/afk` against the real server over HTTP (`pnpm test:contract`, macOS only) and validates everything it sends with the shared schemas; see docs/TESTING.md
 - [ ] Fix the doc comment in `packages/web/src/data/fixtureSource.ts` (top of file and the `STALE_START`/`STALE_END` comment): it promises "a 90 s stretch with no frames at all", but the measured gap between the last frame before the stretch and the first after it is 91 s, since `STALE_END` itself is excluded from the stretch but still marks the far edge of the gap between samples. `fixtureSource.test.ts`'s "has a gap in frame timestamps for the documented stale stretch" test already documents and asserts the 91 s reality -- only the doc comment is stale.
 
 ## Dashboard

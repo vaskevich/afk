@@ -67,6 +67,27 @@ SessionStore(new MemorySessionStorage()))` and call `app.request(path, init)`. F
   validated with the shared Zod schema, the spool rotate and batch logic against a temp
   `AFK_HOME` and a tiny local HTTP server started in the test. Bash 3.2 only.
 
+## The contract test
+
+`cli/contract.test.ts` is the one test that crosses the client/server boundary: it runs
+the real `cli/afk` (`afk start`, `afk run`) as child processes against the real server
+(`createApp` with `MemorySessionStorage`, listening on a random loopback port through
+`@hono/node-server`) and asserts the wire contract in [docs/PROTOCOL.md](PROTOCOL.md)
+end to end: session create with this machine's host info, schema-valid frames, resend
+and de-duplication across a server outage, `afk run` joining a session or starting its
+own, admission control (`afk start` waits, `afk run` falls back to no telemetry), and
+the SSE read path of an ended session.
+
+It is the sanctioned exception to rules 6 and 8 above: it needs a real socket and real
+seconds, because the client samples at 1 Hz. Every wait is still a bounded poll with a
+deadline (through the server's own `GET /api/sessions/:id/frames`), never a fixed sleep,
+and every child process is killed in `afterEach` so a failing test never leaves an `afk`
+running. The collectors are macOS-only, so the file is skipped elsewhere (including CI).
+
+```bash
+pnpm test:contract   # just this file, about 20 s; also part of pnpm test on macOS
+```
+
 ## What not to do
 
 - Snapshot tests of large objects or rendered markup.

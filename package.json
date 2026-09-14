@@ -13,11 +13,13 @@
     "format:check": "prettier --check .",
     "build": "pnpm -r build",
     "test": "vitest run",
+    "test:contract": "vitest run cli/contract.test.ts",
     "test:watch": "vitest"
   },
   "devDependencies": {
     "@afk/shared": "workspace:*",
     "@eslint/js": "^10.0.1",
+    "@hono/node-server": "^1.13.0",
     "@testing-library/react": "^16.3.3",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
