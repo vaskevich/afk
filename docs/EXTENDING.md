@@ -63,8 +63,10 @@ Implement `SessionStorage` in `packages/server/src/store/storage.ts`:
 | `deleteSession`  | rm -rf                          | delete every key under the prefix                            |
 
 Frames always arrive in index order and are never rewritten, which is what makes the
-object-store variant simple. Wire the choice up in `src/index.ts` (planned:
-`AFK_STORAGE=disk|s3`).
+object-store variant simple. `store/s3-storage.ts` is the S3-compatible
+implementation (Lightsail buckets, real S3, MinIO); `store/create-storage.ts`
+exports `createStorageFromEnv`, which picks a backend from `AFK_STORAGE=disk|s3`
+(and the `AFK_S3_*` variables for the latter) for `src/index.ts` to use.
 
 ## Adding a dashboard data source
 

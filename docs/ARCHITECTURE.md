@@ -64,8 +64,9 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   `SessionStorage` interface, and lazily loads sessions it does not have in memory.
   Frames are persisted **before** in-memory state advances, so a failed write is
   retried by the client rather than being counted as a duplicate.
-- `store/disk-storage.ts` is the local implementation. An S3-compatible one for
-  Lightsail object storage is planned (see BACKLOG.md).
+- `store/disk-storage.ts` is the local implementation; `store/s3-storage.ts` is the
+  S3-compatible one used against Lightsail object storage in production.
+  `store/create-storage.ts` picks between them from `AFK_STORAGE=disk|s3`.
 - `log/describe.ts` formats frames for server logs; interpretation constants such as
   memory pressure labels live here or in shared.
 
@@ -106,10 +107,10 @@ For UI work the Vite dev server proxies `/api` to the server.
 
 `sessions/<id>/session.json` holds the session record; `sessions/<id>/frames.ndjson`
 is append-only, one stored frame per line, in index order. Per-stream sequence state
-is rebuilt from the frames on load rather than persisted. The bucket layout will be
-the same except that each ingested batch becomes its own object, since object stores
-cannot append. Retention (delete 7 days after end) is a server-side sweeper so it
-works on every backend.
+is rebuilt from the frames on load rather than persisted. The bucket layout
+(`store/s3-storage.ts`) is the same except that each ingested batch becomes its own
+object under `sessions/<id>/frames/`, since object stores cannot append. Retention
+(delete 7 days after end) is a server-side sweeper so it works on every backend.
 
 ## Deployment
 
@@ -122,6 +123,12 @@ private network. See `infra/` and the Deployment section of BACKLOG.md.
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** Lightsail bucket credentials reach the container as plain
+  environment variables (`AFK_S3_ACCESS_KEY_ID`/`AFK_S3_SECRET_ACCESS_KEY`), set by
+  `deploy.sh` from `tofu output`. Lightsail's "resource access" feature (granting
+  compute direct, keyless access to a bucket) only supports instances, not
+  container services, so there's no keyless option here; an access key is the
+  only mechanism available.
 - **2026-09-14** Deploy as a Lightsail container service, not an instance. Removes the
   cloud-init bootstrap, rsync deploys, and Caddy at about +$2/month. Consequence: no
   local disk in production, so storage goes through an interface.
