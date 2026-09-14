@@ -8,7 +8,9 @@
 # (what macOS ships), curl, and stock macOS tools only. No jq, no python.
 #
 # Usage:
-#   afk start [--no-qr]  start a session in the foreground (Ctrl-C to end it)
+#   afk start [--no-qr] [--force]
+#                        start a session in the foreground (Ctrl-C to end it); refuses
+#                        while another `afk start` runs here unless --force ends it
 #   afk run [--no-qr] -- <cmd>
 #                        run a command and report its progress; joins the session
 #                        started by `afk start` if one is running on this machine,
@@ -111,6 +113,8 @@ CHAIN_RETRY_SECONDS=5
 # continued too, but not when it is this young: a server that answers 410 to everything
 # must not produce a session every few seconds.
 CHAIN_MIN_SESSION_SECONDS=60
+# `afk start --force` waits this long for the old owner to flush its queue and exit.
+FORCE_TAKEOVER_WAIT_SECONDS=30
 
 # `afk start` removes old session directories on startup: ended ones (a `done` marker)
 # after a day, ones that never ended (a crash) two days after they last changed.
@@ -886,15 +890,50 @@ cmd_qr() {
   fetch_qr || die "could not fetch the QR code from $AFK_SERVER; the dashboard is at $DASHBOARD_URL"
 }
 
+# `afk start` while another one runs on this machine: refuse, naming that session,
+# unless --force, which asks the old owner to finish (SIGTERM, the same as `afk stop`:
+# it flushes its queue and ends its session) and waits for it to remove `current`.
+# A session whose owner is gone, or which the server says is over, is cleared by
+# load_current_session and does not count.
+guard_running_session() { # force
+  local rc pid waited=0 server=$AFK_SERVER
+  load_current_session; rc=$?
+  # read_current_file switched to the running session's server; the new session goes
+  # to the one this command was given.
+  AFK_SERVER=$server
+  if [ "$rc" = 1 ]; then
+    return 0
+  fi
+  pid=$(owner_pid)
+  if [ "$1" != 1 ]; then
+    log "error: a session is already running on this machine (pid ${pid:-?}): $DASHBOARD_URL"
+    log "use 'afk status' to see it, 'afk stop' to end it, or 'afk start --force' to take it over"
+    exit 1
+  fi
+  log "taking over: asking pid $pid to end session $SESSION_ID"
+  kill -TERM "$pid" 2>/dev/null || die "could not signal pid $pid"
+  while [ -e "$AFK_HOME/current" ] && pid_alive "$pid" && [ "$waited" -lt "$FORCE_TAKEOVER_WAIT_SECONDS" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if pid_alive "$pid"; then
+    die "pid $pid has not ended session $SESSION_ID after ${FORCE_TAKEOVER_WAIT_SECONDS}s; stop it yourself"
+  fi
+  # An owner that died without running its exit trap leaves the files behind.
+  remove_current_session_files
+}
+
 cmd_start() {
-  local arg
+  local arg force=0
   for arg in "$@"; do
     case "$arg" in
       --no-qr) AFK_NO_QR=1 ;;
+      --force) force=1 ;;
       *) die "unknown option: $arg (try 'afk help')" ;;
     esac
   done
   check_platform
+  guard_running_session "$force"
   cleanup_old_sessions
   gather_host_info
   create_session_or_wait

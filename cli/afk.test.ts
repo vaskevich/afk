@@ -1567,6 +1567,92 @@ describe("afk stop", () => {
   });
 });
 
+describe("afk start with a session already running", () => {
+  const created =
+    '{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/newSession","maxDurationSeconds":3600}';
+
+  /** A server with one active session and room for another; frames and ends are accepted. */
+  function startGuardServer(): Promise<TestServer> {
+    return startServer((req) => {
+      if (req.url === "/api/sessions" && req.method === "POST") {
+        return { status: 201, body: created };
+      }
+      if (req.url === "/api/sessions/oldSession") {
+        return {
+          status: 200,
+          body: '{"status":"active","maxDurationSeconds":3600,"streamCount":1,"maxStreams":10}',
+        };
+      }
+      return { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' };
+    });
+  }
+
+  async function writeCurrent(afkHome: string, serverUrl: string): Promise<void> {
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=oldSession\ningestToken=tok-old\nserver=${serverUrl}\ndashboardUrl=http://example.test/s/oldSession\n`,
+    );
+  }
+
+  // check_platform runs first and only passes on macOS.
+  it.skipIf(process.platform !== "darwin")(
+    "refuses with the running session's URL and the hint, exiting 1 without creating anything",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startGuardServer();
+      await writeCurrent(afkHome, server.url);
+
+      const { stdout, stderr, code } = await runBash(
+        'echo "$$" > "$AFK_HOME/owner.pid"; main start --no-qr',
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+      );
+
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("already running on this machine");
+      expect(stderr).toContain("http://example.test/s/oldSession");
+      expect(stderr).toContain("afk start --force");
+      expect(server.requests.map((req) => req.url)).toEqual(["/api/sessions/oldSession"]);
+      expect(await exists(join(afkHome, "current"))).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "--force ends the old owner, clears its files, and starts a new session on the given server",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startGuardServer();
+      await writeCurrent(afkHome, server.url);
+
+      // A sleeping background job stands in for the old owner; it dies of the SIGTERM
+      // without cleaning up, the way a crashed owner would.
+      const { stdout, stderr } = await runBash(
+        [
+          'sleep 30 & OWNER=$!; echo "$OWNER" > "$AFK_HOME/owner.pid"',
+          'main start --force --no-qr > "$AFK_HOME/out.txt" 2> "$AFK_HOME/err.txt" & START=$!',
+          'for _ in $(seq 1 40); do grep -q "/s/newSession" "$AFK_HOME/out.txt" 2>/dev/null && break; sleep 0.1; done',
+          'kill -TERM "$START"; wait "$START"; printf "START_RC=%d\\n" "$?"',
+          'wait "$OWNER" 2>/dev/null; printf "OWNER_RC=%d\\n" "$?"',
+          'printf "URL=%s\\n" "$(grep -o "http://example.test/s/[A-Za-z]*" "$AFK_HOME/out.txt")"',
+          'printf "TAKEOVER=%s\\n" "$(grep -c "taking over" "$AFK_HOME/err.txt")"',
+        ].join("\n"),
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+      );
+
+      expect(parseKeyValueLines(stdout), stderr).toEqual({
+        START_RC: "0",
+        OWNER_RC: "143",
+        URL: "http://example.test/s/newSession",
+        TAKEOVER: "1",
+      });
+      const urls = server.requests.map((req) => req.url);
+      expect(urls.slice(0, 2)).toEqual(["/api/sessions/oldSession", "/api/sessions"]);
+      expect(urls.at(-1)).toBe("/api/sessions/newSession/end");
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+    },
+  );
+});
+
 describe("afk with no state", () => {
   it("help prints the usage and exits 0", async () => {
     const afkHome = await makeTempDir();
