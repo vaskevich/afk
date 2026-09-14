@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Oleg Vaskevich
+# SPDX-License-Identifier: MIT
+# https://github.com/vaskevich/afk
 #
 # afk — away-from-keyboard telemetry for your machine.
 #
@@ -986,8 +989,10 @@ cmd_stop() {
   fi
 }
 
+# The header comment from the "afk —" line to the first blank line, without the license
+# notice above it.
 usage() {
-  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+  awk '/^# afk /{ printing = 1 } printing && /^$/{ exit } printing' "$0" | sed 's/^# \{0,1\}//'
 }
 
 main() {
