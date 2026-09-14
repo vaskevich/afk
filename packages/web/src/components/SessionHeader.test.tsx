@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, screen, within } from "@testing-library/react";
 import { makeSessionSummary } from "@afk/shared/testing";
 import { DEMO_SESSION_ID } from "../data/source.ts";
 import { renderOnSessionRoute } from "../test-helpers.tsx";
@@ -55,6 +55,20 @@ describe("SessionHeader chain links", () => {
 
     expect(await screen.findByRole("link", { name: "← previous session" })).toBeDefined();
     expect(screen.queryByRole("link", { name: "next session →" })).toBeNull();
+  });
+});
+
+describe("SessionHeader actions", () => {
+  it("reads Share, then the theme toggle, then Delete, left to right", async () => {
+    await renderOnSessionRoute(header());
+
+    const share = await screen.findByRole("button", { name: "Share" });
+    const actions = share.parentElement!.parentElement!;
+
+    const names = within(actions)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label") ?? button.textContent);
+    expect(names).toEqual(["Share", expect.stringMatching(/^Theme:/), "Delete this session"]);
   });
 });
 

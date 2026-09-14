@@ -45,8 +45,8 @@ export function SessionHeader({ session, connection, deleted, onDeleted }: Props
         )}
       </h1>
       <div className="header-actions">
-        <ThemeToggle />
         <SharePanel url={window.location.href} />
+        <ThemeToggle />
         {deletable && <DeleteSession sessionId={session.sessionId} onDeleted={onDeleted} />}
       </div>
       <dl className="facts">
