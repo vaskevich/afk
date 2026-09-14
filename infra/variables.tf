@@ -29,6 +29,7 @@ variable "hosted_zone_name" {
 }
 
 variable "bucket_name" {
-  description = "Name for the Lightsail bucket that holds session files. Bucket names are global across all of Lightsail/S3, so there's no safe shared default -- pick something unique, e.g. \"afk-sessions-<your-handle-or-account-id>\"."
+  description = "Name for the Lightsail bucket that holds session files. Bucket names are global across all of Lightsail/S3; override if the default is taken or you are self-hosting."
   type        = string
+  default     = "afk-osv-im"
 }
