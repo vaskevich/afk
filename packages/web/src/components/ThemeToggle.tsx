@@ -15,9 +15,10 @@ const OPTIONS: { preference: ThemePreference; label: string; description: string
 ];
 
 /**
- * At rest, one small button showing the theme in use, with a dot when it was chosen
- * here rather than taken from the operating system. Hovering it, focusing it from
- * the keyboard, or tapping it (touch has no hover) reveals the three choices.
+ * At rest, a button styled like its neighbours showing the theme in use, with a dot
+ * when it was chosen here rather than taken from the operating system. Hovering it,
+ * focusing it from the keyboard, or tapping it (touch has no hover) drops the three
+ * choices down below it.
  */
 export function ThemeToggle() {
   const { preference, resolved, setPreference } = useTheme();
@@ -86,7 +87,7 @@ export function ThemeToggle() {
         title={summary}
         onClick={() => setTapped((open) => !open)}
       >
-        {RESOLVED_GLYPHS[resolved]}
+        {RESOLVED_GLYPHS[resolved]} {resolved}
       </button>
       <div className="theme-menu-options" role="group" aria-label="Theme" hidden={!expanded}>
         {OPTIONS.map((option) => (

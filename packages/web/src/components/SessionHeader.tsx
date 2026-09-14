@@ -37,8 +37,10 @@ export function SessionHeader({ session, connection }: Props) {
           </span>
         )}
       </h1>
-      <ThemeToggle />
-      <SharePanel url={window.location.href} />
+      <div className="header-actions">
+        <ThemeToggle />
+        <SharePanel url={window.location.href} />
+      </div>
       <dl className="facts">
         <div>
           <dt>started</dt>

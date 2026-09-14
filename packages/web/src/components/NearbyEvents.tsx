@@ -20,7 +20,12 @@ function isNear(event: AnomalyEvent, cursor: number, latest: number, radiusMs: n
   return event.startedAt - radiusMs <= cursor && cursor <= eventEndMs(event, latest) + radiusMs;
 }
 
-function EventList({ events, t0, onSelectEvent }: Pick<Props, "events" | "t0" | "onSelectEvent">) {
+function EventList({
+  events,
+  t0,
+  latest,
+  onSelectEvent,
+}: Pick<Props, "events" | "t0" | "latest" | "onSelectEvent">) {
   return (
     <ul className="event-list">
       {events.map((event) => (
@@ -39,7 +44,7 @@ function EventList({ events, t0, onSelectEvent }: Pick<Props, "events" | "t0" | 
               +{formatOffset((event.startedAt - t0) / 1000)}
               <small>
                 {event.endedAt === null
-                  ? "ongoing"
+                  ? `ongoing for ${formatDuration(Math.max(0, latest - event.startedAt))}`
                   : formatDuration(event.endedAt - event.startedAt)}
               </small>
             </span>
@@ -69,7 +74,7 @@ export function NearbyEvents({ events, t0, latest, cursor, radiusMs, onSelectEve
     <section className="nearby" aria-label="Anomalies near the cursor">
       {nearby.length === 0 && <p className="hint nearby-empty">No anomalies near the cursor.</p>}
       <h2>{heading}</h2>
-      <EventList events={listed} t0={t0} onSelectEvent={onSelectEvent} />
+      <EventList events={listed} t0={t0} latest={latest} onSelectEvent={onSelectEvent} />
     </section>
   );
 }
