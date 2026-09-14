@@ -1,20 +1,19 @@
 # Continuous integration: typecheck, lint, format, test, and build the monorepo,
 # plus a separate job that validates the OpenTofu config in infra/. Runs on every
-# pull request and on pushes to main, and is also callable as a reusable workflow
-# (`workflow_call`) so deploy.yml can gate a deployment on these same jobs instead
-# of duplicating them -- see the comment in deploy.yml for why.
+# pull request, and is called as a reusable workflow (`workflow_call`) by deploy.yml
+# on pushes to main so a deployment is gated on these same jobs. It deliberately has
+# no `push` trigger of its own: a standalone run on main would share this concurrency
+# group with the nested call and one would cancel the other.
 name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_call: {}
 
-# One in-progress run per ref (branch or PR) at a time -- a new push cancels
-# whatever CI run was still going for the same ref instead of queuing behind it.
+# One in-progress run per ref at a time -- a new push cancels whatever CI run was
+# still going for the same ref instead of queuing behind it.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
