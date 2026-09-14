@@ -1,0 +1,10 @@
+node_modules
+**/node_modules
+.git
+**/dist
+packages/server/data
+infra
+scenarios
+.claude
+*.log
+.DS_Store

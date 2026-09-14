@@ -1,72 +1,95 @@
 #!/usr/bin/env bash
-# Ships the current checkout to the afk Lightsail instance and restarts the
-# service. Run from anywhere; it resolves paths relative to this script.
+# Builds the afk server image, pushes it to the Lightsail container registry, and
+# creates a new deployment on the "afk" container service. Run through aws-vault:
 #
-# Usage:
-#   infra/deploy.sh [user@]host
+#   aws-vault exec osv_im_admin -- infra/deploy.sh
 #
-# If HOST is omitted, it's read from `tofu output -raw static_ip` (so you
-# normally just run `infra/deploy.sh` after `tofu apply`).
+# Assumes `aws-vault exec osv_im_admin -- tofu -chdir=infra apply` has already
+# created the container service and bucket (see infra/README.md). Never embeds
+# credentials: the AWS CLI picks up aws-vault's temporary credentials from the
+# environment, and the bucket access key is read fresh from tofu output each run.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-SSH_USER="${DEPLOY_SSH_USER:-ubuntu}"
-# The key pair tofu installs on the instance lives in infra/.ssh (gitignored).
-SSH_KEY="${DEPLOY_SSH_KEY:-${SCRIPT_DIR}/.ssh/afk_ed25519}"
-SSH_CMD="ssh -i ${SSH_KEY} -o IdentitiesOnly=yes"
-SERVICE_USER="${DEPLOY_SERVICE_USER:-afk}"
-APP_DIR="${DEPLOY_APP_DIR:-/opt/afk/app}"
+REGION="us-west-2"
+SERVICE_NAME="afk"
+CONTAINER_NAME="server"
+CONTAINER_PORT=4141
+IMAGE_TAG="afk:latest"
 
-if [[ $# -ge 1 ]]; then
-  TARGET="$1"
-else
-  IP="$(cd "${SCRIPT_DIR}" && tofu output -raw static_ip)"
-  TARGET="${SSH_USER}@${IP}"
+echo "==> Building ${IMAGE_TAG} from ${REPO_ROOT}"
+docker build -t "${IMAGE_TAG}" "${REPO_ROOT}"
+
+echo "==> Pushing ${IMAGE_TAG} to the Lightsail registry for ${SERVICE_NAME}"
+# Captures the registered image name (e.g. ":afk.server.3") from the CLI's own
+# output rather than guessing the next version number ourselves.
+PUSH_OUTPUT="$(
+  aws lightsail push-container-image \
+    --region "${REGION}" \
+    --service-name "${SERVICE_NAME}" \
+    --label "${CONTAINER_NAME}" \
+    --image "${IMAGE_TAG}"
+)"
+echo "${PUSH_OUTPUT}"
+
+REGISTERED_IMAGE="$(echo "${PUSH_OUTPUT}" | grep -oE ':[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[0-9]+' | tail -n1)"
+if [[ -z "${REGISTERED_IMAGE}" ]]; then
+  echo "error: could not parse the registered image name out of push-container-image output" >&2
+  exit 1
 fi
+echo "==> Registered image: ${REGISTERED_IMAGE}"
 
-echo "==> Deploying ${REPO_ROOT} to ${TARGET}:${APP_DIR}"
+# Session storage credentials come from tofu output, not from any file on disk --
+# infra/terraform.tfvars only holds the bucket *name* variable, not these
+# generated values.
+echo "==> Reading bucket configuration from tofu output"
+S3_BUCKET="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_name)"
+S3_REGION="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_region)"
+S3_ACCESS_KEY_ID="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_access_key_id)"
+S3_SECRET_ACCESS_KEY="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_secret_access_key)"
 
-# Sync the checkout, skipping VCS/build/dev-only cruft and the local infra
-# state. node_modules is excluded: pnpm install runs on the box so native
-# deps and lockfile resolution match the server's own OS/arch.
-rsync -az --delete -e "${SSH_CMD}" \
-  --exclude='.git/' \
-  --exclude='infra/.ssh/' \
-  --exclude='node_modules/' \
-  --exclude='**/node_modules/' \
-  --exclude='infra/.terraform/' \
-  --exclude='infra/terraform.tfstate*' \
-  --exclude='infra/*.tfvars' \
-  --exclude='packages/server/data/' \
-  --exclude='packages/web/dist/' \
-  "${REPO_ROOT}/" "${TARGET}:/tmp/afk-deploy/"
+# The deployment spec: one container running the image just pushed, plus the
+# public endpoint that wires the load balancer's health check to it. Written to a
+# temp file so we don't have to fight shell quoting around --containers/--public-endpoint.
+DEPLOYMENT_JSON="$(mktemp)"
+trap 'rm -f "${DEPLOYMENT_JSON}"' EXIT
 
-# Move into place as the service user, install deps, restart the service.
-# shellcheck disable=SC2087
-${SSH_CMD} "${TARGET}" bash -s -- "${APP_DIR}" "${SERVICE_USER}" <<'REMOTE'
-set -euo pipefail
-APP_DIR="$1"
-SERVICE_USER="$2"
+cat >"${DEPLOYMENT_JSON}" <<EOF
+{
+  "serviceName": "${SERVICE_NAME}",
+  "containers": {
+    "${CONTAINER_NAME}": {
+      "image": "${REGISTERED_IMAGE}",
+      "ports": {
+        "${CONTAINER_PORT}": "HTTP"
+      },
+      "environment": {
+        "AFK_PORT": "${CONTAINER_PORT}",
+        "AFK_PUBLIC_BASE_URL": "https://afk.osv.im",
+        "AFK_STORAGE": "s3",
+        "AFK_S3_BUCKET": "${S3_BUCKET}",
+        "AFK_S3_REGION": "${S3_REGION}",
+        "AFK_S3_ACCESS_KEY_ID": "${S3_ACCESS_KEY_ID}",
+        "AFK_S3_SECRET_ACCESS_KEY": "${S3_SECRET_ACCESS_KEY}"
+      }
+    }
+  },
+  "publicEndpoint": {
+    "containerName": "${CONTAINER_NAME}",
+    "containerPort": ${CONTAINER_PORT},
+    "healthCheck": {
+      "path": "/api/health"
+    }
+  }
+}
+EOF
 
-sudo rsync -a --delete \
-  --exclude='node_modules/' \
-  --exclude='**/node_modules/' \
-  --exclude="packages/server/data/" \
-  /tmp/afk-deploy/ "${APP_DIR}/"
-sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}"
-rm -rf /tmp/afk-deploy
+echo "==> Creating a new deployment on ${SERVICE_NAME}"
+aws lightsail create-container-service-deployment \
+  --region "${REGION}" \
+  --cli-input-json "file://${DEPLOYMENT_JSON}"
 
-sudo -u "${SERVICE_USER}" bash -lc "
-  set -euo pipefail
-  cd '${APP_DIR}'
-  corepack enable >/dev/null 2>&1 || true
-  pnpm install --frozen-lockfile
-"
-
-sudo systemctl restart afk.service
-sudo systemctl --no-pager --full status afk.service | head -n 12
-REMOTE
-
-echo "==> Done."
+echo "==> Done. Watch rollout with:"
+echo "    aws lightsail get-container-services --region ${REGION} --service-name ${SERVICE_NAME}"
