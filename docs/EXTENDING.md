@@ -171,8 +171,10 @@ Implement `SessionStorage` in `packages/server/src/store/storage.ts`:
 Frames always arrive in index order and are never rewritten, which is what makes the
 object-store variant simple. `store/s3-storage.ts` is the S3-compatible
 implementation (Lightsail buckets, real S3, MinIO); `store/create-storage.ts`
-exports `createStorageFromEnv`, which picks a backend from `AFK_STORAGE=disk|s3`
-(and the `AFK_S3_*` variables for the latter) for `src/index.ts` to use.
+exports `createStorage`, which builds the backend `AFK_STORAGE=disk|s3` (and the
+`AFK_S3_*` variables for the latter) selects. A new backend adds its variables to the
+schema in `src/config.ts` and to [CONFIGURATION.md](CONFIGURATION.md), and a branch to
+`createStorage`.
 
 ## Adding a dashboard data source
 
@@ -184,6 +186,8 @@ page.
 ## Self-hosting
 
 `AFK_SERVER` on the client and `AFK_PUBLIC_BASE_URL` plus `AFK_DATA_DIR` on the server
-are the whole configuration today. A server on a private network (Tailscale MagicDNS,
+are all a self-hosted setup needs; every other server variable (limits, retention,
+storage backend) is listed with its default in [CONFIGURATION.md](CONFIGURATION.md). A
+server on a private network (Tailscale MagicDNS,
 for instance) works unchanged with disk storage. Session creation is open and
 unauthenticated; an optional shared secret for private servers is on the backlog.

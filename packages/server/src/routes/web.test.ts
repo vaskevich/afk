@@ -2,15 +2,20 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DEFAULT_LIMITS } from "../env.ts";
+import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 
 function buildApp(webDistDir: string) {
   return createApp(
-    { publicBaseUrl: "https://afk.test", webDistDir, limits: DEFAULT_LIMITS },
-    new SessionStore(new MemorySessionStorage(), DEFAULT_LIMITS),
+    {
+      publicBaseUrl: "https://afk.test",
+      webDistDir,
+      limits: DEFAULT_LIMITS,
+      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
+    },
+    new SessionStore(new MemorySessionStorage(), { limits: DEFAULT_LIMITS }),
   );
 }
 

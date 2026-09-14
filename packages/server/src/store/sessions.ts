@@ -37,8 +37,39 @@ export interface Session extends SessionRecord {
   lastAccessAt: number;
 }
 
-/** How long an ended session with no viewers stays in memory before being evicted. */
-export const EVICT_ENDED_AFTER_MS = 10 * 60 * 1000;
+/** Policy the store applies to every session. `index.ts` fills this from config.ts. */
+export interface SessionStoreOptions {
+  limits: AdmissionLimits;
+  /** Server-owned cap on how long a session accepts frames; stamped on each record at create. */
+  maxSessionDurationSeconds: number;
+  /** How long an ended session with no viewers stays in memory before `tick` evicts it. */
+  evictEndedAfterMs: number;
+}
+
+export const DEFAULT_STORE_OPTIONS: SessionStoreOptions = {
+  limits: DEFAULT_LIMITS,
+  maxSessionDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+  evictEndedAfterMs: 10 * 60 * 1000,
+};
+
+/** How often `startTicker` runs time-based rules and evicts idle ended sessions. */
+export const DEFAULT_TICK_INTERVAL_MS = 5_000;
+
+/** Whether a record is still accepting frames, was ended by the client, or ran past its cap. */
+export function sessionStatus(record: SessionRecord, now: number): SessionStatus {
+  if (record.endedAt !== null) {
+    return "ended";
+  }
+  if (now - record.startedAt > record.maxDurationSeconds * 1000) {
+    return "expired";
+  }
+  return "active";
+}
+
+/** When a non-active session stopped: its explicit end, or the moment it hit the cap. */
+export function sessionEndMs(record: SessionRecord): number {
+  return record.endedAt ?? record.startedAt + record.maxDurationSeconds * 1000;
+}
 
 export interface IngestResult {
   accepted: StoredFrame[];
@@ -65,11 +96,14 @@ export class TooManyStreamsError extends Error {
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
   private readonly loading = new Map<string, Promise<Session | undefined>>();
+  private readonly options: SessionStoreOptions;
 
   constructor(
     private readonly storage: SessionStorage,
-    private readonly limits: AdmissionLimits = DEFAULT_LIMITS,
-  ) {}
+    options: Partial<SessionStoreOptions> = {},
+  ) {
+    this.options = { ...DEFAULT_STORE_OPTIONS, ...options };
+  }
 
   /** Sessions that are still accepting frames. */
   activeSessionCount(now = Date.now()): number {
@@ -84,7 +118,7 @@ export class SessionStore {
 
   /** True when another session may be created. */
   hasCapacity(now = Date.now()): boolean {
-    return this.activeSessionCount(now) < this.limits.maxActiveSessions;
+    return this.activeSessionCount(now) < this.options.limits.maxActiveSessions;
   }
 
   stats(now = Date.now()) {
@@ -94,8 +128,8 @@ export class SessionStore {
     }
     return {
       activeSessions: this.activeSessionCount(now),
-      maxActiveSessions: this.limits.maxActiveSessions,
-      maxStreamsPerSession: this.limits.maxStreamsPerSession,
+      maxActiveSessions: this.options.limits.maxActiveSessions,
+      maxStreamsPerSession: this.options.limits.maxStreamsPerSession,
       sessionsInMemory: this.sessions.size,
       framesInMemory,
     };
@@ -109,7 +143,7 @@ export class SessionStore {
       clientVersion: input.clientVersion,
       startedAt: Date.now(),
       endedAt: null,
-      maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+      maxDurationSeconds: this.options.maxSessionDurationSeconds,
     };
     await this.storage.putSession(record);
     const session = this.hydrate(record, []);
@@ -172,14 +206,9 @@ export class SessionStore {
       lastAccessAt: Date.now(),
     };
     if (this.status(session) !== "active") {
-      engine.closeAll(this.sessionEndMs(session));
+      engine.closeAll(sessionEndMs(session));
     }
     return session;
-  }
-
-  /** When a non-active session stopped: its explicit end, or the moment it hit the cap. */
-  private sessionEndMs(session: Session): number {
-    return session.endedAt ?? session.startedAt + session.maxDurationSeconds * 1000;
   }
 
   private record(session: Session): SessionRecord {
@@ -189,13 +218,7 @@ export class SessionStore {
   }
 
   status(session: Session, now = Date.now()): SessionStatus {
-    if (session.endedAt !== null) {
-      return "ended";
-    }
-    if (now - session.startedAt > session.maxDurationSeconds * 1000) {
-      return "expired";
-    }
-    return "active";
+    return sessionStatus(session, now);
   }
 
   summary(session: Session): SessionSummary {
@@ -208,7 +231,7 @@ export class SessionStore {
       endedAt: session.endedAt,
       maxDurationSeconds: session.maxDurationSeconds,
       streamCount: session.latestSequence.size,
-      maxStreams: this.limits.maxStreamsPerSession,
+      maxStreams: this.options.limits.maxStreamsPerSession,
     };
   }
 
@@ -249,11 +272,20 @@ export class SessionStore {
         this.emitEvents(session, session.engine.onTick(now));
       } else if (
         session.listeners.size === 0 &&
-        now - session.lastAccessAt > EVICT_ENDED_AFTER_MS
+        now - session.lastAccessAt > this.options.evictEndedAfterMs
       ) {
         this.sessions.delete(sessionId);
       }
     }
+  }
+
+  /**
+   * Drops a session from the in-memory cache without touching storage. Used by the
+   * retention sweeper after it has deleted the session's data, so a later `get` does
+   * not serve a copy of something that no longer exists. Returns whether it was cached.
+   */
+  evict(sessionId: string): boolean {
+    return this.sessions.delete(sessionId);
   }
 
   private emitEvents(session: Session, events: AnomalyEvent[]): void {
@@ -298,9 +330,9 @@ export class SessionStore {
       }
       if (
         !nextSequence.has(frame.stream) &&
-        nextSequence.size >= this.limits.maxStreamsPerSession
+        nextSequence.size >= this.options.limits.maxStreamsPerSession
       ) {
-        throw new TooManyStreamsError(frame.stream, this.limits.maxStreamsPerSession);
+        throw new TooManyStreamsError(frame.stream, this.options.limits.maxStreamsPerSession);
       }
       nextSequence.set(frame.stream, frame.sequence);
       accepted.push({ index: nextIndex++, receivedAt, frame });

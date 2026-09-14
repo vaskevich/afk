@@ -40,8 +40,9 @@ create-container-service-deployment`, driven by `deploy.sh`, so shipping a new
   (`AFK_S3_ACCESS_KEY_ID` / `AFK_S3_SECRET_ACCESS_KEY`), read from `tofu output`
   by `deploy.sh` and passed into the deployment spec. See
   `packages/server/src/store/s3-storage.ts`. Lightsail buckets have no lifecycle
-  rules, so session expiry is the server's own sweeper (see BACKLOG.md), same as
-  every other backend.
+  rules, so session expiry is the server's own sweeper
+  (`packages/server/src/store/sweeper.ts`, `AFK_RETENTION_DAYS`), same as every
+  other backend.
 - **State backend**: local state (no `backend` block), matching osv.im's repo --
   `infra/terraform.tfstate` is gitignored, applied from a single operator's
   machine. Migrating to an S3+DynamoDB backend later is a small, mechanical
@@ -142,7 +143,10 @@ aws-vault exec osv_im_admin -- infra/deploy.sh
    file either way), and creates a new deployment with
    `aws lightsail create-container-service-deployment`: one container (`server`)
    running that image on port 4141, and a public endpoint pointed at it with a
-   health check on `/api/health`.
+   health check on `/api/health`. Those (`AFK_PORT`, `AFK_PUBLIC_BASE_URL`,
+   `AFK_STORAGE`, the `AFK_S3_*` set) are the only variables production sets;
+   limits and retention run on their defaults. Every variable the server reads is
+   documented in [docs/CONFIGURATION.md](../docs/CONFIGURATION.md).
 
 Run it through `aws-vault` (`aws-vault exec osv_im_admin -- infra/deploy.sh`) --
 it never embeds credentials itself, it relies on the AWS CLI picking up

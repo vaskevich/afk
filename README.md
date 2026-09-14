@@ -4,7 +4,8 @@ Away-from-keyboard telemetry. Run `afk start` on a machine you are about to walk
 from and get a shareable dashboard URL that shows whether everything is still fine.
 
 Status: early prototype. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/EXTENDING.md](docs/EXTENDING.md), and
+[docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+(every server environment variable), [docs/EXTENDING.md](docs/EXTENDING.md), and
 [BACKLOG.md](BACKLOG.md).
 
 ## Layout
