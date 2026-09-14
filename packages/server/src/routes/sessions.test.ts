@@ -222,6 +222,91 @@ describe("GET /api/sessions/:id", () => {
   });
 });
 
+describe("GET /api/sessions/:id/qr", () => {
+  /** Fetches the QR with the session's bearer token, as `afk start` and `afk qr` do. */
+  async function getQr(
+    app: ReturnType<typeof buildApp>,
+    sessionId: string,
+    ingestToken: string,
+    query = "",
+    headers: Record<string, string> = CLIENT_VERSION_HEADER,
+  ): Promise<Response> {
+    return app.request(`/api/sessions/${sessionId}/qr${query}`, {
+      headers: { authorization: `Bearer ${ingestToken}`, ...headers },
+    });
+  }
+
+  it("returns the dashboard URL as a half-block text QR followed by the URL line", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+
+    const res = await getQr(app, sessionId, ingestToken);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    const lines = (await res.text()).split("\n");
+    expect(lines.at(-2)).toBe(`https://afk.test/s/${sessionId}`);
+    expect(lines[0]).toMatch(/^[█▀▄ ]+$/);
+  });
+
+  it("returns an svg document with ?format=svg", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+
+    const res = await getQr(app, sessionId, ingestToken, "?format=svg");
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/svg+xml");
+    expect((await res.text()).startsWith("<svg")).toBe(true);
+  });
+
+  it("returns 400 for a format it does not know", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+
+    const res = await getQr(app, sessionId, ingestToken, "?format=png");
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("png");
+  });
+
+  it("returns 401 with a wrong bearer token, since the URL is the share link", async () => {
+    const app = buildApp();
+    const { sessionId } = await createTestSession(app);
+
+    const res = await getQr(app, sessionId, "wrong-token");
+
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for an unknown session id", async () => {
+    const app = buildApp();
+
+    const res = await getQr(app, "does-not-exist", "whatever");
+
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 426 without X-Afk-Client, like the other client endpoints", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+
+    const res = await getQr(app, sessionId, ingestToken, "", {});
+
+    expect(res.status).toBe(426);
+  });
+
+  it("returns 410 once the session has ended", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+    await endTestSession(app, sessionId, ingestToken);
+
+    const res = await getQr(app, sessionId, ingestToken);
+
+    expect(res.status).toBe(410);
+  });
+});
+
 describe("POST /api/sessions/:id/end", () => {
   it("returns 401 with a wrong bearer token", async () => {
     const app = buildApp();

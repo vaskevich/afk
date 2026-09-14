@@ -11,6 +11,7 @@ import {
   upgradeRequired,
 } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
+import { renderQrSvg, renderQrText } from "../utils/qr.ts";
 
 /** Parses the request body as JSON, or null if it isn't valid JSON. */
 async function readJsonBody(c: Context<AppEnv>): Promise<unknown> {
@@ -30,6 +31,12 @@ function protocolVersionOf(body: unknown): number | undefined {
   return typeof version === "number" ? version : undefined;
 }
 
+/** `?format=` values `GET /:sessionId/qr` accepts; the default is text for the terminal. */
+const QR_FORMAT_TEXT = "text";
+const QR_FORMAT_SVG = "svg";
+const QR_TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
+const QR_SVG_CONTENT_TYPE = "image/svg+xml";
+
 /** What a client is told to wait before retrying a create that hit the session cap. */
 const CAPACITY_RETRY_AFTER_SECONDS = 60;
 
@@ -41,7 +48,17 @@ const CAPACITY_RETRY_AFTER_SECONDS = 60;
  */
 export const MAX_CREATE_BODY_BYTES = 4 * 1024;
 
-/** Session lifecycle: create, inspect, end. Mounted at /api/sessions. */
+/** The share link: where the dashboard for `sessionId` lives on this deployment. */
+function dashboardUrlFor(publicBaseUrl: string, sessionId: string): string {
+  return `${publicBaseUrl}/s/${sessionId}`;
+}
+
+/**
+ * Session lifecycle: create, inspect, end, and the dashboard URL as a QR code.
+ * Mounted at /api/sessions. The QR sits behind the ingest token because the URL is the
+ * share link: only the session's owner gets it rendered, and the dashboard draws its
+ * own copy in the browser.
+ */
 export function sessionRoutes(deps: AppDeps) {
   const { store, config } = deps;
 
@@ -83,7 +100,7 @@ export function sessionRoutes(deps: AppDeps) {
         host: parsed.data.host,
         clientVersion: parsed.data.clientVersion,
       });
-      const dashboardUrl = `${config.publicBaseUrl}/s/${session.sessionId}`;
+      const dashboardUrl = dashboardUrlFor(config.publicBaseUrl, session.sessionId);
       console.log(
         `[session ${session.sessionId}] created for ${session.host.hostname} ` +
           `(client ${session.clientVersion}, ${session.host.cpuCount} cpus) -> ${dashboardUrl}`,
@@ -112,5 +129,20 @@ export function sessionRoutes(deps: AppDeps) {
         `[session ${session.sessionId}] ended by client after ${session.frames.length} frames`,
       );
       return c.json(store.summary(session));
+    })
+    .get("/:sessionId/qr", clientVersion(deps), ingestAuth(deps), (c) => {
+      const format = c.req.query("format") ?? QR_FORMAT_TEXT;
+      const dashboardUrl = dashboardUrlFor(config.publicBaseUrl, c.get("session").sessionId);
+      if (format === QR_FORMAT_SVG) {
+        return c.body(renderQrSvg(dashboardUrl), 200, { "content-type": QR_SVG_CONTENT_TYPE });
+      }
+      if (format === QR_FORMAT_TEXT) {
+        return c.body(renderQrText(dashboardUrl), 200, { "content-type": QR_TEXT_CONTENT_TYPE });
+      }
+      return errorResponse(
+        c,
+        400,
+        `unknown format "${format}"; use ${QR_FORMAT_TEXT} or ${QR_FORMAT_SVG}`,
+      );
     });
 }
