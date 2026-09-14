@@ -33,10 +33,14 @@
 
 set -u
 
-AFK_VERSION="0.1.0"
+# Client version (semver, bumped on every release) and the protocol version it speaks
+# (bumped only for an incompatible wire change). See docs/VERSIONING.md.
+AFK_VERSION="0.2.0"
 AFK_PROTOCOL_VERSION=1
 AFK_SERVER="${AFK_SERVER:-https://afk.osv.im}"
 AFK_HOME="${AFK_HOME:-$HOME/.afk}"
+# Where the upgrade hint says to fetch a newer copy of this script from.
+AFK_DOWNLOAD_URL="https://raw.githubusercontent.com/vaskevich/afk/main/cli/afk"
 
 SAMPLE_INTERVAL_SECONDS=1
 SEND_INTERVAL_SECONDS=1
@@ -65,6 +69,19 @@ json_get_string() { # json key
 }
 json_get_number() { # json key
   printf '%s' "$1" | sed -n 's/.*"'"$2"'":\([0-9][0-9]*\).*/\1/p'
+}
+
+# The server answered 426 Upgrade Required: it will not talk to this client (or this
+# protocol version) any more. Print what it said, both minimums, and how to update.
+# The details are one level down in the JSON, which the key-based extraction does not mind.
+log_upgrade_required() { # response-json
+  local message min_client min_protocol
+  message=$(json_get_string "$1" error)
+  min_client=$(json_get_string "$1" minimumClientVersion)
+  min_protocol=$(json_get_number "$1" minimumProtocolVersion)
+  log "the server refused this client: ${message:-upgrade required}"
+  log "this is afk $AFK_VERSION speaking protocol $AFK_PROTOCOL_VERSION; the server needs client ${min_client:-?} and protocol ${min_protocol:-?} or newer"
+  log "update with: curl -fsSL $AFK_DOWNLOAD_URL -o \"$0\" && chmod +x \"$0\""
 }
 
 now_seconds() { date +%s; }
@@ -174,7 +191,9 @@ gather_host_info() {
 }
 
 # Creates a session. Returns 0 on success and 2 when the server is at capacity, so the
-# caller can choose between waiting and going on without telemetry. Dies on anything else.
+# caller can choose between waiting and going on without telemetry. Dies on anything
+# else, including 426 (the server no longer talks to this client version): waiting
+# would not change that answer, so it prints how to update and exits.
 create_session() {
   local body response status response_file="$AFK_HOME/create-response.json"
   body=$(printf '{"protocolVersion":%d,"clientVersion":"%s","host":{"hostname":"%s","platform":"%s","osVersion":"%s","cpuCount":%d,"memoryTotalBytes":%d}}' \
@@ -191,6 +210,9 @@ create_session() {
     503)
       log "server is at capacity: $(json_get_string "$response" error)"
       return 2 ;;
+    426)
+      log_upgrade_required "$response"
+      exit 1 ;;
     *) die "server refused to start a session (HTTP $status): $response" ;;
   esac
 
@@ -301,7 +323,8 @@ rotate_current() {
 }
 
 # Sends up to SEND_MAX_FILES_PER_BATCH oldest queue files as one request.
-# Returns 0 on success (files deleted), 1 on retryable failure, 2 on permanent failure (session over).
+# Returns 0 on success (files deleted), 1 on retryable failure, 2 on permanent failure
+# (session over, or the server will no longer talk to this client version).
 send_oldest_batch() {
   local batch="$SESSION_DIR/batch.ndjson" files="" count=0 f status
   for f in "$SESSION_DIR"/queue/*.ndjson; do
@@ -327,6 +350,11 @@ send_oldest_batch() {
       return 0 ;;
     410)
       log "server closed the session ($(cat "$SESSION_DIR/response.json" 2>/dev/null))"
+      return 2 ;;
+    426)
+      # The server stopped talking to this client version mid-session. Same outcome as
+      # 410 (stop, keep the queue), plus the hint on how to update.
+      log_upgrade_required "$(cat "$SESSION_DIR/response.json" 2>/dev/null)"
       return 2 ;;
     400|401|404|413|422)
       # The server will never accept this batch; keep it out of the way so we don't stall.

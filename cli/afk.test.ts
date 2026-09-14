@@ -362,6 +362,32 @@ describe("send_oldest_batch", () => {
     expect(kept).toBe("AAA\n");
   });
 
+  it("returns 2, keeps the queued files, and prints the upgrade hint on a 426 response", async () => {
+    const sessionDir = await makeQueue();
+    await writeFile(join(sessionDir, "queue", "0000000001.ndjson"), "AAA\n");
+    const server = await startServer(() => ({
+      status: 426,
+      body: JSON.stringify({
+        error: "client version 0.1.0 is below the minimum 0.3.0; update afk",
+        details: { minimumClientVersion: "0.3.0", minimumProtocolVersion: 2, yourVersion: "0.1.0" },
+      }),
+    }));
+
+    const { stdout, stderr } = await runBash('send_oldest_batch; printf "RC=%d" "$?"', {
+      ...baseEnv,
+      SESSION_DIR: sessionDir,
+      AFK_SERVER: server.url,
+    });
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "2" });
+    expect(stderr).toContain("below the minimum 0.3.0");
+    expect(stderr).toContain("client 0.3.0 and protocol 2 or newer");
+    expect(stderr).toContain("curl -fsSL");
+    const kept = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8");
+    expect(kept).toBe("AAA\n");
+    expect(await exists(join(sessionDir, "rejected"))).toBe(false);
+  });
+
   it("moves the queued files to rejected/ on a 400 response", async () => {
     const sessionDir = await makeQueue();
     await writeFile(join(sessionDir, "queue", "0000000001.ndjson"), "AAA\n");
@@ -426,6 +452,31 @@ describe("create_session", () => {
     );
     const queueStat = await stat(join(afkHome, "sessions", "D3FzMqK8qOLVva9LoHF9uc", "queue"));
     expect(queueStat.isDirectory()).toBe(true);
+  });
+
+  it("exits 1 with the upgrade hint on a 426 response, without the capacity retry loop", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({
+      status: 426,
+      body: JSON.stringify({
+        error: "client version 0.1.0 is below the minimum 0.3.0; update afk",
+        details: { minimumClientVersion: "0.3.0", minimumProtocolVersion: 2, yourVersion: "0.1.0" },
+      }),
+    }));
+
+    // create_session_or_wait is the `afk start` path: a 503 would make it sleep and retry.
+    const { code, stderr } = await runBash('create_session_or_wait; printf "RC=%d" "$?"', {
+      ...hostEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(1);
+    expect(server.requests).toHaveLength(1);
+    expect(stderr).toContain("below the minimum 0.3.0");
+    expect(stderr).toContain("client 0.3.0 and protocol 2 or newer");
+    expect(stderr).toContain("curl -fsSL");
+    expect(await exists(join(afkHome, "current"))).toBe(false);
   });
 });
 
