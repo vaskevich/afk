@@ -651,7 +651,7 @@ describe("DELETE /api/sessions/:id", () => {
     // lists is the active one, which retention never touches.
     const sweep = await sweepExpiredSessions(storage, store, Date.now(), 0);
 
-    expect(sweep).toEqual({ scanned: 1, deleted: 0 });
+    expect(sweep).toEqual({ scanned: 1, deleted: 0, compacted: 0 });
     await expect(storage.listSessionIds()).resolves.toEqual([kept.sessionId]);
     expect(store.stats()).toMatchObject({ sessionsInMemory: 1, framesInMemory: 0 });
   });
