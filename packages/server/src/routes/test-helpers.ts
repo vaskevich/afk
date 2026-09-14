@@ -13,6 +13,8 @@ type App = ReturnType<typeof createApp>;
 
 /** No dashboard build exists at this path; API route tests never serve the dashboard. */
 export const NO_DIST_DIR = "/nonexistent/afk-test-dist";
+/** No client script exists at this path; only the install route tests serve one. */
+export const NO_CLIENT_SCRIPT = "/nonexistent/afk-test-cli/afk";
 
 /** What every request from a real client carries; the server answers 426 without it. */
 export const CLIENT_VERSION_HEADER = { "x-afk-client": "bash/0.1.0" };
@@ -22,6 +24,7 @@ export function makeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     publicBaseUrl: "https://afk.test",
     webDistDir: NO_DIST_DIR,
+    clientScriptPath: NO_CLIENT_SCRIPT,
     limits: DEFAULT_LIMITS,
     minimumVersions: DEFAULT_MINIMUM_VERSIONS,
     sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,

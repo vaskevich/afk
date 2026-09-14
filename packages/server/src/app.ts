@@ -6,6 +6,7 @@ import { statsRoutes } from "./routes/stats.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
+import { installRoutes } from "./routes/install.ts";
 import { webRoutes } from "./routes/web.ts";
 import { securityHeaders } from "./middleware/security-headers.ts";
 
@@ -32,5 +33,7 @@ export function createApp(config: AppConfig, store: SessionStore) {
     .route("/api/sessions", sessionRoutes(deps))
     .route("/api/sessions", frameRoutes(deps))
     .route("/api/sessions", streamRoutes(deps))
+    // Before the dashboard, whose catch-all would otherwise answer /install with index.html.
+    .route("/", installRoutes(deps))
     .route("/", webRoutes(config.webDistDir));
 }

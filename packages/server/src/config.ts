@@ -27,9 +27,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const MS_PER_SECOND = 1000;
 const MAX_TCP_PORT = 65535;
 
-/** Where the server looks for the built dashboard and its data directory when not told otherwise. */
+/**
+ * Where the server looks for the built dashboard, the client script, and its data
+ * directory when not told otherwise. Resolved from this file, so the Docker image keeps
+ * the repo's `packages/` and `cli/` layout.
+ */
 export const DEFAULT_PATHS = {
   webDistDir: path.resolve(here, "../../web/dist"),
+  clientScriptPath: path.resolve(here, "../../../cli/afk"),
   dataDir: path.resolve(here, "../data"),
 };
 
@@ -69,6 +74,8 @@ export interface ServerConfig {
   publicBaseUrl: string;
   /** Absolute path to the built dashboard (packages/web/dist). */
   webDistDir: string;
+  /** Absolute path to the client script (cli/afk) served at /cli/afk and by /install. */
+  clientScriptPath: string;
   storage: StorageConfig;
   limits: AdmissionLimits;
   /** Server-owned cap on how long one session accepts frames. */
@@ -163,6 +170,7 @@ const EnvSchema = z
     AFK_PORT: integer(CONFIG_DEFAULTS.port, 1, MAX_TCP_PORT),
     AFK_PUBLIC_BASE_URL: optionalString,
     AFK_WEB_DIST: optionalString,
+    AFK_CLIENT_SCRIPT: optionalString,
 
     AFK_STORAGE: oneOf(STORAGE_BACKENDS, "disk"),
     AFK_DATA_DIR: optionalString,
@@ -240,6 +248,7 @@ export function loadConfig(
     port: value.AFK_PORT,
     publicBaseUrl: value.AFK_PUBLIC_BASE_URL ?? `http://localhost:${value.AFK_PORT}`,
     webDistDir: value.AFK_WEB_DIST ?? defaultPaths.webDistDir,
+    clientScriptPath: value.AFK_CLIENT_SCRIPT ?? defaultPaths.clientScriptPath,
     storage: storageConfig(value, defaultPaths.dataDir),
     limits: {
       maxActiveSessions: value.AFK_MAX_ACTIVE_SESSIONS,
@@ -273,6 +282,7 @@ export function describeConfig(config: ServerConfig): string {
     `port ${config.port}`,
     `public base ${config.publicBaseUrl}`,
     `web dist ${config.webDistDir}`,
+    `client script ${config.clientScriptPath}`,
     describeStorage(config.storage),
     `limits ${config.limits.maxActiveSessions} sessions x ${config.limits.maxStreamsPerSession} streams`,
     `max session ${config.maxSessionDurationSeconds}s`,
