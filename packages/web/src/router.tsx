@@ -6,9 +6,22 @@ const rootRoute = createRootRoute({
   component: () => <Outlet />,
 });
 
+/**
+ * `/?deleted=<id>` is where the session page sends a viewer who deleted the session
+ * from it; the landing page says so once. Anything else in the query is dropped.
+ */
+export interface LandingSearch {
+  deleted?: string;
+}
+
+export function validateLandingSearch(search: Record<string, unknown>): LandingSearch {
+  return typeof search.deleted === "string" ? { deleted: search.deleted } : {};
+}
+
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
+  validateSearch: validateLandingSearch,
   component: LandingPage,
 });
 

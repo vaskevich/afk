@@ -1,8 +1,9 @@
 import type { SessionSummary } from "@afk/shared";
-import type { ConnectionState } from "../data/source.ts";
+import { DEMO_SESSION_ID, type ConnectionState } from "../data/source.ts";
 import { Link } from "@tanstack/react-router";
 import { formatDateTime, formatDuration, formatGiB } from "../format.ts";
 import { useNow } from "../useNow.ts";
+import { DeleteSession } from "./DeleteSession.tsx";
 import { ThemeToggle } from "./ThemeToggle.tsx";
 import { SharePanel } from "./SharePanel.tsx";
 
@@ -17,12 +18,18 @@ interface Props {
   session: SessionSummary;
   /** Live transport state, or null when not following (ended sessions, the demo). */
   connection: ConnectionState | null;
+  /** The session was deleted while this page was open; there is nothing left to delete. */
+  deleted: boolean;
+  /** The viewer deleted the session from here. */
+  onDeleted(): void;
 }
 
-export function SessionHeader({ session, connection }: Props) {
+export function SessionHeader({ session, connection, deleted, onDeleted }: Props) {
   // Ended sessions have a fixed duration; an active one keeps counting.
   const now = useNow(session.status === "active");
   const durationMs = (session.endedAt ?? now) - session.startedAt;
+  // The demo lives in this bundle, not on the server, and is the one link everyone has.
+  const deletable = session.sessionId !== DEMO_SESSION_ID && !deleted;
   return (
     <header className="session-header">
       <span className="wordmark">
@@ -40,6 +47,7 @@ export function SessionHeader({ session, connection }: Props) {
       <div className="header-actions">
         <ThemeToggle />
         <SharePanel url={window.location.href} />
+        {deletable && <DeleteSession sessionId={session.sessionId} onDeleted={onDeleted} />}
       </div>
       <dl className="facts">
         <div>

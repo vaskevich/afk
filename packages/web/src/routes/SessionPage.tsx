@@ -1,5 +1,5 @@
 import type { AnomalyEvent } from "@afk/shared";
-import { getRouteApi } from "@tanstack/react-router";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { DetailsPanel } from "../components/DetailsPanel.tsx";
 import { NearbyEvents } from "../components/NearbyEvents.tsx";
@@ -20,7 +20,8 @@ const NEARBY_RADIUS_MIN_MS = 5_000;
 
 export function SessionPage() {
   const { sessionId } = route.useParams();
-  const { query, connection } = useSession(sessionId);
+  const { query, connection, endReason } = useSession(sessionId);
+  const navigate = useNavigate();
   // null means "follow the latest frame", which is the default while a session is live;
   // a number is an explicit position the user picked by scrubbing.
   const [cursor, setCursor] = useState<number | null>(null);
@@ -49,14 +50,24 @@ export function SessionPage() {
   const msPerPx = plotWidth > 0 ? (view.v1 - view.v0) / plotWidth : 0;
   const nearbyRadiusMs = Math.max(NEARBY_RADIUS_MIN_MS, NEARBY_RADIUS_PX * msPerPx);
   const selectEvent = (event: AnomalyEvent) => setCursor(event.startedAt);
+  const deleted = endReason === "deleted";
+  // The viewer deleted it from here: the landing page says so, since this page has
+  // nothing left to show that the server would stand behind.
+  const onDeleted = () => void navigate({ to: "/", search: { deleted: sessionId } });
 
   return (
     <main className="page">
-      <SessionHeader session={query.data.session} connection={active ? connection : null} />
+      <SessionHeader
+        session={query.data.session}
+        connection={active ? connection : null}
+        deleted={deleted}
+        onDeleted={onDeleted}
+      />
       <StatusBanner
         status={query.data.session.status}
         events={query.data.events}
         nextSessionId={query.data.session.nextSessionId}
+        deleted={deleted}
         onSelectEvent={selectEvent}
       />
       <Timeline

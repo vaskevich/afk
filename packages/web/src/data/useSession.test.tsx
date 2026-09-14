@@ -119,6 +119,35 @@ describe("useSession", () => {
     expect(result.current.query.data?.frames).toHaveLength(1);
   });
 
+  it("reports why the stream ended, so the page can say the session was deleted under it", async () => {
+    const initial: FramesResponse = {
+      session: makeSessionSummary({ sessionId: "doomed", status: "active", endedAt: null }),
+      frames: makeStoredFrames([makeSystemFrame(0)]),
+      events: [],
+    };
+    let handlers: SubscribeHandlers | undefined;
+    vi.spyOn(apiSource, "load").mockResolvedValue(initial);
+    vi.spyOn(apiSource, "subscribe").mockImplementation((_sessionId, _afterIndex, h) => {
+      handlers = h;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useSession("doomed"), { wrapper: Wrapper });
+    await waitFor(() => expect(handlers).toBeDefined());
+    expect(result.current.endReason).toBeNull();
+
+    act(() => {
+      handlers!.onSession(
+        makeSessionSummary({ sessionId: "doomed", status: "ended", endedAt: T0_MS + 60_000 }),
+      );
+      handlers!.onEnd("deleted");
+    });
+
+    await waitFor(() => expect(result.current.endReason).toBe("deleted"));
+    // The frames already loaded stay on the page; they are all that is left of it.
+    expect(result.current.query.data?.frames).toHaveLength(1);
+  });
+
   it("upserts a live event by id instead of duplicating it", async () => {
     const opened = makeEvent({ id: "system:cpu.high:1", startedAt: T0_MS + 5_000, endedAt: null });
     const initial: FramesResponse = {

@@ -14,6 +14,11 @@ interface Props {
    * link rather than navigating: the viewer may be reading this trace.
    */
   nextSessionId: string | null;
+  /**
+   * The session was deleted while this page was watching it (the stream's `end` said
+   * so). What is on the page is all that is left; the server has nothing.
+   */
+  deleted: boolean;
   /** Move the cursor to an event the viewer clicked. */
   onSelectEvent(event: AnomalyEvent): void;
 }
@@ -25,9 +30,20 @@ interface Props {
  *
  * While the session is active the banner reflects what is wrong right now (open
  * events). Once it is over it summarises what happened, and says where the trace
- * continues when the client chained to a successor.
+ * continues when the client chained to a successor. A session deleted under the
+ * viewer gets one line saying so instead: there is no verdict left to give.
  */
-export function StatusBanner({ status, events, nextSessionId, onSelectEvent }: Props) {
+export function StatusBanner({ status, events, nextSessionId, deleted, onSelectEvent }: Props) {
+  if (deleted) {
+    return (
+      <div className="banner banner-warning" role="status">
+        <span className="dot dot-warning" />
+        This session was deleted
+        <small>the server no longer has it; this page shows what was loaded before</small>
+      </div>
+    );
+  }
+
   const active = status === "active";
   const listed = active ? events.filter(isOpenEvent) : events;
   const worst = worstSeverity(listed);

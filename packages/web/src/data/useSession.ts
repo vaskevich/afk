@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AnomalyEvent, FramesResponse } from "@afk/shared";
+import type { AnomalyEvent, FramesResponse, StreamEndReason } from "@afk/shared";
 import { useEffect, useState } from "react";
 import { apiSource } from "./apiSource.ts";
 import { fixtureSource } from "./fixtureSource.ts";
@@ -34,6 +34,9 @@ export function useSession(sessionId: string) {
     refetchOnWindowFocus: false,
   });
   const [connection, setConnection] = useState<ConnectionState>("closed");
+  // Why the live stream closed, once it has: `deleted` means the session was removed
+  // while this page was watching, and the frames on screen are all that is left of it.
+  const [endReason, setEndReason] = useState<StreamEndReason | null>(null);
 
   const status = query.data?.session.status;
   // Resume cursor at the moment the subscription starts; later frames arrive through it.
@@ -57,10 +60,11 @@ export function useSession(sessionId: string) {
       onSession: (session) => update((old) => ({ ...old, session })),
       onEvent: (event) => update((old) => ({ ...old, events: upsertEvent(old.events, event) })),
       onConnection: setConnection,
+      onEnd: setEndReason,
     });
     // loadedLastIndex changes as frames stream in; only the value at subscribe time matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, status, queryClient]);
 
-  return { query, connection };
+  return { query, connection, endReason };
 }

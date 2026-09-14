@@ -1,6 +1,6 @@
 import { ServiceStats } from "@afk/shared";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, getRouteApi } from "@tanstack/react-router";
 import { ThemeToggle } from "../components/ThemeToggle.tsx";
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { AfkMark, AfkWordmark } from "../components/AfkMark.tsx";
@@ -15,6 +15,8 @@ const RETENTION_DAYS = 7;
 /** Remembers whether the reader opened the details below the fold; absent means closed. */
 const DETAILS_STORAGE_KEY = "afk.landing.details";
 const DETAILS_OPEN_VALUE = "open";
+
+const route = getRouteApi("/");
 
 type CopyState = "idle" | "copied" | "selected";
 
@@ -147,6 +149,7 @@ function writeDetailsOpen(open: boolean): void {
 
 export function LandingPage() {
   const [detailsOpen, setDetailsOpen] = useState(readDetailsOpen);
+  const { deleted } = route.useSearch();
 
   function onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void {
     const open = event.currentTarget.open;
@@ -167,6 +170,12 @@ export function LandingPage() {
         </div>
         <ThemeToggle />
       </header>
+
+      {deleted !== undefined && (
+        <p className="notice" role="status">
+          Session <code>{deleted}</code> was deleted, with everything it recorded.
+        </p>
+      )}
 
       <InstallLine />
       <p className="hint">macOS only for now. One bash script, curl and nothing else.</p>
@@ -209,8 +218,10 @@ export function LandingPage() {
           compressed, swap). Every five seconds: the busiest processes, as pid, cpu, memory, and
           executable path. For a wrapped command: the command line as you typed it, how long it has
           run, how many bytes it wrote, and its exit code, never the output itself. At the start:
-          host name, macOS version, core count, and memory size. Anyone with the link can see it;
-          sessions are deleted {RETENTION_DAYS} days after they end.
+          host name, macOS version, core count, and memory size. Anyone with the link can see it,
+          and anyone with the link can delete it (the Delete button on the session page, or{" "}
+          <code>afk delete</code> on the machine); otherwise sessions are deleted {RETENTION_DAYS}{" "}
+          days after they end.
         </p>
         <h2>The demo</h2>
         <p>

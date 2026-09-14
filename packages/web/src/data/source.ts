@@ -1,4 +1,11 @@
-import type { AnomalyEvent, FramesResponse, SessionSummary, StoredFrame } from "@afk/shared";
+import { DEMO_SESSION_ID } from "@afk/shared";
+import type {
+  AnomalyEvent,
+  FramesResponse,
+  SessionSummary,
+  StoredFrame,
+  StreamEndReason,
+} from "@afk/shared";
 
 /** Delivered by `subscribe` as live data arrives. */
 export interface SubscribeHandlers {
@@ -6,6 +13,12 @@ export interface SubscribeHandlers {
   onFrames(frames: StoredFrame[]): void;
   /** The session summary changed (sent on connect, and when the session ends). */
   onSession(session: SessionSummary): void;
+  /**
+   * The stream is over: the session ended (`ended`; `onSession` already carried the
+   * final summary) or was deleted under the viewer (`deleted`; the page says so and
+   * stops offering to delete it again).
+   */
+  onEnd(reason: StreamEndReason): void;
   /**
    * An anomaly event opened, changed, or closed. The server sends every existing event
    * as a snapshot on connect, then one per change; consumers upsert by `id`.
@@ -31,6 +44,12 @@ export interface SessionSource {
    * reconnect. Returns an unsubscribe function.
    */
   subscribe(sessionId: string, afterIndex: number, handlers: SubscribeHandlers): () => void;
+  /**
+   * Deletes the session and everything it recorded from the server. Anyone holding the
+   * link may (the id is the secret; see docs/PROTOCOL.md, "Delete"). Rejects with the
+   * server's reason when it refuses.
+   */
+  deleteSession(sessionId: string): Promise<void>;
 }
 
-export const DEMO_SESSION_ID = "demo";
+export { DEMO_SESSION_ID };
