@@ -4304,7 +4304,11 @@ describe("json_get_object", () => {
 
 /** The version the tests give the running copy, so the cases do not move with each release. */
 const THIS_VERSION = "0.2.0";
-const NEWER_VERSION = "0.4.0";
+/** One minor above the script under test, so the update tests keep working across releases. */
+const NEWER_VERSION = SCRIPT_VERSION.replace(
+  /^(\d+)\.(\d+)\.\d+$/,
+  (_, major, minor) => `${major}.${Number(minor) + 1}.0`,
+);
 
 /** A create response carrying (or not) the version of the client the server serves. */
 function createdWithLatest(latestClientVersion?: string): string {
