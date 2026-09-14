@@ -9,8 +9,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["packages/*/src/**/*.test.{ts,tsx}", "cli/**/*.test.ts"],
-    // The end-to-end contract test takes ~20 s; run it on purpose with `pnpm test:contract`.
-    exclude: ["**/node_modules/**", "cli/contract.test.ts"],
+    // The end-to-end contract and installer tests spawn real processes; run them on
+    // purpose with `pnpm test:contract`.
+    exclude: ["**/node_modules/**", "cli/contract.test.ts", "cli/install.test.ts"],
     environment: "node",
     restoreMocks: true,
   },
