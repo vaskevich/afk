@@ -86,6 +86,39 @@ describe("useSession", () => {
     expect(result.current.query.data?.frames.map((f) => f.index)).toEqual([1, 2]);
   });
 
+  it("applies the end summary, so a session that chained learns its successor while being watched", async () => {
+    const initial: FramesResponse = {
+      session: makeSessionSummary({ sessionId: "chained", status: "active", endedAt: null }),
+      frames: makeStoredFrames([makeSystemFrame(0)]),
+      events: [],
+    };
+    let handlers: SubscribeHandlers | undefined;
+    vi.spyOn(apiSource, "load").mockResolvedValue(initial);
+    vi.spyOn(apiSource, "subscribe").mockImplementation((_sessionId, _afterIndex, h) => {
+      handlers = h;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useSession("chained"), { wrapper: Wrapper });
+    await waitFor(() => expect(handlers).toBeDefined());
+
+    act(() => {
+      handlers!.onSession(
+        makeSessionSummary({
+          sessionId: "chained",
+          status: "ended",
+          endedAt: T0_MS + 60_000,
+          nextSessionId: "successor",
+        }),
+      );
+    });
+
+    await waitFor(() => expect(result.current.query.data?.session.status).toBe("ended"));
+    expect(result.current.query.data?.session.nextSessionId).toBe("successor");
+    // The frames already loaded stay; only the summary changed.
+    expect(result.current.query.data?.frames).toHaveLength(1);
+  });
+
   it("upserts a live event by id instead of duplicating it", async () => {
     const opened = makeEvent({ id: "system:cpu.high:1", startedAt: T0_MS + 5_000, endedAt: null });
     const initial: FramesResponse = {
