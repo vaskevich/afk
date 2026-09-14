@@ -3,6 +3,7 @@ import type { ConnectionState } from "../data/source.ts";
 import { Link } from "@tanstack/react-router";
 import { formatDateTime, formatDuration, formatGiB } from "../format.ts";
 import { useNow } from "../useNow.ts";
+import { ThemeToggle } from "./ThemeToggle.tsx";
 
 const CONNECTION_LABELS: Record<ConnectionState, string> = {
   connecting: "connecting",
@@ -35,6 +36,7 @@ export function SessionHeader({ session, connection }: Props) {
           </span>
         )}
       </h1>
+      <ThemeToggle />
       <dl className="facts">
         <div>
           <dt>started</dt>

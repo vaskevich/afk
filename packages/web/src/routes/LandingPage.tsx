@@ -1,6 +1,7 @@
 import { ServiceStats } from "@afk/shared";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { ThemeToggle } from "../components/ThemeToggle.tsx";
 import { formatDuration } from "../format.ts";
 
 /** How often the landing page refreshes the service numbers. */
@@ -62,7 +63,10 @@ function Stats() {
 export function LandingPage() {
   return (
     <main className="page landing">
-      <h1 className="wordmark">afk</h1>
+      <div className="landing-top">
+        <h1 className="wordmark">afk</h1>
+        <ThemeToggle />
+      </div>
       <p>
         Away-from-keyboard telemetry. Run <code>afk start</code> on a machine you are about to walk
         away from and get a shareable dashboard URL that shows whether everything is still fine:
