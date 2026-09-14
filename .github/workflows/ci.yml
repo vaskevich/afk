@@ -1,0 +1,81 @@
+# Continuous integration: typecheck, lint, format, test, and build the monorepo,
+# plus a separate job that validates the OpenTofu config in infra/. Runs on every
+# pull request and on pushes to main, and is also callable as a reusable workflow
+# (`workflow_call`) so deploy.yml can gate a deployment on these same jobs instead
+# of duplicating them -- see the comment in deploy.yml for why.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call: {}
+
+# One in-progress run per ref (branch or PR) at a time -- a new push cancels
+# whatever CI run was still going for the same ref instead of queuing behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, lint, format, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      # No version pinned here: this reads the `packageManager` field in
+      # package.json (currently pnpm@10.13.1) itself, so the pnpm version only
+      # has to change in one place -- same idea as the Dockerfile's pnpm pin.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      # Must come after pnpm/action-setup: `cache: pnpm` shells out to
+      # `pnpm store path` to find what to cache, which needs pnpm on PATH already.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  infra:
+    name: OpenTofu fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
+
+      - name: tofu fmt -check
+        run: tofu -chdir=infra fmt -check
+
+      # No AWS credentials and no state backend here: this only checks that the
+      # config is syntactically valid and internally consistent (variable
+      # references resolve, resource arguments type-check), not that it matches
+      # what's actually deployed.
+      - name: tofu init (no backend)
+        run: tofu -chdir=infra init -backend=false
+
+      - name: tofu validate
+        run: tofu -chdir=infra validate

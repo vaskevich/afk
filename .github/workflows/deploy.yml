@@ -1,0 +1,87 @@
+# Builds the server image, pushes it to the Lightsail container registry, and
+# creates a new deployment on the "afk" container service -- the same three steps
+# infra/deploy.sh performs from a laptop, run here from CI instead.
+#
+# Gating on CI: the task this workflow does only makes sense on a commit that
+# already passed CI. There are two common ways to express that:
+#   (a) trigger this workflow on `workflow_run` for the CI workflow and check
+#       `github.event.workflow_run.conclusion == 'success'`, or
+#   (b) run CI's jobs as part of this workflow's own run and gate the deploy job
+#       on them with `needs`, plus a `github.ref` check.
+# We use (b), but instead of copy-pasting ci.yml's jobs into this file (two
+# places to keep in sync), the `ci` job below calls ci.yml as a reusable workflow
+# (`uses: ./.github/workflows/ci.yml`). That keeps one definition of "CI passed"
+# for both PR branch-protection checks and this gate, and avoids workflow_run's
+# extra indirection -- it fires on a *different* event after the fact, so you
+# have to separately check out `github.event.workflow_run.head_sha` and handle
+# the case where that run's conclusion wasn't success, which is a well-known
+# source of timing bugs. The tradeoff: a push to main runs the test/infra jobs
+# twice (once for ci.yml's own `push` trigger, again nested in this workflow) --
+# harmless, just a bit more CI compute on merges to main only, not on PRs.
+name: Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  # Never cancel a deploy that's already pushing an image or mid-rollout --
+  # a second run just waits its turn instead.
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Build, push, and deploy
+    needs: [ci]
+    # Belt and suspenders: `push` is already scoped to main above, but
+    # `workflow_dispatch` can be run against any branch/tag from the Actions UI,
+    # so re-check here too.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # GitHub Environments let you require a manual approval or restrict which
+    # branches can deploy to "production" -- configure that in the repo's
+    # Settings > Environments if desired; see infra/README.md.
+    environment: production
+    permissions:
+      id-token: write # required to mint the OIDC token configure-aws-credentials exchanges for a role
+      contents: read
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      # No long-lived AWS access keys: this exchanges the job's OIDC token for
+      # short-lived credentials by assuming afk-github-deploy (infra/ci.tf),
+      # whose trust policy only accepts this repo's main branch / production
+      # environment. AWS_DEPLOY_ROLE_ARN is a repository *variable* (not a
+      # secret) since a role ARN isn't sensitive on its own.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+
+      # `aws lightsail push-container-image` shells out to this separate binary
+      # (not bundled with the AWS CLI, not preinstalled on GitHub's runners).
+      # See https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-install-software.html.
+      - name: Install the lightsailctl plugin
+        run: |
+          curl -fsSL "https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl" -o /usr/local/bin/lightsailctl
+          chmod +x /usr/local/bin/lightsailctl
+
+      # infra/deploy.sh does the actual build/push/deploy -- the same script a
+      # laptop runs through aws-vault, so the container/env/public-endpoint spec
+      # lives in exactly one place. It takes the bucket name/access key from the
+      # environment (falling back to `tofu output` only when unset, which won't
+      # happen here since this runner has no local tofu state) and the image tag
+      # as an argument, tagged with the commit SHA for traceability.
+      - name: Build, push, and deploy
+        env:
+          AFK_S3_BUCKET: ${{ vars.AFK_S3_BUCKET }}
+          AFK_S3_ACCESS_KEY_ID: ${{ secrets.AFK_S3_ACCESS_KEY_ID }}
+          AFK_S3_SECRET_ACCESS_KEY: ${{ secrets.AFK_S3_SECRET_ACCESS_KEY }}
+        run: infra/deploy.sh "afk:${{ github.sha }}"
