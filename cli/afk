@@ -60,8 +60,6 @@ AFK_PROTOCOL_VERSION=1
 # what it matches on. Keep the hosted default here in the repo.
 AFK_SERVER="${AFK_SERVER:-https://afk.osv.im}" # afk-install: default server
 AFK_HOME="${AFK_HOME:-$HOME/.afk}"
-# Where the upgrade hint says to fetch a newer copy of this script from.
-AFK_DOWNLOAD_URL="https://raw.githubusercontent.com/vaskevich/afk/main/cli/afk"
 
 # The sampler ticks once per SAMPLE_INTERVAL_SECONDS; each collector runs on every tick
 # or, for the slower ones, every N seconds (must be a multiple of the tick).
@@ -127,7 +125,11 @@ log_upgrade_required() { # response-json
   min_protocol=$(json_get_number "$1" minimumProtocolVersion)
   log "the server refused this client: ${message:-upgrade required}"
   log "this is afk $AFK_VERSION speaking protocol $AFK_PROTOCOL_VERSION; the server needs client ${min_client:-?} and protocol ${min_protocol:-?} or newer"
-  log "update with: curl -fsSL $AFK_DOWNLOAD_URL -o \"$0\" && chmod +x \"$0\""
+  # The server that refused us is the one whose minimum the new copy has to meet, so
+  # upgrade from it: its installer checks the download and installs to ~/.local/bin,
+  # or AFK_INSTALL_DIR (docs/CONFIGURATION.md), which is how to replace a copy elsewhere.
+  log "update with: curl -fsSL $AFK_SERVER/install | sh"
+  log "(this copy is $0; set AFK_INSTALL_DIR to its directory if that is not ~/.local/bin)"
 }
 
 now_seconds() { date +%s; }
