@@ -32,7 +32,11 @@ import {
 } from "@afk/shared";
 import type { HostInfo, RunFrame } from "@afk/shared";
 import { createApp } from "../packages/server/src/app.ts";
-import { DEFAULT_LIMITS } from "../packages/server/src/env.ts";
+import {
+  DEFAULT_LIMITS,
+  DEFAULT_MINIMUM_VERSIONS,
+  DEFAULT_SSE_KEEPALIVE_MS,
+} from "../packages/server/src/env.ts";
 import type { AdmissionLimits } from "../packages/server/src/env.ts";
 import { SessionStore } from "../packages/server/src/store/sessions.ts";
 import { MemorySessionStorage } from "../packages/server/src/store/storage.ts";
@@ -113,7 +117,7 @@ interface TestServer {
 
 /** The real app on a random loopback port, backed by an in-memory store. */
 async function startServer(limits: AdmissionLimits, webDistDir: string): Promise<TestServer> {
-  const store = new SessionStore(new MemorySessionStorage(), limits);
+  const store = new SessionStore(new MemorySessionStorage(), { limits });
   // The app is built once the port is known, since dashboard URLs embed it. No request
   // can arrive before then because nobody knows the port either.
   const wiring: { app?: ReturnType<typeof createApp> } = {};
@@ -151,7 +155,17 @@ async function startServer(limits: AdmissionLimits, webDistDir: string): Promise
 
   const port = await listen(0);
   const url = `http://${LOOPBACK}:${port}`;
-  wiring.app = createApp({ publicBaseUrl: url, webDistDir, limits }, store);
+  wiring.app = createApp(
+    {
+      publicBaseUrl: url,
+      webDistDir,
+      clientScriptPath: AFK_SCRIPT,
+      limits,
+      sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
+      minimumVersions: DEFAULT_MINIMUM_VERSIONS,
+    },
+    store,
+  );
 
   return {
     url,
