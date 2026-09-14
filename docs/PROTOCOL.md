@@ -490,6 +490,35 @@ transcript as changed just now, so a busy session becomes `working`, never a fal
 (`working` or `idle`). The states are the client's reading of those files with the
 thresholds above; the server counts them and never re-derives them.
 
+#### Codex
+
+The collector reads undocumented Codex internals (CLI 0.15x, Codex Desktop, and the
+ChatGPT app, which all run the same `codex` binary): `~/.codex/thread-writer-locks/<threadId>.lock`,
+an empty file per thread that the `codex` process running it holds open for as long
+as the thread is alive, and the thread's rollout (its transcript) under
+`~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<threadId>.jsonl`, found by the id
+in its name. The lock file outlives a crash, and the ChatGPT app keeps a `codex
+app-server` running whether or not a thread is open, so neither a lock file nor a
+`codex` process means anything on its own: a thread counts as a session only while a
+process named `codex` holds its lock open, which `lsof` reports (about 30 ms when
+asked about that command name and that directory only; a lock held by a process of
+another name, such as an editor with the file open, is not counted, and on a machine
+without `lsof` Codex reads as not there rather than counting stale locks).
+`.coordination.lock` beside the thread locks is not a thread. The rollout's
+`event_msg` records say whether a turn is running: the last of `task_started`,
+`task_complete`, and `turn_aborted` in the file is `task_started` while one is. Only
+those three tags are looked for, as literal text, and nothing else in the file is
+read; the client reads each live rollout whole once per session and only what was
+appended after that on later samples (it keeps how far it got under the session
+directory, one file per thread). A thread in a turn whose rollout changed within
+120 s is `working`; in a turn but quieter than that is `waitingOnInput`. That is a
+weaker signal than Claude Code's: Codex writes no approval or question event to the
+rollout, so a quiet turn is the only tell, and a long tool call looks the same. A
+thread whose last task event is `task_complete` or `turn_aborted`, one whose rollout
+has no such event, or one whose rollout cannot be found is `idle`. Codex has no
+subagent transcripts in this layout, so `codex.subagentsWorking` is always `0`.
+`CODEX_HOME`, which Codex itself honours to relocate `~/.codex`, is honoured too.
+
 When neither directory is there the client emits the `available: false` frame once,
 at the start of the session (or of each chained successor), and nothing more on the
 stream; the dashboard can say "no Claude Code or Codex found" without a frame every

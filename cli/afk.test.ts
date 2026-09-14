@@ -1,21 +1,26 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   access,
+  appendFile,
   copyFile,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   rm,
   stat,
+  symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
@@ -505,8 +510,34 @@ async function deadPid(): Promise<number> {
   return child.pid!;
 }
 
-async function collectAgents(home: string): Promise<AgentsCollectorData> {
-  const { stdout, stderr, code } = await runBash("collect_agents", { HOME: home });
+interface CollectAgentsOptions {
+  env?: NodeJS.ProcessEnv;
+  /**
+   * What the collector asks lsof for as the holder of a Codex lock, `codex` by
+   * default. The Codex tests hold their locks with `sleep` and say so here: the
+   * command name lsof matches is the kernel's, which a symlink or a script does not
+   * change, and a copy of a binary under the name is refused by macOS code signing or
+   * loses its dynamic libraries. The default is checked by holding a lock with a
+   * process that is not named `codex`, and against real Codex by the smoke test.
+   */
+  codexProcessName?: string;
+}
+
+/**
+ * Runs the collector against a fake home. CODEX_HOME is cleared so a relocated Codex in
+ * the environment the tests run under (Codex honours the variable, and so does the
+ * collector) cannot leak into a test.
+ */
+async function collectAgents(
+  home: string,
+  { env = {}, codexProcessName }: CollectAgentsOptions = {},
+): Promise<AgentsCollectorData> {
+  const prelude = codexProcessName === undefined ? "" : `CODEX_PROCESS_NAME=${codexProcessName}\n`;
+  const { stdout, stderr, code } = await runBash(`${prelude}collect_agents`, {
+    HOME: home,
+    CODEX_HOME: "",
+    ...env,
+  });
   expect(code, stderr).toBe(0);
   const result = AgentsCollectorData.strict().safeParse(JSON.parse(stdout));
   expect(result.success, JSON.stringify(result.success ? null : result.error.issues)).toBe(true);
@@ -638,15 +669,12 @@ describe("collect_agents", () => {
     });
   });
 
-  it("reports available:false with zero counts when there is no Claude Code state directory", async () => {
+  it("reports available:false and no block when there is neither a Claude Code nor a Codex state directory", async () => {
     const home = await makeTempDir();
 
     const data = await collectAgents(home);
 
-    expect(data).toEqual({
-      available: false,
-      claude: { sessions: 0, working: 0, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
-    });
+    expect(data).toEqual({ available: false });
   });
 
   it("sends counts only: no session name, id, or directory appears in the frame", async () => {
@@ -658,6 +686,355 @@ describe("collect_agents", () => {
     expect(stdout).not.toContain("secret");
     expect(stdout).not.toContain("00000000-0000-4000");
     expect(stdout).not.toContain(String(LIVE_PID));
+  });
+});
+
+/** What a Codex rollout carries that must never leave the machine. */
+const CODEX_THREAD_ID = "01a0a204-4048-77d2-89f7-beec0fd25b4e";
+const CODEX_CWD = "/Users/someone/src/secret.project_dir";
+const CODEX_ROLLOUT_DAY = "2026/09/14";
+/** The rollout events that open and close a turn. */
+type CodexTaskEvent = "task_started" | "task_complete" | "turn_aborted";
+
+/**
+ * A Codex thread as the fake home lays it out: a lock file (held open by a process
+ * named `codex` when `held`), and unless `rollout` is false a rollout whose last
+ * task event is `lastTaskEvent` (none when null), followed by `bytesAfter` of tool
+ * output, with its mtime `rolloutAgeSeconds` ago.
+ */
+interface FakeCodexThread {
+  id: string;
+  held: boolean;
+  rollout?: boolean;
+  lastTaskEvent?: CodexTaskEvent | null;
+  bytesAfter?: number;
+  rolloutAgeSeconds?: number;
+}
+
+function codexRolloutLine(type: string, payload: Record<string, unknown>): string {
+  return `${JSON.stringify({ timestamp: "2026-09-14T22:23:27.427Z", type, payload })}\n`;
+}
+
+function codexTaskEventLine(event: string): string {
+  return codexRolloutLine("event_msg", { type: event, turn_id: "secret-turn" });
+}
+
+/** Tool output as Codex records it: many item_completed events, each a long line. */
+function codexOutputLines(bytes: number): string {
+  const line = codexRolloutLine("event_msg", {
+    type: "item_completed",
+    item: { type: "command_execution", output: "x".repeat(1000) },
+  });
+  return line.repeat(Math.ceil(bytes / line.length));
+}
+
+/** The rollout's text for `thread`: the session_meta line, the user's message, then the events. */
+function codexRolloutText(thread: FakeCodexThread): string {
+  let text = codexRolloutLine("session_meta", {
+    id: thread.id,
+    cwd: CODEX_CWD,
+    originator: "codex-tui",
+    cli_version: "0.154.0",
+    source: "cli",
+  });
+  text += codexRolloutLine("response_item", {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "a secret question" }],
+  });
+  const last = thread.lastTaskEvent === undefined ? "task_started" : thread.lastTaskEvent;
+  if (last !== null) {
+    if (last !== "task_started") {
+      text += codexTaskEventLine("task_started");
+    }
+    text += codexTaskEventLine(last);
+  }
+  return text + codexOutputLines(thread.bytesAfter ?? 0);
+}
+
+function codexRolloutPath(home: string, thread: FakeCodexThread): string {
+  return join(
+    home,
+    ".codex",
+    "sessions",
+    CODEX_ROLLOUT_DAY,
+    `rollout-2026-09-14T15-23-02-${thread.id}.jsonl`,
+  );
+}
+
+const heldLocks: { child: ChildProcess; handle: FileHandle }[] = [];
+
+afterEach(async () => {
+  for (const { child, handle } of heldLocks.splice(0)) {
+    child.kill("SIGKILL");
+    await handle.close();
+  }
+});
+
+/** The command that holds the fake locks open; see CollectAgentsOptions.codexProcessName. */
+const LOCK_HOLDER = "sleep";
+
+/**
+ * Starts a `sleep` that holds `lock` open on a descriptor until the test ends, the
+ * way a codex process holds its thread's lock. Resolves once the process has
+ * exec'd, which is when lsof sees it under that name.
+ */
+async function holdLock(lock: string): Promise<void> {
+  const handle = await open(lock, "r");
+  const child = spawn(LOCK_HOLDER, ["60"], {
+    stdio: ["ignore", "ignore", "ignore", handle.fd],
+  });
+  heldLocks.push({ child, handle });
+  await once(child, "spawn");
+}
+
+/**
+ * Adds `.codex/` to `home`: the locks directory with `.coordination.lock` and one
+ * lock per thread (held open by a `codex` process when asked), and the rollouts
+ * under `sessions/`.
+ */
+async function addCodexHome(home: string, threads: readonly FakeCodexThread[]): Promise<string> {
+  const locks = join(home, ".codex", "thread-writer-locks");
+  await mkdir(locks, { recursive: true });
+  await writeFile(join(locks, ".coordination.lock"), "");
+  const now = Date.now() / 1000;
+  for (const thread of threads) {
+    const lock = join(locks, `${thread.id}.lock`);
+    await writeFile(lock, "");
+    if (thread.held) {
+      await holdLock(lock);
+    }
+    if (thread.rollout !== false) {
+      const rollout = codexRolloutPath(home, thread);
+      await mkdir(dirname(rollout), { recursive: true });
+      await writeFile(rollout, codexRolloutText(thread));
+      await utimes(rollout, now, now - (thread.rolloutAgeSeconds ?? 0));
+    }
+  }
+  return home;
+}
+
+/** Appends the events to a thread's rollout as its turn moves on. */
+async function appendToRollout(home: string, thread: FakeCodexThread, text: string): Promise<void> {
+  await appendFile(codexRolloutPath(home, thread), text);
+}
+
+const HAS_LSOF = spawnSync("sh", ["-c", "command -v lsof"], { stdio: "ignore" }).status === 0;
+
+/** The Codex tests need lsof (always on macOS, usually on Linux) to tell a held lock from a stale one. */
+const describeWithLsof = describe.skipIf(!HAS_LSOF);
+
+describeWithLsof("collect_agents for Codex", () => {
+  const LIVE_PID = process.pid;
+
+  it("counts a thread whose lock is held and whose last task event is task_started as working", async () => {
+    const home = await addCodexHome(await makeTempDir(), [{ id: CODEX_THREAD_ID, held: true }]);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data).toEqual({
+      available: true,
+      codex: { sessions: 1, working: 1, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
+    });
+  });
+
+  it.each(["task_complete", "turn_aborted"] as const)(
+    "counts a thread whose last task event is %s as idle",
+    async (lastTaskEvent) => {
+      const home = await addCodexHome(await makeTempDir(), [
+        { id: CODEX_THREAD_ID, held: true, lastTaskEvent },
+      ]);
+
+      const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+      expect(data.codex).toMatchObject({ sessions: 1, working: 0, idle: 1, waitingOnInput: 0 });
+    },
+  );
+
+  it("counts a thread in a turn whose rollout is older than AGENT_ACTIVE_SECONDS as waiting on input", async () => {
+    const home = await addCodexHome(await makeTempDir(), [
+      { id: CODEX_THREAD_ID, held: true, rolloutAgeSeconds: AGENT_ACTIVE_SECONDS + 5 },
+    ]);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data.codex).toMatchObject({ sessions: 1, working: 0, idle: 0, waitingOnInput: 1 });
+  });
+
+  it("still counts a thread in a turn as working when its rollout is exactly AGENT_ACTIVE_SECONDS old", async () => {
+    const home = await addCodexHome(await makeTempDir(), [
+      { id: CODEX_THREAD_ID, held: true, rolloutAgeSeconds: AGENT_ACTIVE_SECONDS - 2 },
+    ]);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data.codex).toMatchObject({ working: 1, waitingOnInput: 0 });
+  });
+
+  it("counts a thread whose rollout has no task event at all as idle", async () => {
+    const home = await addCodexHome(await makeTempDir(), [
+      { id: CODEX_THREAD_ID, held: true, lastTaskEvent: null },
+    ]);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data.codex).toMatchObject({ sessions: 1, idle: 1, working: 0, waitingOnInput: 0 });
+  });
+
+  it("counts a held lock without a rollout as an idle session, never a failure", async () => {
+    const home = await addCodexHome(await makeTempDir(), [
+      { id: CODEX_THREAD_ID, held: true, rollout: false },
+    ]);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data.codex).toMatchObject({ sessions: 1, idle: 1, working: 0 });
+  });
+
+  it("ignores a lock nobody holds open, as a crash leaves behind, and the coordination lock", async () => {
+    const home = await addCodexHome(await makeTempDir(), [
+      { id: CODEX_THREAD_ID, held: true },
+      { id: "01a05b79-75b8-7460-a642-940d73213234", held: false },
+    ]);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data.codex).toMatchObject({ sessions: 1, working: 1 });
+  });
+
+  it("ignores a lock held open by a process not named codex, such as an editor with the file open", async () => {
+    const home = await addCodexHome(await makeTempDir(), [{ id: CODEX_THREAD_ID, held: true }]);
+
+    // The default process name, while the holder is a sleep.
+    const data = await collectAgents(home);
+
+    expect(data.codex).toMatchObject({ sessions: 0 });
+  });
+
+  it("finds the turn start however much tool output follows it in the rollout", async () => {
+    const home = await addCodexHome(await makeTempDir(), [
+      { id: CODEX_THREAD_ID, held: true, bytesAfter: 1_500_000 },
+    ]);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data.codex).toMatchObject({ working: 1, idle: 0 });
+  });
+
+  it("follows a thread's turn from one sample to the next by reading only what was appended", async () => {
+    const sessionDir = await makeTempDir();
+    const thread: FakeCodexThread = { id: CODEX_THREAD_ID, held: true, bytesAfter: 200_000 };
+    const home = await addCodexHome(await makeTempDir(), [thread]);
+    const options = { env: { SESSION_DIR: sessionDir }, codexProcessName: LOCK_HOLDER };
+
+    const first = await collectAgents(home, options);
+    await appendToRollout(
+      home,
+      thread,
+      codexOutputLines(1000) + codexTaskEventLine("task_complete"),
+    );
+    const second = await collectAgents(home, options);
+    await appendToRollout(home, thread, codexOutputLines(1000));
+    const third = await collectAgents(home, options);
+    await appendToRollout(
+      home,
+      thread,
+      codexTaskEventLine("task_started") + codexOutputLines(1000),
+    );
+    const fourth = await collectAgents(home, options);
+
+    expect([first, second, third, fourth].map((data) => data.codex!.working)).toEqual([1, 0, 0, 1]);
+    // The scan position is the session's, so it goes when the session does.
+    expect(await readdir(join(sessionDir, "agents"))).toEqual([`codex-${CODEX_THREAD_ID}`]);
+  });
+
+  it("starts over on a rollout that shrank, as one replaced by a fresh file has", async () => {
+    const sessionDir = await makeTempDir();
+    const thread: FakeCodexThread = { id: CODEX_THREAD_ID, held: true, bytesAfter: 50_000 };
+    const home = await addCodexHome(await makeTempDir(), [thread]);
+    const options = { env: { SESSION_DIR: sessionDir }, codexProcessName: LOCK_HOLDER };
+
+    const first = await collectAgents(home, options);
+    await writeFile(
+      codexRolloutPath(home, thread),
+      codexRolloutText({ ...thread, lastTaskEvent: "task_complete", bytesAfter: 0 }),
+    );
+    const second = await collectAgents(home, options);
+
+    expect([first.codex!.working, second.codex!.working]).toEqual([1, 0]);
+  });
+
+  it("reports both tools, each in its own block, when both are on the machine", async () => {
+    const home = await addCodexHome(
+      await makeClaudeHome([{ pid: LIVE_PID, status: "idle", transcriptAgeSeconds: 1 }]),
+      [{ id: CODEX_THREAD_ID, held: true }],
+    );
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data).toEqual({
+      available: true,
+      claude: { sessions: 1, working: 0, idle: 1, waitingOnInput: 0, subagentsWorking: 0 },
+      codex: { sessions: 1, working: 1, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
+    });
+  });
+
+  it("reports Codex with no sessions, and no claude block, on a machine with Codex installed but idle and no Claude Code", async () => {
+    const home = await addCodexHome(await makeTempDir(), []);
+
+    const data = await collectAgents(home, { codexProcessName: LOCK_HOLDER });
+
+    expect(data).toEqual({
+      available: true,
+      codex: { sessions: 0, working: 0, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
+    });
+  });
+
+  it("honours CODEX_HOME the way Codex does", async () => {
+    const home = await makeTempDir();
+    const elsewhere = await addCodexHome(await makeTempDir(), [
+      { id: CODEX_THREAD_ID, held: true },
+    ]);
+
+    const data = await collectAgents(home, {
+      env: { CODEX_HOME: join(elsewhere, ".codex") },
+      codexProcessName: LOCK_HOLDER,
+    });
+
+    expect(data.codex).toMatchObject({ sessions: 1, working: 1 });
+  });
+
+  it("sends counts only: no thread id, directory, originator, or message text appears in the frame", async () => {
+    const home = await addCodexHome(await makeTempDir(), [{ id: CODEX_THREAD_ID, held: true }]);
+
+    const { stdout } = await runBash(`CODEX_PROCESS_NAME=${LOCK_HOLDER}\ncollect_agents`, {
+      HOME: home,
+      CODEX_HOME: "",
+    });
+
+    expect(stdout).not.toContain(CODEX_THREAD_ID.slice(0, 8));
+    expect(stdout).not.toContain("secret");
+    expect(stdout).not.toContain("codex-tui");
+    expect(stdout).not.toContain(CODEX_ROLLOUT_DAY);
+  });
+});
+
+describe("collect_agents for Codex without lsof", () => {
+  it("reads Codex as not on the machine rather than counting stale locks", async () => {
+    const home = await addCodexHome(await makeTempDir(), [{ id: CODEX_THREAD_ID, held: false }]);
+    // A PATH with everything the sourced script needs except lsof.
+    const bin = join(home, "path-without-lsof");
+    await mkdir(bin);
+    for (const tool of ["uname", "date", "stat", "sed", "tr", "grep", "tail", "sort", "mkdir"]) {
+      const found = spawnSync("sh", ["-c", `command -v ${tool}`], {
+        encoding: "utf8",
+      }).stdout.trim();
+      await symlink(found, join(bin, tool));
+    }
+
+    const data = await collectAgents(home, { env: { PATH: bin } });
+
+    expect(data).toEqual({ available: false });
   });
 });
 

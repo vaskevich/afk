@@ -135,9 +135,27 @@ AGENTS_INTERVAL_SECONDS=5
 # Where Claude Code keeps its state; the agents collector reads (never writes) two
 # things under it: sessions/<pid>.json and the mtimes of transcripts under projects/.
 CLAUDE_HOME="$HOME/.claude"
-# A busy Claude Code session whose transcript changed within this many seconds is
-# working; busy but quieter than that is waiting on input (AGENT_ACTIVE_SECONDS and
-# AGENT_SUBAGENT_ACTIVE_SECONDS in shared; see docs/PROTOCOL.md for the states).
+# Where Codex keeps its state, relocated by the same CODEX_HOME variable Codex itself
+# honours; the agents collector reads (never writes) which thread-writer-locks/ files
+# are held open and, in each live thread's rollout under sessions/, only the three
+# event tags below and the file's mtime.
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+CODEX_LOCKS_DIR="$CODEX_HOME/thread-writer-locks"
+# The command name of every Codex entry point (the CLI, and the `codex app-server`
+# the desktop apps run is the same binary); lsof is restricted to it, so a lock
+# held by a process of another name does not count.
+CODEX_PROCESS_NAME=codex
+# The rollout records that open and close a turn; the last one in the file says
+# whether a turn is running. Matched as literal text, whole-file.
+CODEX_TASK_STARTED_TAG='"type":"event_msg","payload":{"type":"task_started"'
+CODEX_TASK_COMPLETE_TAG='"type":"event_msg","payload":{"type":"task_complete"'
+CODEX_TURN_ABORTED_TAG='"type":"event_msg","payload":{"type":"turn_aborted"'
+# How far back before the last scan of a rollout the next one starts (codex_turn_running).
+CODEX_SCAN_OVERLAP_BYTES=256
+# A busy Claude Code session, or a Codex thread in a turn, whose transcript changed
+# within this many seconds is working; busy but quieter than that is waiting on input
+# (AGENT_ACTIVE_SECONDS and AGENT_SUBAGENT_ACTIVE_SECONDS in shared; see
+# docs/PROTOCOL.md for the states).
 AGENT_ACTIVE_SECONDS=120
 AGENT_SUBAGENT_ACTIVE_SECONDS=30
 # How many of the busiest processes a processes frame carries (PROCESSES_TOP_MAX in shared).
@@ -515,11 +533,13 @@ collect_processes() {
 }
 
 # ---------------------------------------------------------------------------
-# agents collector: how many Claude Code agents are on the machine and what they are
-# doing. Counts only; no session name, id, directory, or transcript content leaves
-# the machine (see docs/PROTOCOL.md and the decision log in docs/ARCHITECTURE.md).
+# agents collector: how many coding agents are on the machine and what they are
+# doing, Claude Code and Codex. Counts only; no session name, id, directory, or
+# transcript content leaves the machine (see docs/PROTOCOL.md and the decision log
+# in docs/ARCHITECTURE.md). One block of five counts per tool found on the machine,
+# no block for a tool that is not, available:false when neither is.
 #
-# What it reads, all undocumented Claude Code internals as of 2.1.x:
+# Claude Code, all undocumented internals as of 2.1.x:
 #   $CLAUDE_HOME/sessions/<pid>.json    one single-line JSON record per live session,
 #                                       whatever started it (a terminal `claude`, the
 #                                       desktop app); removed on exit, so the pid is
@@ -543,26 +563,59 @@ collect_processes() {
 # reads as changed now (file_mtime's fallback), so a layout change turns into
 # "working", never a false "waiting"; a status outside that vocabulary goes by
 # transcript age alone, working or idle. A subagent transcript changed within
-# AGENT_SUBAGENT_ACTIVE_SECONDS is a working subagent. Without a readable sessions
-# directory the frame says available:false with zero counts.
+# AGENT_SUBAGENT_ACTIVE_SECONDS is a working subagent.
+#
+# Codex (CLI 0.15x, Codex Desktop, the ChatGPT app), undocumented likewise:
+#   $CODEX_HOME/thread-writer-locks/<threadId>.lock
+#                                       an empty file per thread, held open by the
+#                                       `codex` process running it for as long as the
+#                                       thread is alive, whatever started it (a
+#                                       terminal `codex`, the `codex app-server` the
+#                                       desktop apps keep running). The file outlives
+#                                       a crash, so a thread counts only while a
+#                                       process holds it open, which lsof tells;
+#                                       `.coordination.lock` beside them is no thread.
+#   $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<threadId>.jsonl
+#                                       the thread's transcript ("rollout"), found by
+#                                       the id in its name. Its event records say
+#                                       whether a turn is running: the last of
+#                                       `task_started`, `task_complete`, `turn_aborted`
+#                                       in the file is `task_started` while one is.
+#                                       Only those three tags are looked for (grep -F
+#                                       over the whole file, about 30 ms for 20 MB;
+#                                       reading just the tail misses a long turn whose
+#                                       start has scrolled out of it), and nothing
+#                                       else in the file is read; the rollout's mtime
+#                                       is the activity signal.
+#
+# A thread in a turn whose rollout changed within AGENT_ACTIVE_SECONDS is working; in
+# a turn but quieter than that is waiting on input. That is a weaker signal than
+# Claude Code's: Codex writes no approval or question event, so a quiet turn is the
+# only tell, and a long tool call reads the same way. Anything else, a thread without
+# a rollout included, is idle. Codex has no subagent transcripts, so
+# subagentsWorking is always 0.
 # ---------------------------------------------------------------------------
 
-AGENTS_UNAVAILABLE_JSON='{"available":false,"claude":{"sessions":0,"working":0,"idle":0,"waitingOnInput":0,"subagentsWorking":0}}'
+AGENTS_UNAVAILABLE_JSON='{"available":false}'
 
 claude_sessions_available() { [ -d "$CLAUDE_HOME/sessions" ] && [ -r "$CLAUDE_HOME/sessions" ]; }
+# Without lsof (never on macOS, sometimes on Linux) held locks cannot be told from
+# stale ones, and no count is better than a wrong one: Codex reads as not here.
+codex_available() {
+  [ -d "$CODEX_LOCKS_DIR" ] && [ -r "$CODEX_LOCKS_DIR" ] && command -v lsof >/dev/null 2>&1
+}
+agents_available() { claude_sessions_available || codex_available; }
 
-# The agents stream is worth a frame when Claude Code is here, and once per session
-# (sequence still 0; chaining resets it) when it is not, so the dashboard can say
-# "Claude Code not found" without a frame every AGENTS_INTERVAL_SECONDS saying so again.
-agents_frame_due() { claude_sessions_available || [ "$SEQ_AGENTS" -eq 0 ]; }
+# The agents stream is worth a frame when a tool is here, and once per session
+# (sequence still 0; chaining resets it) when none is, so the dashboard can say "no
+# Claude Code or Codex found" without a frame every AGENTS_INTERVAL_SECONDS saying so.
+agents_frame_due() { agents_available || [ "$SEQ_AGENTS" -eq 0 ]; }
 
-collect_agents() {
+# The `,"claude":{...}` block, or nothing when Claude Code is not here.
+collect_claude_agents() {
   local now sessions=0 working=0 idle=0 waiting=0 subagents=0
   local file record pid status session_id cwd slug project latest mtime
-  if ! claude_sessions_available; then
-    printf '%s' "$AGENTS_UNAVAILABLE_JSON"
-    return
-  fi
+  claude_sessions_available || return 0
   now=$(now_seconds)
   for file in "$CLAUDE_HOME"/sessions/*.json; do
     [ -e "$file" ] || continue
@@ -604,8 +657,112 @@ collect_agents() {
       idle=$((idle + 1))
     fi
   done
-  printf '{"available":true,"claude":{"sessions":%d,"working":%d,"idle":%d,"waitingOnInput":%d,"subagentsWorking":%d}}' \
+  printf ',"claude":{"sessions":%d,"working":%d,"idle":%d,"waitingOnInput":%d,"subagentsWorking":%d}' \
     "$sessions" "$working" "$idle" "$waiting" "$subagents"
+}
+
+# The ids of the threads whose lock file a codex process holds open, one per line.
+# lsof is asked only about that command name (CODEX_PROCESS_NAME) and only about the
+# locks directory (-a ANDs the two): about 30 ms, against about 250 ms for a walk of
+# every process's open files. `-F pn` prints `p<pid>`, `f<fd>`, `n<path>` lines; the
+# paths are all that matter, and a process may hold the same lock more than once.
+codex_live_thread_ids() {
+  lsof -F pn -a -c "$CODEX_PROCESS_NAME" +D "$CODEX_LOCKS_DIR" 2>/dev/null \
+    | sed -n 's|^n.*/\([^/.][^/]*\)\.lock$|\1|p' | sort -u
+}
+
+# The rollout of thread $1, or nothing when none can be found.
+codex_rollout_path() {
+  local rollout
+  for rollout in "$CODEX_HOME"/sessions/*/*/*/rollout-*-"$1".jsonl; do
+    if [ -e "$rollout" ]; then
+      printf '%s' "$rollout"
+      return
+    fi
+  done
+}
+
+# Where the collector remembers how far into each live rollout it has looked: one
+# `codex-<threadId>` file per thread under the session directory, holding the bytes
+# scanned and the turn state found, removed with the session. Nothing without a
+# session directory (a direct call), which then reads every rollout whole each time.
+codex_scan_dir() {
+  [ -n "${SESSION_DIR:-}" ] && printf '%s' "$SESSION_DIR/agents"
+}
+
+# True while the last task event in rollout $1 (thread $2) is a turn starting. The
+# whole file is read once and only what was appended after that on later calls:
+# BSD grep takes about 30 ms per MB with three patterns, and a thread in a long turn
+# appends to a rollout of many MB every few seconds. The scan starts
+# CODEX_SCAN_OVERLAP_BYTES before where the last one stopped so a tag cut in two by a
+# write in progress is seen whole the next time; a tag seen twice changes nothing,
+# since the state it names is the one already recorded. A rollout shorter than what
+# was scanned was replaced and is read from the start again.
+codex_turn_running() { # rollout thread-id
+  local rollout=$1 cache="" size scanned=0 state=over from last dir
+  size=$(file_size "$rollout")
+  dir=$(codex_scan_dir)
+  if [ -n "$dir" ]; then
+    cache="$dir/codex-$2"
+    if [ -f "$cache" ]; then
+      read -r scanned state < "$cache" 2>/dev/null || true
+      case "$scanned" in ''|*[!0-9]*) scanned=0 ;; esac
+      case "$state" in running|over) ;; *) state=over ;; esac
+      if [ "$scanned" -gt "$size" ]; then
+        scanned=0
+        state=over
+      fi
+    fi
+  fi
+  if [ "$size" -gt "$scanned" ]; then
+    from=$((scanned - CODEX_SCAN_OVERLAP_BYTES + 1))
+    if [ "$from" -lt 1 ]; then
+      from=1
+    fi
+    last=$(tail -c "+$from" "$rollout" 2>/dev/null | LC_ALL=C grep -F -o -e "$CODEX_TASK_STARTED_TAG" \
+      -e "$CODEX_TASK_COMPLETE_TAG" -e "$CODEX_TURN_ABORTED_TAG" | tail -n 1)
+    case "$last" in
+      "$CODEX_TASK_STARTED_TAG") state=running ;;
+      "$CODEX_TASK_COMPLETE_TAG"|"$CODEX_TURN_ABORTED_TAG") state=over ;;
+    esac
+    if [ -n "$cache" ]; then
+      mkdir -p "$dir" 2>/dev/null
+      printf '%s %s\n' "$size" "$state" > "$cache" 2>/dev/null
+    fi
+  fi
+  [ "$state" = running ]
+}
+
+# The `,"codex":{...}` block, or nothing when Codex is not here.
+collect_codex_agents() {
+  local now sessions=0 working=0 idle=0 waiting=0 thread_id rollout
+  codex_available || return 0
+  now=$(now_seconds)
+  for thread_id in $(codex_live_thread_ids); do
+    sessions=$((sessions + 1))
+    rollout=$(codex_rollout_path "$thread_id")
+    if [ -n "$rollout" ] && codex_turn_running "$rollout" "$thread_id"; then
+      if [ $((now - $(file_mtime "$rollout"))) -le "$AGENT_ACTIVE_SECONDS" ]; then
+        working=$((working + 1))
+      else
+        waiting=$((waiting + 1))
+      fi
+    else
+      idle=$((idle + 1))
+    fi
+  done
+  printf ',"codex":{"sessions":%d,"working":%d,"idle":%d,"waitingOnInput":%d,"subagentsWorking":0}' \
+    "$sessions" "$working" "$idle" "$waiting"
+}
+
+collect_agents() {
+  local blocks
+  blocks="$(collect_claude_agents)$(collect_codex_agents)"
+  if [ -z "$blocks" ]; then
+    printf '%s' "$AGENTS_UNAVAILABLE_JSON"
+    return
+  fi
+  printf '{"available":true%s}' "$blocks"
 }
 
 # ---------------------------------------------------------------------------

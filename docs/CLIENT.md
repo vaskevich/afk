@@ -11,13 +11,26 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   reads Claude Code's per-session records (`~/.claude/sessions/<pid>.json`: the pid is
   checked with `kill -0`, and only `status`, `cwd`, and `sessionId` are looked at, the
   last two just to find the transcript) and the mtimes of the session's transcript and
-  its subagents' transcripts under `~/.claude/projects/`; it never opens a transcript,
-  never opens the `.key` files beside the records, and never runs anything. What goes
-  on the wire is `available` plus five counts (sessions, working, waiting on input,
-  idle, working subagents); no name, id, directory, or timestamp of any session leaves
-  the machine, which is a decision, not an omission (see the decision log in
-  [ARCHITECTURE.md](ARCHITECTURE.md)). A machine without `~/.claude/sessions` sends one
-  `available: false` frame per session and nothing more on that stream.
+  its subagents' transcripts under `~/.claude/projects/`; it never opens a Claude Code
+  transcript, never opens the `.key` files beside the records, and never runs
+  anything of Claude Code's. For Codex it asks `lsof` which files under
+  `~/.codex/thread-writer-locks/` a process named `codex` holds open (a lock file on
+  its own outlives a crash, and the ChatGPT app keeps a `codex app-server` running
+  whether or not a thread is open, so only the two together mean a live thread), and
+  in each live thread's rollout under `~/.codex/sessions/` it looks for three literal
+  event tags (`task_started`, `task_complete`, `turn_aborted`) to tell a turn in
+  progress from one that is over, and at the file's mtime; nothing else in the
+  rollout is read, and each is read whole once per session and then only what was
+  appended (the byte count it got to is kept per thread under the session directory
+  and goes with it). What goes on the wire is `available` plus five counts per tool
+  found (sessions, working, waiting on input, idle, working subagents); no name, id,
+  directory, or timestamp of any session or thread leaves the machine, which is a
+  decision, not an omission (see the decision log in
+  [ARCHITECTURE.md](ARCHITECTURE.md)). Codex's waiting-on-input reading is weaker
+  than Claude Code's: it is a turn in progress whose rollout has been quiet for 120 s,
+  since Codex writes no approval or question event. A machine with neither
+  `~/.claude/sessions` nor `~/.codex/thread-writer-locks` sends one `available: false`
+  frame per session and nothing more on that stream.
 - Spool to disk, retry forever with backoff, never lose or duplicate a frame. Without
   `flock` on macOS the only safe handoff between a sampler and a sender is one file
   per frame and an atomic rename; a shared append-only file races.
