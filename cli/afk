@@ -19,7 +19,8 @@
 #                        started by `afk start` if one is running on this machine,
 #                        otherwise starts one (with machine telemetry) for the
 #                        lifetime of the command
-#   afk status           show the session running on this machine and its queue
+#   afk status           show the session running on this machine, its queue (the
+#                        joined runs' included), and the runs still going
 #   afk stop             end that session (asks the `afk start` process to finish)
 #   afk qr               print the current session's dashboard URL as a QR code again
 #   afk version
@@ -63,9 +64,10 @@
 #                                  a successor); `afk start` removes session
 #                                  directories a day after this (two days after their
 #                                  last change if it is missing)
-#   sessions/<id>/runs/<runId>/    an `afk run`: its pid, the newest chunks of its stdout
-#                                  and stderr (capped, and deleted when it exits), and
-#                                  (when it joined an existing session) its own queue
+#   sessions/<id>/runs/<runId>/    an `afk run`: the command's pid and command line, the
+#                                  newest chunks of its stdout and stderr (capped, and
+#                                  deleted when it exits), and (when it joined an
+#                                  existing session) its own queue
 # The directory and everything in it are readable by the user alone (mode 700 and 600).
 #
 # The client is deliberately dumb: it ships raw measurements and lets the server
@@ -118,6 +120,8 @@ case "${AFK_RUN_CAPTURE_MAX_BYTES:-}" in
   *) RUN_CAPTURE_MAX_BYTES=$AFK_RUN_CAPTURE_MAX_BYTES ;;
 esac
 RUN_CAPTURE_KEEP_CHUNKS=2
+# The wrapped command line is kept for `afk status` cut to this many characters.
+RUN_COMMAND_MAX_CHARS=256
 # split names chunks with this many letters after the prefix: 26^6 chunks of 64 MiB.
 RUN_CAPTURE_SUFFIX_LENGTH=6
 SEND_INTERVAL_SECONDS=1
@@ -264,10 +268,15 @@ owner_pid() { cat "$AFK_HOME/owner.pid" 2>/dev/null; }
 remove_current_session_files() { rm -f "$AFK_HOME/current" "$AFK_HOME/owner.pid"; }
 
 # The queue holds one frame per file (see emit_frame); these size it up for the
-# sender's log, `afk status`, and the disk cap.
-queue_count() { find "$SESSION_DIR/queue" -name '*.ndjson' -type f 2>/dev/null | wc -l | tr -d ' '; }
-queue_bytes() {
-  find "$SESSION_DIR/queue" -name '*.ndjson' -type f -exec sh -c 'wc -c < "$1"' _ {} \; 2>/dev/null \
+# sender's log, `afk status`, and the disk cap. They take the session's own queue
+# unless given other queue directories (`afk status` adds the joiners' queues).
+queue_count() { # [queue-dir...]
+  [ $# -gt 0 ] || set -- "$SESSION_DIR/queue"
+  find "$@" -name '*.ndjson' -type f 2>/dev/null | wc -l | tr -d ' '
+}
+queue_bytes() { # [queue-dir...]
+  [ $# -gt 0 ] || set -- "$SESSION_DIR/queue"
+  find "$@" -name '*.ndjson' -type f -exec sh -c 'wc -c < "$1"' _ {} \; 2>/dev/null \
     | awk '{ s += $1 } END { print s + 0 }'
 }
 
@@ -1253,6 +1262,8 @@ cmd_run() {
   RUN_COMMAND_JSON=$(json_string "$*" | cut -c1-200)
   RUN_DIR="$AFK_HOME/sessions/$SESSION_ID/runs/$RUN_ID"
   mkdir -p "$RUN_DIR"
+  # For `afk status`, which lists the runs still going.
+  printf '%s\n' "$*" | cut -c "1-$RUN_COMMAND_MAX_CHARS" > "$RUN_DIR/command"
   if [ "$owner" = 0 ]; then
     # A joiner keeps its own spool so it never races the owner's sender.
     SESSION_DIR="$RUN_DIR"
@@ -1314,9 +1325,11 @@ cmd_run() {
 
 # Reports on the session in ~/.afk/current from local state only: no network, so it
 # answers instantly even when the server is unreachable. The queue counted is the
-# owner's; an `afk run` that joined keeps its own under runs/<runId>/.
+# owner's plus those of the `afk run`s that joined (each keeps its own under
+# runs/<runId>/), and every run whose command is still going is listed with the
+# command's pid.
 cmd_status() {
-  local pid owner
+  local pid owner run_dir run_pid
   if ! read_current_file; then
     printf 'no session running on this machine\n'
     exit 1
@@ -1330,7 +1343,14 @@ cmd_status() {
     owner="pid $pid, not running (stale; afk stop clears it)"
   fi
   printf 'session    %s\ndashboard  %s\nowner      %s\nqueue      %s frames, %s bytes\n' \
-    "$SESSION_ID" "$DASHBOARD_URL" "$owner" "$(queue_count)" "$(queue_bytes)"
+    "$SESSION_ID" "$DASHBOARD_URL" "$owner" \
+    "$(queue_count "$SESSION_DIR/queue" "$SESSION_DIR"/runs/*/queue)" \
+    "$(queue_bytes "$SESSION_DIR/queue" "$SESSION_DIR"/runs/*/queue)"
+  for run_dir in "$SESSION_DIR"/runs/*; do
+    run_pid=$(cat "$run_dir/pid" 2>/dev/null)
+    pid_alive "$run_pid" || continue
+    printf 'run        pid %s, running: %s\n' "$run_pid" "$(cat "$run_dir/command" 2>/dev/null)"
+  done
 }
 
 # Ends the session by asking its owner (the `afk start` or owning `afk run` process)

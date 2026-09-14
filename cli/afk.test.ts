@@ -1910,6 +1910,46 @@ describe("afk status", () => {
     expect(code, stderr).toBe(0);
     expect(stdout).toMatch(/\nowner\s+pid [0-9]+, not running/);
   });
+
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "counts the joined runs' queues too and lists the runs still going with their command",
+    async () => {
+      const afkHome = await makeTempDir();
+      const sessionDir = join(afkHome, "sessions", "abc123");
+      await mkdir(join(sessionDir, "queue"), { recursive: true });
+      await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "x".repeat(10));
+      const running = join(sessionDir, "runs", "ab12cd34");
+      const finished = join(sessionDir, "runs", "ef56ab78");
+      for (const runDir of [running, finished]) {
+        await mkdir(join(runDir, "queue"), { recursive: true });
+        await writeFile(join(runDir, "queue", "0000000003-run.ndjson"), "x".repeat(30));
+      }
+      await writeFile(join(running, "command"), "npm test -- --watch\n");
+      await writeFile(join(finished, "command"), "make\n");
+      await writeFile(
+        join(afkHome, "current"),
+        "sessionId=abc123\ningestToken=tok-abc\nserver=http://example.test\ndashboardUrl=http://example.test/s/abc123\n",
+      );
+
+      // This shell stands in for the running command; an exited subshell for the finished one.
+      const { stdout, stderr, code } = await runBash(
+        [
+          'echo "$$" > "$AFK_HOME/owner.pid"',
+          'echo "$$" > "$RUNNING/pid"',
+          '(exit 0) & wait "$!"; echo "$!" > "$FINISHED/pid"',
+          "main status",
+        ].join("\n"),
+        { AFK_HOME: afkHome, RUNNING: running, FINISHED: finished },
+      );
+
+      expect(code, stderr).toBe(0);
+      expect(stdout).toMatch(/\nqueue\s+3 frames, 70 bytes\n/);
+      expect(stdout.split("\n").filter((line) => line.startsWith("run "))).toEqual([
+        expect.stringMatching(/^run\s+pid [0-9]+, running: npm test -- --watch$/),
+      ]);
+    },
+  );
 });
 
 describe("afk stop", () => {
