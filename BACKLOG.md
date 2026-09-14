@@ -82,7 +82,7 @@ Examined and found sound for this scale: the sweeper (server clock only on both 
 ## Agents collector (claude / codex)
 
 Decided on 2026-09-14 (see the decision log in docs/ARCHITECTURE.md): counts only,
-Claude Code first. The parts still open are below.
+per tool, Claude Code and Codex. The parts still open are below.
 
 - [x] CLI: Claude Code counts -- `collect_agents`, every 5 s on the `agents` stream:
       `sessions`, `working`, `waitingOnInput`, `idle`, `subagentsWorking` from
@@ -94,6 +94,21 @@ Claude Code first. The parts still open are below.
       demo fixture. The `status` vocabulary (`busy` / `idle`) was confirmed on 2.1.270
       across working, waiting, and idle sessions, which is why the states lean on it
       as well as on transcript age.
+- [x] CLI: Codex counts -- a `codex` block next to `claude` in `AgentsCollectorData`,
+      both optional (a tool that is not there has no block; `available` is true when
+      either is). A thread is live while a process named `codex` holds its
+      `~/.codex/thread-writer-locks/<id>.lock` open (`lsof -a -c codex +D`, about
+      30 ms; a lock file alone outlives a crash and a `codex` process alone is the
+      ChatGPT app's permanent `codex app-server`), and its rollout's last
+      `task_started` / `task_complete` / `turn_aborted` event says whether a turn is
+      running, read whole once per session and then only what was appended.
+      `waitingOnInput` is a turn in progress whose rollout has been quiet for 120 s, a
+      weaker signal than Claude Code's since Codex writes no approval or question
+      event; `subagentsWorking` is always 0. Rules total across tools and name the tool
+      when only one is involved; the dashboard stacks the tools in their own colours
+      with the details panel as the legend; the demo fixture has a Codex thread.
+      Verified on Codex CLI 0.152 to 0.154, Codex Desktop, and the ChatGPT app on
+      2026-09-14.
 - [ ] [agents] Opt-in session names: `afk start --agent-names` (or `AFK_AGENT_NAMES=1`)
       adds a per-session list to the frame, `{ name, state, kind }` with `name` the
       session record's `name` (Claude Code derives it from the directory basename plus
@@ -102,20 +117,24 @@ Claude Code first. The parts still open are below.
       `processes.top`, names through `json_string`, default off on the hosted server
       and documented as leaving the machine. Wanted only if the counts prove too coarse
       ("which one is waiting?"), and it would let the dashboard's agents row label bars.
-- [ ] [agents] Codex support: `codex` (a terminal session) and `codex app-server` (what
-      the ChatGPT desktop app keeps running permanently, so process presence alone says
-      nothing) processes, rollouts under `~/.codex/sessions/YYYY/MM/DD/*.jsonl` with
-      the rollout's mtime as the only activity signal, since there is no status file:
-      a working/idle split from mtime age alone, no waiting-on-input state without a
-      status to cross it with (a quiet rollout is either idle or waiting), and the
-      session count from rollouts modified in the last few minutes whose `codex`
-      process is alive rather than from processes. A second `codex` block next to
-      `claude` in `AgentsCollectorData`, same five counts with `waitingOnInput` always
-      0 until a signal for it exists, and `available` per tool rather than per frame.
+      For Codex the rollout's `session_meta` has `cwd` and `originator` (`codex-tui`,
+      `Codex Desktop`), so the same flag could split threads by entry point too.
+- [ ] [agents] A Codex lock held by a process not named `codex` is not counted (the
+      lsof call is restricted to that command name for its cost, see the decision log).
+      Every entry point seen so far is that binary; if one turns up under another name,
+      widen `CODEX_PROCESS_NAME` to a list or drop the filter and pay the 250 ms. The
+      unit tests hold their locks with `sleep` and set the name to match, so the
+      default is only checked against real Codex by the smoke test.
+- [ ] [agents] A Codex thread in a long tool call reads as waiting on input after
+      120 s of a quiet rollout, the same gap as Claude Code's below but without a
+      status to cross it with. Codex may start writing approval requests or the tool
+      call's start to the rollout; look for one before adding a heuristic.
+
 - [ ] [agents] `CLAUDE_CONFIG_DIR`: Claude Code honours it as the root instead of
       `~/.claude`; the collector reads `$HOME/.claude` only, so a relocated config
       reads as `available: false`. Cheap to honour once a test can unset it (the unit
-      tests run under Claude Code, where it may be set).
+      tests run under Claude Code, where it may be set); `CODEX_HOME` is honoured for
+      Codex already, with the tests clearing it, which is the pattern to copy.
 - [ ] [agents] A quiet main transcript with a working subagent is read from the
       subagent's mtime, but a session whose subagent finished more than 120 s ago and
       whose own turn is still running a long tool call (a build, a test suite) reads as

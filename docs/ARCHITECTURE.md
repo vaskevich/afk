@@ -433,6 +433,29 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** Codex is counted next to Claude Code, one block of the same five counts
+  per tool found, a tool that is not there having no block (additive: both blocks are
+  optional on the wire, frames from the previous client still parse, the protocol
+  version stays). The rules add the tools up and name the tool while every agent they
+  count belongs to one. What a live Codex thread is took some finding: a `codex`
+  process means nothing (the ChatGPT app keeps `codex app-server` running whether or
+  not a thread is open) and a lock file under `~/.codex/thread-writer-locks/` means
+  nothing (it outlives a crash), but a lock a process named `codex` holds open is a
+  thread, which `lsof` reports; asked about that command name and that directory
+  only it costs about 30 ms against 250 ms for a walk of every process, at the price
+  that a lock held under another name is not counted, which no Codex entry point on
+  this machine does. Whether a turn is running comes from the rollout's own
+  `task_started` / `task_complete` / `turn_aborted` events, read whole once and then
+  only what was appended (a tail alone missed a live turn whose start had scrolled
+  out of it; a whole read every 5 s costs 30 ms per MB). The waiting-on-input state
+  is deliberately weaker than Claude Code's: Codex writes no approval or question
+  event, so it is a turn in progress whose rollout has been quiet for 120 s, and a
+  long tool call reads the same way; the dashboard and the docs say so rather than
+  the collector guessing. Codex has no subagent transcripts in this layout, so
+  `subagentsWorking` stays 0 for it. The collector opens Codex rollouts, which it
+  never does with Claude Code transcripts, and reads three literal tags and the
+  size; the byte count it reached per thread lives under the afk session directory
+  and goes with it.
 - **2026-09-14** The agents collector ships counts, not names. The wishlist shape was
   one entry per agent (tool, pid, name, cwd, status); what landed is five integers per
   tool (`sessions`, `working`, `waitingOnInput`, `idle`, `subagentsWorking`), Claude

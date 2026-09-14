@@ -34,11 +34,11 @@ Per-instance collectors (a wrapped command, a watched log file) use a stream id 
 
 Shipped so far: `system`, `run` (`afk run -- <cmd>`), `processes` (the busiest
 processes with pid, parent pid, cpu, rss, full path, every 5 s), and `agents` (how
-many Claude Code sessions are working, waiting on input, or idle, and how many
-subagents are working, every 5 s; counts only, and `available: false` on a machine
-without Claude Code). Codex counts and opt-in session names are on the backlog. See
-the wire shapes in [PROTOCOL.md](PROTOCOL.md) and "Adding an output flavor for `run`"
-below for extending `run` further.
+many Claude Code sessions and Codex threads are working, waiting on input, or idle,
+and how many subagents are working, every 5 s; counts only, one block per tool found,
+and `available: false` on a machine with neither). Opt-in session names are on the
+backlog. See the wire shapes in [PROTOCOL.md](PROTOCOL.md) and "Adding an output
+flavor for `run`" below for extending `run` further.
 
 A collector that reads another tool's private state, as `agents` does, is held to
 three things: it reads only what the counts need (never a transcript's contents,
