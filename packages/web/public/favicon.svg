@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <rect width="64" height="64" rx="12" fill="#000000"/>
-  <text x="32" y="41.5" text-anchor="middle" font-family="Menlo, 'DejaVu Sans Mono', Consolas, monospace" font-weight="700" font-size="26" fill="#FFD60A">afk</text>
+  <g fill="none" stroke="#FFD60A" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="16.5" cy="39" r="6.5"/>
+    <path d="M23 32V46M35 20C31 20 30 22 30 26V46M26 33H42M52 25L42 35L53 46M42 20V46"/>
+  </g>
 </svg>

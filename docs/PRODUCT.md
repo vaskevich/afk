@@ -100,9 +100,11 @@
   `curl -fsSL http://afk.internal:4141/install | sh` both work with no env var. The
   client's path is `AFK_CLIENT_SCRIPT` (docs/CONFIGURATION.md) and ships in the Docker
   image. `LandingPage.tsx` now leads with the one-liner (copy button, built from
-  `window.location.origin`), `afk start` and `afk run`, a "what leaves your machine"
-  paragraph (the start of item 4), and the demo link; the service stats moved below.
-  New mark and favicon: "afk" in bold monospace, `#FFD60A` on `#000000`
-  (`packages/web/public/favicon.svg`, plus 32 px and 180 px PNGs). Still open from this
+  `window.location.origin`), `afk start` and `afk run`, and the demo link; a "what leaves
+  your machine" paragraph (the start of item 4), a note on the demo, and the service
+  stats sit behind one collapsed disclosure, remembered in localStorage. New mark and
+  favicon: "afk" drawn as strokes with the letters touching and the f's crossbar running
+  into the k, `#FFD60A` on `#000000` (`packages/web/public/favicon.svg`, plus 32 px and
+  180 px PNGs, and the same glyphs as the page's wordmark). Still open from this
   item: Linux in the installer (the client itself is macOS-only), and the client's
   upgrade hint still points at GitHub rather than `<server>/install`.

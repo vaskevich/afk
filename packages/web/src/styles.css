@@ -111,22 +111,25 @@ button:focus-visible {
   display: flex;
   align-items: center;
   gap: 20px;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 
 .landing-header .afk-mark {
   flex: none;
-  border-radius: 18px;
 }
 
-.landing-header .wordmark {
-  margin: 0;
-  font-size: 40px;
-  line-height: 1;
+.landing-wordmark {
+  margin: 0 0 6px;
+  line-height: 0;
+}
+
+.afk-wordmark {
+  display: block;
+  color: var(--fg);
 }
 
 .tagline {
-  margin: 8px 0 0;
+  margin: 0;
   font-size: 17px;
   color: var(--fg-muted);
 }
@@ -166,8 +169,8 @@ button:focus-visible {
 
 .steps {
   display: grid;
-  gap: 10px;
-  margin: 20px 0 0;
+  gap: 12px;
+  margin: 28px 0 0;
 }
 
 .steps div {
@@ -187,46 +190,67 @@ button:focus-visible {
   color: var(--fg-muted);
 }
 
-.landing h2 {
-  margin: 24px 0 6px;
+.landing-demo {
+  margin: 20px 0 0;
+  color: var(--fg-muted);
+}
+
+/* Everything a returning reader does not need, behind one disclosure. */
+.landing-more {
+  margin-top: 32px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.landing-more summary {
+  cursor: pointer;
+  width: max-content;
+  max-width: 100%;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.landing-more summary:hover {
+  color: var(--fg);
+}
+.landing-more[open] summary {
+  margin-bottom: 8px;
+}
+
+.landing-more p {
+  margin: 0 0 12px;
+}
+
+.landing-more h2 {
+  margin: 16px 0 6px;
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--fg-muted);
+  color: var(--fg-faint);
 }
 
-.privacy {
-  margin: 0 0 16px;
-  color: var(--fg-muted);
-}
-
-.landing-stats {
-  margin-top: 28px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.landing-stats .facts {
+.landing-more .facts {
   font-size: 11px;
 }
 
-.landing-stats .facts dd {
+.landing-more .facts dd {
   color: var(--fg-muted);
 }
 
 @media (max-width: 520px) {
   .landing-header {
     gap: 14px;
+    margin-bottom: 22px;
   }
   .landing-header .afk-mark {
-    width: 64px;
-    height: 64px;
-    border-radius: 12px;
+    width: 56px;
+    height: 56px;
   }
-  .landing-header .wordmark {
-    font-size: 32px;
+  .afk-wordmark {
+    height: 28px;
+    width: auto;
   }
   .tagline {
     font-size: 15px;
@@ -242,12 +266,6 @@ button:focus-visible {
     grid-template-columns: 1fr;
     gap: 2px;
   }
-}
-
-.centered {
-  padding: 40px var(--gutter);
-  text-align: center;
-  color: var(--fg-muted);
 }
 
 /* ---- header ---------------------------------------------------------- */

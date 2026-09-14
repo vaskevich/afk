@@ -1,8 +1,8 @@
 import { ServiceStats } from "@afk/shared";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
-import { AfkMark } from "../components/AfkMark.tsx";
+import { useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { AfkMark, AfkWordmark } from "../components/AfkMark.tsx";
 import { formatDuration } from "../format.ts";
 
 /** How often the landing page refreshes the service numbers. */
@@ -11,6 +11,9 @@ const STATS_REFRESH_MS = 10_000;
 const COPIED_FEEDBACK_MS = 1_500;
 /** Sessions are deleted this long after they end (AFK_RETENTION_DAYS on the server). */
 const RETENTION_DAYS = 7;
+/** Remembers whether the reader opened the details below the fold; absent means closed. */
+const DETAILS_STORAGE_KEY = "afk.landing.details";
+const DETAILS_OPEN_VALUE = "open";
 
 type CopyState = "idle" | "copied" | "selected";
 
@@ -120,20 +123,51 @@ function Stats() {
   );
 }
 
+/** Storage can be unavailable (private mode, blocked); the details are then closed on every visit. */
+function readDetailsOpen(): boolean {
+  try {
+    return localStorage.getItem(DETAILS_STORAGE_KEY) === DETAILS_OPEN_VALUE;
+  } catch {
+    return false;
+  }
+}
+
+function writeDetailsOpen(open: boolean): void {
+  try {
+    if (open) {
+      localStorage.setItem(DETAILS_STORAGE_KEY, DETAILS_OPEN_VALUE);
+    } else {
+      localStorage.removeItem(DETAILS_STORAGE_KEY);
+    }
+  } catch {
+    // Nothing to remember with; the next visit starts closed.
+  }
+}
+
 export function LandingPage() {
+  const [detailsOpen, setDetailsOpen] = useState(readDetailsOpen);
+
+  function onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void {
+    const open = event.currentTarget.open;
+    setDetailsOpen(open);
+    writeDetailsOpen(open);
+  }
+
   return (
     <main className="page landing">
       <header className="landing-header">
         <AfkMark />
         <div>
-          <h1 className="wordmark">afk</h1>
+          <h1 className="landing-wordmark">
+            <AfkWordmark />
+          </h1>
           {/* TODO(copy): draft, the owner will refine */}
           <p className="tagline">Walk away from your laptop. Know if something breaks.</p>
         </div>
       </header>
 
       <InstallLine />
-      <p className="hint">macOS only for now. One bash script, no dependencies beyond curl.</p>
+      <p className="hint">macOS only for now. One bash script, curl and nothing else.</p>
 
       {/* TODO(copy): draft, the owner will refine */}
       <dl className="steps">
@@ -142,8 +176,8 @@ export function LandingPage() {
             <code>afk start</code>
           </dt>
           <dd>
-            Prints a dashboard URL for your phone. It shows cpu, load, memory pressure, and the
-            busiest processes live, and flags anything that looks wrong.
+            Prints a dashboard URL for your phone: cpu, load, memory pressure, and the busiest
+            processes, live, with anything that looks wrong flagged.
           </dd>
         </div>
         <div>
@@ -157,28 +191,34 @@ export function LandingPage() {
         </div>
       </dl>
 
-      <h2>What leaves your machine</h2>
-      {/* TODO(copy): draft, the owner will refine */}
-      <p className="privacy">
-        Once a second: cpu, load averages, and memory numbers (pressure level, free, wired,
-        compressed, swap). Every five seconds: the busiest processes, as pid, cpu, memory, and
-        executable path. For a wrapped command: the command line as you typed it, how long it has
-        run, how many bytes it wrote, and its exit code, never the output itself. At the start: host
-        name, macOS version, core count, and memory size. Anyone with the link can see it; sessions
-        are deleted {RETENTION_DAYS} days after they end.
-      </p>
-
-      <p>
-        Take a look at{" "}
+      <p className="landing-demo">
+        Or look at{" "}
         <Link to="/s/$sessionId" params={{ sessionId: "demo" }}>
           a demo session
         </Link>
         .
       </p>
 
-      <footer className="landing-stats">
+      <details className="landing-more" open={detailsOpen} onToggle={onDetailsToggle}>
+        <summary>What leaves your machine?</summary>
+        {/* TODO(copy): draft, the owner will refine */}
+        <p>
+          Once a second: cpu, load averages, and memory numbers (pressure level, free, wired,
+          compressed, swap). Every five seconds: the busiest processes, as pid, cpu, memory, and
+          executable path. For a wrapped command: the command line as you typed it, how long it has
+          run, how many bytes it wrote, and its exit code, never the output itself. At the start:
+          host name, macOS version, core count, and memory size. Anyone with the link can see it;
+          sessions are deleted {RETENTION_DAYS} days after they end.
+        </p>
+        <h2>The demo</h2>
+        <p>
+          Fifteen recorded minutes on one machine: a three-minute cpu burn with memory pressure
+          behind it, a burst of short pressure flaps, and a stretch where the client went quiet, so
+          you can see how each shows up before you run anything yourself.
+        </p>
+        <h2>This server</h2>
         <Stats />
-      </footer>
+      </details>
     </main>
   );
 }

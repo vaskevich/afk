@@ -1,32 +1,68 @@
-/** The afk mark: "afk" in a bold monospace face, yellow on black. Same drawing as public/favicon.svg. */
+/**
+ * The afk mark: "afk" drawn as strokes, tightly set so the letters touch and the f's
+ * crossbar runs into the k. Yellow on black in the icon; the same glyphs in the current
+ * text colour as the wordmark. public/favicon.svg is the same drawing by hand.
+ */
 
 export const MARK_BACKGROUND = "#000000";
 export const MARK_FOREGROUND = "#FFD60A";
-const MARK_FONT = "Menlo, 'DejaVu Sans Mono', Consolas, monospace";
-const DEFAULT_SIZE_PX = 96;
+const DEFAULT_MARK_SIZE_PX = 72;
+const DEFAULT_WORDMARK_HEIGHT_PX = 36;
 
-export function AfkMark({ size = DEFAULT_SIZE_PX }: { size?: number }) {
+/** The 64 x 64 icon box; the glyphs sit inside it. */
+const ICON_VIEW_BOX = "0 0 64 64";
+/** Just the glyphs, cropped to their ink for the wordmark. */
+const GLYPHS_VIEW_BOX = "7 17 50 32";
+const STROKE_WIDTH = 5.5;
+/** The bowl of the a; its stem starts where the bowl ends. */
+const A_BOWL = { cx: 16.5, cy: 39, r: 6.5 };
+/** a stem, f (hook, stem, crossbar into the k), k (arms, stem). */
+const STROKES = "M23 32V46M35 20C31 20 30 22 30 26V46M26 33H42M52 25L42 35L53 46M42 20V46";
+
+function Glyphs({ stroke }: { stroke: string }) {
+  return (
+    <g
+      fill="none"
+      stroke={stroke}
+      strokeWidth={STROKE_WIDTH}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx={A_BOWL.cx} cy={A_BOWL.cy} r={A_BOWL.r} />
+      <path d={STROKES} />
+    </g>
+  );
+}
+
+export function AfkMark({ size = DEFAULT_MARK_SIZE_PX }: { size?: number }) {
   return (
     <svg
       className="afk-mark"
       width={size}
       height={size}
-      viewBox="0 0 64 64"
+      viewBox={ICON_VIEW_BOX}
       role="img"
       aria-label="afk"
     >
       <rect width="64" height="64" rx="12" fill={MARK_BACKGROUND} />
-      <text
-        x="32"
-        y="41.5"
-        textAnchor="middle"
-        fontFamily={MARK_FONT}
-        fontWeight="700"
-        fontSize="26"
-        fill={MARK_FOREGROUND}
-      >
-        afk
-      </text>
+      <Glyphs stroke={MARK_FOREGROUND} />
+    </svg>
+  );
+}
+
+/** The same glyphs without the box, in the surrounding text colour. */
+export function AfkWordmark({ height = DEFAULT_WORDMARK_HEIGHT_PX }: { height?: number }) {
+  const [, , width, viewHeight] = GLYPHS_VIEW_BOX.split(" ").map(Number);
+  return (
+    <svg
+      className="afk-wordmark"
+      height={height}
+      width={(height * width) / viewHeight}
+      viewBox={GLYPHS_VIEW_BOX}
+      role="img"
+      aria-label="afk"
+    >
+      <Glyphs stroke="currentColor" />
     </svg>
   );
 }
