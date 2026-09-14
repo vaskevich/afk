@@ -3143,7 +3143,7 @@ describe("cmd_run when the session is deleted on the server mid-command", () => 
   const DELETED_LINE = "afk: session abc123 was deleted on the server; telemetry stopped";
   /** Long enough for the deletion to land in the middle: a batch a second, deleted after the first. */
   const RUN_SECONDS = 4;
-  /** Intrinsically ~6 s (cap plus run); the file runs many bash-driven tests at once, so leave room. */
+  /** Intrinsically ~4 s; the file runs many bash-driven tests at once, so leave room. */
   const RUN_TIMEOUT_MS = 30_000;
 
   /** Accepts the session and its first batch, then has forgotten the session for good. */
