@@ -30,6 +30,31 @@ install. Revisit when any of these happens: a Linux port starts, a second person
 contributes collectors, the script passes roughly a thousand lines, or a bug traces
 back to shell quoting or subshell state.
 
+## Decisions
+
+Things the client deliberately does not do, with the reason, so they are not
+re-proposed as hardening items. Reopen one when its reason stops holding.
+
+- **Not doing: sub-second tick scheduling through `perl -MTime::HiRes`.** Stock macOS
+  `date` has no `%N`, so the sampler schedules ticks against whole-second deadlines:
+  the average rate is exactly 1 Hz, and only the gap between two particular frames
+  varies by the collectors' runtime (tens of milliseconds). `perl` is on every Mac
+  today, but it would be the first dependency beyond bash and curl, it is the kind of
+  tool Apple has removed before (Python), and nothing downstream needs the precision:
+  every server rule works on frame timestamps in whole seconds and the dashboard
+  draws at that resolution. A client that needs a real clock is the Python or Go
+  client of the table above, not this one with one more tool bolted on.
+- **Not doing: clock skew handling on the client.** The client stamps frames with its
+  own wall clock and the server records `receivedAt`; a laptop clock minutes off puts
+  frames visibly early or late on the timeline. Correcting that client-side would
+  mean estimating the offset from the server's `Date` header or a round trip, and
+  then rewriting timestamps the client has already spooled, all to guess at a clock
+  the server already sees the truth of. The server has both clocks for every frame it
+  stores, so any correction (and the live `client.stale` comparison, which is the one
+  place skew causes real trouble, see the SRE review in BACKLOG.md) belongs there, in
+  keeping with "dumb client, smart server". The client stays honest: it reports its
+  clock as it is.
+
 ## Options
 
 |                                         | bash                                       | Python                                                                         | TypeScript (Node)                              | Go binary                               |
