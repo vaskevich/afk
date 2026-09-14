@@ -91,6 +91,9 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
 - `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end, the
   dashboard URL as a QR code), `frames` (ingest), `stream` (history + SSE), `web` (built
   dashboard).
+- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end),
+  `frames` (ingest), `stream` (history + SSE), `install` (the `/install` one-liner and
+  `/cli/afk`, the client itself), `web` (built dashboard).
 - `middleware/ingest-auth.ts` resolves the session, checks the bearer ingest token,
   rejects non-active sessions with 410. `middleware/client-version.ts` checks the
   `X-Afk-Client` header on the client-facing routes (426 below the minimum),
@@ -303,7 +306,9 @@ the server so it works on every backend (Lightsail buckets have no lifecycle rul
 Hosted at `afk.osv.im` on a Lightsail container service with a Lightsail bucket for
 storage; the server is one Docker image that builds the dashboard and runs Node. The
 `AFK_SERVER` variable points the client at any other server, including one on a
-private network. See `infra/` and the Deployment section of BACKLOG.md.
+private network, and a client installed with `curl -fsSL <origin>/install | sh`
+defaults to the server it came from. See `infra/` and the Deployment section of
+BACKLOG.md.
 
 ## Decision log
 
@@ -315,6 +320,14 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   `window.location.href`), so the bash client stays dependency-free and the dashboard
   never needs the ingest token. Both use `qrcode-generator` (zero dependencies, types
   included) rather than `qrcode`, which pulls in a CLI argument parser and a PNG writer.
+- **2026-09-15** The server serves its own installer and client: `GET /install` is a
+  short POSIX `sh` script with the server's `publicBaseUrl` filled in, and it downloads
+  `GET /cli/afk` (the `cli/afk` file, `AFK_CLIENT_SCRIPT`) from that same origin and
+  rewrites the client's default `AFK_SERVER` to it. A self-hosted server is therefore
+  self-contained: nothing points at GitHub or at `afk.osv.im`, and its users run one
+  line with no env var. The alternative, a release pipeline and a Homebrew tap, adds
+  infrastructure for a single-file bash client that was chosen for "curl the file"
+  distribution in the first place (docs/CLIENT.md).
 - **2026-09-15** All server tuning goes through environment variables parsed once in
   `config.ts` (`loadConfig`, a Zod schema keyed by variable name). No other module reads
   `process.env`; each default is owned by the module that uses it and referenced by the

@@ -39,6 +39,7 @@ startSweeper({
 const appConfig: AppConfig = {
   publicBaseUrl: config.publicBaseUrl,
   webDistDir: config.webDistDir,
+  clientScriptPath: config.clientScriptPath,
   limits: config.limits,
   sseKeepaliveMs: config.sseKeepaliveSeconds * MS_PER_SECOND,
   minimumVersions: config.minimumVersions,

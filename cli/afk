@@ -23,7 +23,8 @@
 # you can point a phone at the screen instead of typing it; --no-qr skips that.
 #
 # Environment:
-#   AFK_SERVER           server origin, default https://afk.osv.im (self-hosting is the plan)
+#   AFK_SERVER           server origin, default https://afk.osv.im, or the server this
+#                        copy was installed from (curl -fsSL <origin>/install | sh)
 #   AFK_HOME             state directory, default ~/.afk
 #   AFK_SPOOL_MAX_BYTES  cap on queued frames on disk, default 50 MiB; oldest dropped past it
 #   AFK_NO_QR            set to 1 to never print the QR code (same as --no-qr)
@@ -52,7 +53,10 @@ set -u
 # (bumped only for an incompatible wire change). See docs/VERSIONING.md.
 AFK_VERSION="0.2.0"
 AFK_PROTOCOL_VERSION=1
-AFK_SERVER="${AFK_SERVER:-https://afk.osv.im}"
+# The installer (`curl -fsSL <origin>/install | sh`) rewrites the next line so a copy
+# installed from a self-hosted server defaults to that server; the marker comment is
+# what it matches on. Keep the hosted default here in the repo.
+AFK_SERVER="${AFK_SERVER:-https://afk.osv.im}" # afk-install: default server
 AFK_HOME="${AFK_HOME:-$HOME/.afk}"
 # Where the upgrade hint says to fetch a newer copy of this script from.
 AFK_DOWNLOAD_URL="https://raw.githubusercontent.com/vaskevich/afk/main/cli/afk"

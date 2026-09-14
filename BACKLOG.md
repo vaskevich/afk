@@ -154,4 +154,8 @@ endpoint come from Lightsail; deploys are push-image + new deployment.
 - [ ] Confirm SSE passes through the container service load balancer (15 s keepalive is already in place)
 - [ ] Actually run `tofu apply` -- including `ci.tf`'s OIDC provider/role, and then set the GitHub repository secrets/variables and `production` environment `infra/README.md`'s "CI and deploys" section describes, before `deploy.yml` can actually deploy anything
 - [x] Serve the built dashboard from the Node server
-- [ ] Installer one-liner that downloads `cli/afk`
+- [x] Installer one-liner that downloads `cli/afk` -- `GET /install` (`routes/install.ts`, template `routes/install.sh`) and `GET /cli/afk`, served by the server itself so a self-hosted deployment is self-contained; the installer rewrites the client's `AFK_SERVER` default to the origin it came from. See "Installer" below for what is still open
+- [ ] Installer: point the client's upgrade hint (`AFK_DOWNLOAD_URL` in `cli/afk`, printed on a 426) at `$AFK_SERVER/install` instead of the GitHub raw URL, so a self-hosted server's clients upgrade from their own server
+- [ ] Installer: Linux, once the collectors support it (the installer refuses with the client's own "only macOS" message today)
+- [ ] Installer: `afk upgrade` (re-run the installer from `$AFK_SERVER`) and a way to verify the download (a checksum next to `/cli/afk`, or a signed release) before it is run
+- [ ] Installer: cache headers for `/cli/afk` once the client is versioned in its URL; today both `/install` and `/cli/afk` are `no-store` so a client upgrade is visible immediately

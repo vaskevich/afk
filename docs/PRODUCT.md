@@ -92,6 +92,22 @@
 
 ## Implemented
 
+- **2026-09-15, item 1 (install in one line).** `GET /install` on the server returns a
+  short POSIX `sh` installer with the server's own origin filled in; it downloads
+  `GET /cli/afk` from that origin, installs it to `~/.local/bin/afk` (`AFK_INSTALL_DIR`
+  overrides), and rewrites the client's default `AFK_SERVER` to the origin it came from,
+  so `curl -fsSL https://afk.osv.im/install | sh` and a self-hosted
+  `curl -fsSL http://afk.internal:4141/install | sh` both work with no env var. The
+  client's path is `AFK_CLIENT_SCRIPT` (docs/CONFIGURATION.md) and ships in the Docker
+  image. `LandingPage.tsx` now leads with the one-liner (copy button, built from
+  `window.location.origin`), `afk start` and `afk run`, and the demo link; a "what leaves
+  your machine" paragraph (the start of item 4), a note on the demo, and the service
+  stats sit behind one collapsed disclosure, remembered in localStorage. New mark and
+  favicon: "afk" drawn as strokes with the letters touching and the f's crossbar running
+  into the k, `#FFD60A` on `#000000` (`packages/web/public/favicon.svg`, plus 32 px and
+  180 px PNGs, and the same glyphs as the page's wordmark). Still open from this
+  item: Linux in the installer (the client itself is macOS-only), and the client's
+  upgrade hint still points at GitHub rather than `<server>/install`.
 - **2026-09-15, item 2 (put the URL on the phone without typing it).**
   `GET /api/sessions/:id/qr` renders the dashboard URL as a half-block QR behind the
   ingest token (`packages/server/src/utils/qr.ts`); `afk start`, and an `afk run` that

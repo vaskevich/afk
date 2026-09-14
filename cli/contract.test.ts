@@ -159,6 +159,7 @@ async function startServer(limits: AdmissionLimits, webDistDir: string): Promise
     {
       publicBaseUrl: url,
       webDistDir,
+      clientScriptPath: AFK_SCRIPT,
       limits,
       sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
       minimumVersions: DEFAULT_MINIMUM_VERSIONS,

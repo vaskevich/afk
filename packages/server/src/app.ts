@@ -6,6 +6,7 @@ import { statsRoutes } from "./routes/stats.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
+import { installRoutes } from "./routes/install.ts";
 import { webRoutes } from "./routes/web.ts";
 import { securityHeaders } from "./middleware/security-headers.ts";
 
@@ -25,6 +26,8 @@ import { securityHeaders } from "./middleware/security-headers.ts";
 /** Wires route modules together. Handlers live in ./routes, shared request plumbing in ./middleware. */
 export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
+  // The installer routes go before the dashboard, whose catch-all would otherwise
+  // answer /install with index.html.
   return new Hono()
     .use("*", securityHeaders())
     .route("/api/health", healthRoutes)
@@ -32,5 +35,6 @@ export function createApp(config: AppConfig, store: SessionStore) {
     .route("/api/sessions", sessionRoutes(deps))
     .route("/api/sessions", frameRoutes(deps))
     .route("/api/sessions", streamRoutes(deps))
+    .route("/", installRoutes(deps))
     .route("/", webRoutes(config.webDistDir));
 }

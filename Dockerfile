@@ -66,10 +66,13 @@ COPY packages/server/src ./packages/server/src
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/shared/src ./packages/shared/src
 
-# packages/server/src/index.ts resolves the dashboard at "../../web/dist" relative
-# to its own directory, i.e. packages/web/dist from the repo root -- keep that
-# same relative layout here rather than flattening it.
+# packages/server/src/config.ts resolves the dashboard at "../../web/dist" and the
+# client script at "../../../cli/afk" relative to its own directory, i.e.
+# packages/web/dist and cli/afk from the repo root -- keep that same relative
+# layout here rather than flattening it. The client is served at /cli/afk and by
+# the /install one-liner, so it has to ship in the image.
 COPY --from=build /app/packages/web/dist ./packages/web/dist
+COPY cli/afk ./cli/afk
 
 # corepack's activation from the `base` stage doesn't carry over a fresh
 # `FROM node:22-alpine`; re-pin pnpm the same way.

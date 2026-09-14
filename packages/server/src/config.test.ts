@@ -7,7 +7,11 @@ import {
 import { ConfigError, describeConfig, loadConfig, type ServerConfig } from "./config.ts";
 
 /** Fixed fallbacks so the expected values do not depend on where the tests run. */
-const PATHS = { webDistDir: "/opt/afk/web/dist", dataDir: "/var/lib/afk" };
+const PATHS = {
+  webDistDir: "/opt/afk/web/dist",
+  clientScriptPath: "/opt/afk/cli/afk",
+  dataDir: "/var/lib/afk",
+};
 
 const S3_ENV = {
   AFK_STORAGE: "s3",
@@ -28,6 +32,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   port: 4141,
   publicBaseUrl: "http://localhost:4141",
   webDistDir: PATHS.webDistDir,
+  clientScriptPath: PATHS.clientScriptPath,
   storage: { backend: "disk", dataDir: PATHS.dataDir },
   limits: { maxActiveSessions: 20, maxStreamsPerSession: 10, maxFramesPerSession: 15_000 },
   maxSessionDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
@@ -63,6 +68,7 @@ describe("loadConfig", () => {
       {
         AFK_PUBLIC_BASE_URL: "https://afk.test",
         AFK_WEB_DIST: "/srv/dist",
+        AFK_CLIENT_SCRIPT: "/srv/cli/afk",
         AFK_DATA_DIR: "/srv/data",
         AFK_MAX_ACTIVE_SESSIONS: "3",
         AFK_MAX_STREAMS_PER_SESSION: "2",
@@ -80,6 +86,7 @@ describe("loadConfig", () => {
       port: 4141,
       publicBaseUrl: "https://afk.test",
       webDistDir: "/srv/dist",
+      clientScriptPath: "/srv/cli/afk",
       storage: { backend: "disk", dataDir: "/srv/data" },
       limits: { maxActiveSessions: 3, maxStreamsPerSession: 2, maxFramesPerSession: 15_000 },
       maxSessionDurationSeconds: 120,

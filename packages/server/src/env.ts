@@ -10,6 +10,8 @@ export interface AppConfig {
   publicBaseUrl: string;
   /** Absolute path to the built dashboard (packages/web/dist). */
   webDistDir: string;
+  /** Absolute path to the client script (cli/afk) served at /cli/afk and by the installer. */
+  clientScriptPath: string;
   limits: AdmissionLimits;
   /** How often an SSE stream sends a comment so proxies and browsers keep it open. */
   sseKeepaliveMs: number;
