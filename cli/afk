@@ -9,7 +9,10 @@
 #
 # Usage:
 #   afk start            start a session in the foreground (Ctrl-C to end it)
-#   afk run -- <cmd>     (coming soon) wrap a command and report its progress
+#   afk run -- <cmd>     run a command and report its progress; joins the session
+#                        started by `afk start` if one is running on this machine,
+#                        otherwise starts one (with machine telemetry) for the
+#                        lifetime of the command
 #   afk version
 #
 # Environment:
@@ -21,6 +24,8 @@
 #                                  afk processes can join it
 #   sessions/<id>/current.ndjson   frames sampled but not yet handed to the sender
 #   sessions/<id>/queue/*.ndjson   rotated batches waiting to be sent; deleted on 2xx
+#   sessions/<id>/runs/<runId>/    an `afk run`: captured stdout/stderr, pid, and (when it
+#                                  joined an existing session) its own spool and queue
 #
 # The client is deliberately dumb: it ships raw measurements and lets the server
 # decide what is normal. That way the server can improve without anyone re-downloading
@@ -59,6 +64,16 @@ json_get_number() { # json key
 }
 
 now_seconds() { date +%s; }
+
+random_id() { head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
+file_size() { stat -f %z "$1" 2>/dev/null || echo 0; }
+
+check_platform() {
+  [ "$(uname -s)" = "Darwin" ] || die "only macOS is supported right now (TODO: linux)"
+  command -v curl >/dev/null || die "curl is required"
+  mkdir -p "$AFK_HOME"
+}
 
 # ---------------------------------------------------------------------------
 # collectors
@@ -107,6 +122,42 @@ collect_system() {
 }
 
 # ---------------------------------------------------------------------------
+# run collector: wraps one command and reports whether it is alive and how much it
+# has written. The basic "volume" flavor only counts bytes, which is enough to tell
+# "still going" from "hung". Richer flavors (progress lines, JSON records) can be
+# added later under output.flavor without changing the rest of the frame.
+# Set up by cmd_run: RUN_ID, RUN_DIR (stdout, stderr, pid, seq), RUN_STARTED, RUN_COMMAND_JSON.
+# ---------------------------------------------------------------------------
+
+collect_run() { # state [exitCode]
+  local state=$1 exit_code=${2:-null} pid out err cpu rss elapsed
+  pid=$(cat "$RUN_DIR/pid" 2>/dev/null || echo 0)
+  out=$(file_size "$RUN_DIR/stdout")
+  err=$(file_size "$RUN_DIR/stderr")
+  elapsed=$(( $(now_seconds) - RUN_STARTED ))
+  # ps reports rss in KiB; both read as 0 once the process is gone.
+  set -- $(ps -o %cpu=,rss= -p "$pid" 2>/dev/null)
+  cpu=${1:-0}; rss=${2:-0}
+  printf '{"command":"%s","pid":%d,"state":"%s","exitCode":%s,"elapsedSeconds":%d,"process":{"cpuPercent":%s,"rssBytes":%d},"output":{"flavor":"volume","stdoutBytes":%d,"stderrBytes":%d}}' \
+    "$RUN_COMMAND_JSON" "$pid" "$state" "$exit_code" "$elapsed" "$cpu" $((rss * 1024)) "$out" "$err"
+}
+
+# Samples the run every second until killed. Keeps its sequence in a file so the
+# final "exited" frame, emitted by the main process, can continue the count.
+run_sampler_loop() {
+  local seq=0
+  while [ ! -s "$RUN_DIR/pid" ]; do
+    sleep 0.1
+  done
+  while true; do
+    seq=$((seq + 1))
+    echo "$seq" > "$RUN_DIR/seq"
+    emit_frame "run:$RUN_ID" run "$seq" "$(collect_run running)"
+    sleep "$SAMPLE_INTERVAL_SECONDS"
+  done
+}
+
+# ---------------------------------------------------------------------------
 # session
 # ---------------------------------------------------------------------------
 
@@ -140,6 +191,28 @@ create_session() {
   # Lets a later `afk run` join this session. TODO(run): implement the join side.
   printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
     "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$AFK_HOME/current"
+}
+
+# Reads ~/.afk/current, written by the process that owns the session. Returns 1 if
+# there is none or the server says it is over (a crashed owner can leave one behind).
+load_current_session() {
+  local file="$AFK_HOME/current" summary status
+  [ -f "$file" ] || return 1
+  SESSION_ID=$(sed -n 's/^sessionId=//p' "$file")
+  INGEST_TOKEN=$(sed -n 's/^ingestToken=//p' "$file")
+  AFK_SERVER=$(sed -n 's/^server=//p' "$file")
+  DASHBOARD_URL=$(sed -n 's/^dashboardUrl=//p' "$file")
+  [ -n "$SESSION_ID" ] && [ -n "$INGEST_TOKEN" ] || return 1
+  summary=$(curl -sS --connect-timeout 5 --max-time 10 "$AFK_SERVER/api/sessions/$SESSION_ID" 2>/dev/null) || return 1
+  status=$(json_get_string "$summary" status)
+  if [ "$status" != "active" ]; then
+    log "ignoring stale session file (session is ${status:-unknown})"
+    rm -f "$file"
+    return 1
+  fi
+  SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
+  MAX_DURATION_SECONDS=$(json_get_number "$summary" maxDurationSeconds)
+  : "${MAX_DURATION_SECONDS:=3600}"
 }
 
 end_session() {
@@ -252,11 +325,27 @@ flush_queue() {
 # commands
 # ---------------------------------------------------------------------------
 
-cmd_start() {
-  [ "$(uname -s)" = "Darwin" ] || die "only macOS is supported right now (TODO: linux)"
-  command -v curl >/dev/null || die "curl is required"
-  mkdir -p "$AFK_HOME"
+# Samples machine health until the session is stopped (by the server via the
+# sender, or by hitting the cap). Runs in the foreground for `afk start` and in the
+# background for an `afk run` that had to start its own session.
+system_sampler_loop() {
+  local started
+  started=$(now_seconds)
+  while [ ! -e "$SESSION_DIR/stop" ]; do
+    if [ $(( $(now_seconds) - started )) -ge "$MAX_DURATION_SECONDS" ]; then
+      log "reached the maximum session length"
+      # TODO(sessions): automatically start a new session and print the new URL instead.
+      touch "$SESSION_DIR/stop"
+      break
+    fi
+    sample_once
+    sleep "$SAMPLE_INTERVAL_SECONDS"
+    # TODO(sampling): subtract collector runtime so ticks stay closer to exactly 1 Hz.
+  done
+}
 
+cmd_start() {
+  check_platform
   gather_host_info
   create_session
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
@@ -276,22 +365,74 @@ cmd_start() {
   }
   trap finish INT TERM
 
-  local started
-  started=$(now_seconds)
-  while true; do
-    if [ -e "$SESSION_DIR/stop" ]; then
-      log "server ended the session"
-      end_session; exit 0
-    fi
-    if [ $(( $(now_seconds) - started )) -ge "$MAX_DURATION_SECONDS" ]; then
-      log "reached the maximum session length"
-      # TODO(sessions): automatically start a new session and print the new URL instead.
-      finish
-    fi
-    sample_once
-    sleep "$SAMPLE_INTERVAL_SECONDS"
-    # TODO(sampling): subtract collector runtime so ticks stay closer to exactly 1 Hz.
-  done
+  system_sampler_loop
+  finish
+}
+
+cmd_run() {
+  [ "${1:-}" = "--" ] && shift
+  [ $# -gt 0 ] || die "usage: afk run -- <command> [args...]"
+  check_platform
+
+  local owner=0
+  if load_current_session; then
+    log "joining session $SESSION_ID"
+  else
+    owner=1
+    gather_host_info
+    create_session
+    log "no session running here; started $SESSION_ID with machine telemetry for the length of this command"
+  fi
+
+  RUN_ID=$(random_id)
+  RUN_STARTED=$(now_seconds)
+  RUN_COMMAND_JSON=$(json_string "$*" | cut -c1-200)
+  RUN_DIR="$AFK_HOME/sessions/$SESSION_ID/runs/$RUN_ID"
+  mkdir -p "$RUN_DIR"
+  if [ "$owner" = 0 ]; then
+    # A joiner keeps its own spool so it never races the owner's sender.
+    SESSION_DIR="$RUN_DIR"
+    mkdir -p "$SESSION_DIR/queue"
+  fi
+  printf '\n  %s\n\n' "$DASHBOARD_URL"
+
+  sender_loop &
+  SENDER_PID=$!
+  SYSTEM_PID=""
+  if [ "$owner" = 1 ]; then
+    system_sampler_loop &
+    SYSTEM_PID=$!
+  fi
+  run_sampler_loop &
+  RUN_SAMPLER_PID=$!
+
+  # The command runs in the foreground so Ctrl-C and stdin behave as usual. Bash
+  # would normally exit when a foreground child dies of SIGINT; trapping it lets us
+  # still report the exit. The sh wrapper records the pid the sampler should watch.
+  # TODO(run): tee adds a little latency to the final byte counts; a short pause covers it.
+  trap ':' INT TERM
+  sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$RUN_DIR/pid" "$@" \
+    > >(tee -a "$RUN_DIR/stdout") 2> >(tee -a "$RUN_DIR/stderr" >&2)
+  EXIT_CODE=$?
+  trap - INT TERM
+
+  kill "$RUN_SAMPLER_PID" 2>/dev/null; wait "$RUN_SAMPLER_PID" 2>/dev/null
+  sleep 0.3
+  local seq
+  seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
+  emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE")"
+  log "command exited with status $EXIT_CODE"
+
+  if [ -n "$SYSTEM_PID" ]; then
+    kill "$SYSTEM_PID" 2>/dev/null; wait "$SYSTEM_PID" 2>/dev/null
+  fi
+  kill "$SENDER_PID" 2>/dev/null; wait "$SENDER_PID" 2>/dev/null
+  flush_queue
+  if [ "$owner" = 1 ]; then
+    end_session
+    log "session ended. Dashboard stays available at $DASHBOARD_URL"
+  fi
+  exit "$EXIT_CODE"
 }
 
 usage() {
@@ -301,7 +442,7 @@ usage() {
 main() {
   case "${1:-}" in
     start)   cmd_start ;;
-    run)     die "'afk run' is not implemented yet (see BACKLOG.md)" ;;
+    run)     shift; cmd_run "$@" ;;
     version) printf 'afk %s\n' "$AFK_VERSION" ;;
     -h|--help|help|"") usage ;;
     *)       die "unknown command: $1 (try 'afk help')" ;;

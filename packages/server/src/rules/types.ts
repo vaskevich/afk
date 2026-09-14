@@ -13,6 +13,8 @@ export interface Verdict {
   severity: EventSeverity;
   message: string;
   since?: number;
+  /** A point in time rather than a condition: the event is created already closed. */
+  instant?: boolean;
 }
 
 export const INACTIVE: Verdict = { active: false, severity: "info", message: "" };
@@ -33,6 +35,21 @@ export interface Rule<C extends CollectorName = CollectorName> {
   kind: string;
   collector: C;
   create(): RuleInstance<C>;
+}
+
+/**
+ * A rule with its collector type erased so rules for different collectors can share
+ * one registry. Safe because the engine only ever feeds a rule frames whose
+ * `collector` matches `rule.collector`.
+ */
+export interface RegisteredRule {
+  kind: string;
+  collector: CollectorName;
+  create(): RuleInstance;
+}
+
+export function register<C extends CollectorName>(rule: Rule<C>): RegisteredRule {
+  return rule as unknown as RegisteredRule;
 }
 
 /** Helper for rules that only need a condition sustained for a while. */

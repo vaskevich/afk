@@ -1,7 +1,9 @@
 import { MemoryPressureLevel, type Frame } from "@afk/shared";
 
 const GIB = 1024 ** 3;
+const KIB = 1024;
 const gib = (bytes: number) => `${(bytes / GIB).toFixed(1)}G`;
+const kib = (bytes: number) => `${(bytes / KIB).toFixed(1)}K`;
 
 const MEMORY_PRESSURE_LABELS: Record<MemoryPressureLevel, string> = {
   [MemoryPressureLevel.Normal]: "normal",
@@ -26,6 +28,15 @@ export function describeFrame(frame: Frame): string {
         `cpu=${cpu.percent.toFixed(1)}% load=${loadAverage.oneMinute.toFixed(2)} ` +
         `mem=${pressure} used=${gib(used)}/${gib(memory.totalBytes)} ` +
         `swap=${gib(memory.swapUsedBytes)}/${gib(memory.swapTotalBytes)}`
+      );
+    }
+    case "run": {
+      const { command, state, exitCode, elapsedSeconds, process, output } = frame.data;
+      const status = state === "exited" ? `exited=${exitCode}` : "running";
+      return (
+        `${frame.stream} #${frame.sequence} ${status} t=${elapsedSeconds}s ` +
+        `out=${kib(output.stdoutBytes)} err=${kib(output.stderrBytes)} ` +
+        `cpu=${process.cpuPercent}% rss=${kib(process.rssBytes)} (${command})`
       );
     }
   }

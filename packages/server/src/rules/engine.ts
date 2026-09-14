@@ -1,10 +1,17 @@
 import type { AnomalyEvent, CollectorName, StoredFrame } from "@afk/shared";
+import { runExited, runStalled } from "./run.ts";
 import { clientStale } from "./stale.ts";
 import { cpuHigh, memoryPressure } from "./system.ts";
-import type { Rule, RuleInstance, Verdict } from "./types.ts";
+import { register, type RegisteredRule, type RuleInstance, type Verdict } from "./types.ts";
 
 /** Every rule the server knows. Add new ones here; they apply to old sessions on next load. */
-export const RULES: readonly Rule[] = [cpuHigh, memoryPressure, clientStale];
+export const RULES: readonly RegisteredRule[] = [
+  register(cpuHigh),
+  register(memoryPressure),
+  register(clientStale),
+  register(runExited),
+  register(runStalled),
+];
 
 const frameTimeMs = (frame: StoredFrame) => frame.frame.timestamp * 1000;
 
@@ -19,7 +26,7 @@ export class RuleEngine {
   private readonly instances = new Map<string, Map<string, RuleInstance>>();
   private readonly open = new Map<string, AnomalyEvent>();
 
-  constructor(private readonly rules: readonly Rule[] = RULES) {}
+  constructor(private readonly rules: readonly RegisteredRule[] = RULES) {}
 
   /** Feeds frames in index order. Returns the events that opened, changed, or closed. */
   onFrames(frames: readonly StoredFrame[]): AnomalyEvent[] {
@@ -85,6 +92,20 @@ export class RuleEngine {
   ): void {
     const key = `${stream} ${kind}`;
     const current = this.open.get(key);
+    if (verdict.active && verdict.instant) {
+      const event: AnomalyEvent = {
+        id: `${stream}:${kind}:${atMs}`,
+        stream,
+        kind,
+        severity: verdict.severity,
+        message: verdict.message,
+        startedAt: atMs,
+        endedAt: atMs,
+      };
+      this.events.push(event);
+      changed.push(event);
+      return;
+    }
     if (verdict.active) {
       if (!current) {
         const startedAt = verdict.since ?? atMs;

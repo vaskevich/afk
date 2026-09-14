@@ -1,5 +1,6 @@
 import type { CollectorName, Frame } from "@afk/shared";
 import type { ComponentType } from "react";
+import { runCollector } from "./collectors/run.tsx";
 import { systemCollector } from "./collectors/system.tsx";
 
 /** Geometry handed to a row renderer. Sizes are CSS pixels; the context is pre-scaled. */
@@ -33,6 +34,7 @@ export interface CollectorUi<C extends CollectorName = CollectorName> {
  */
 export const collectors: { [C in CollectorName]: CollectorUi<C> } = {
   system: systemCollector,
+  run: runCollector,
 };
 
 /** Looks up the UI for a collector without the per-member narrowing. */

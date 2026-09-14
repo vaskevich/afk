@@ -62,8 +62,41 @@ export const SystemCollectorData = z.object({
 });
 export type SystemCollectorData = z.infer<typeof SystemCollectorData>;
 
-// TODO(collectors): processes (pid, parentPid, cpu, rss, fullPath), agents (claude/codex
-// counts), run (afk run -- <cmd>: stdout/stderr bytes per tick, exit code).
+/**
+ * One wrapped command (`afk run -- <cmd>`), sampled at ~1 Hz for as long as it runs,
+ * plus one final frame with `state: "exited"`. Byte counts are cumulative; the server
+ * derives rates. `output.flavor` names how the client looked at the output so richer
+ * parsers (progress lines, JSON records) can be added without changing the envelope.
+ */
+export const RunOutputVolume = z.object({
+  flavor: z.literal("volume"),
+  stdoutBytes: z.number().int().nonnegative(),
+  stderrBytes: z.number().int().nonnegative(),
+});
+export const RunOutput = z.discriminatedUnion("flavor", [RunOutputVolume]);
+export type RunOutput = z.infer<typeof RunOutput>;
+
+export const RunState = z.enum(["running", "exited"]);
+export type RunState = z.infer<typeof RunState>;
+
+export const RunCollectorData = z.object({
+  /** The command line as typed, truncated for display. */
+  command: z.string().max(256),
+  pid: z.number().int().nonnegative(),
+  state: RunState,
+  /** Set on the final frame only. */
+  exitCode: z.number().int().nullable(),
+  elapsedSeconds: z.number().int().nonnegative(),
+  /** The wrapped process itself (0 once it is gone). rss is bytes. */
+  process: z.object({
+    cpuPercent: z.number().min(0),
+    rssBytes: z.number().int().nonnegative(),
+  }),
+  output: RunOutput,
+});
+export type RunCollectorData = z.infer<typeof RunCollectorData>;
+
+// TODO(collectors): processes (pid, parentPid, cpu, rss, fullPath), agents (claude/codex counts).
 
 // ---------------------------------------------------------------------------
 // Frames
@@ -87,8 +120,14 @@ export const SystemFrame = FrameBase.extend({
   data: SystemCollectorData,
 });
 
+/** Stream id is `run:<runId>` so every wrapped command gets its own row. */
+export const RunFrame = FrameBase.extend({
+  collector: z.literal("run"),
+  data: RunCollectorData,
+});
+
 /** Every frame the server accepts. Add new collectors to this union. */
-export const Frame = z.discriminatedUnion("collector", [SystemFrame]);
+export const Frame = z.discriminatedUnion("collector", [SystemFrame, RunFrame]);
 export type Frame = z.infer<typeof Frame>;
 export type CollectorName = Frame["collector"];
 
