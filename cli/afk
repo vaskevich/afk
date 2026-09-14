@@ -798,8 +798,7 @@ chain_session() {
   SEQ_PROCESSES=0
   SAMPLE_TICK=0
   log "session $old_id reached its ${old_cap}s cap; continuing in session $SESSION_ID (max ${MAX_DURATION_SECONDS}s)"
-  printf '\n  %s\n\n' "$DASHBOARD_URL"
-  print_qr
+  print_dashboard_url
   sender_loop &
   SENDER_PID=$!
 }
@@ -1049,11 +1048,15 @@ record_dropped() { # session-dir frames bytes
   bytes=$(dropped_bytes "$1")
   printf '%d %d\n' $((frames + $2)) $((bytes + $3)) > "$1/$DROPPED_RECORD_NAME"
 }
+# Both read 0 until the first enforcement writes the record (awk is given the file
+# itself, and would not reach END on a missing one).
 dropped_frames() { # session-dir
-  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ f += $1 } END { print f + 0 }'
+  [ -e "$1/$DROPPED_RECORD_NAME" ] || { echo 0; return 0; }
+  awk '{ f += $1 } END { print f + 0 }' "$1/$DROPPED_RECORD_NAME"
 }
 dropped_bytes() { # session-dir
-  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ b += $2 } END { print b + 0 }'
+  [ -e "$1/$DROPPED_RECORD_NAME" ] || { echo 0; return 0; }
+  awk '{ b += $2 } END { print b + 0 }' "$1/$DROPPED_RECORD_NAME"
 }
 
 # The session being over on the server (410) ends the sender, and with it the sampler,
@@ -1149,7 +1152,7 @@ system_sampler_loop() {
 
 # ---------------------------------------------------------------------------
 # qr code: the dashboard URL, drawn for a phone camera. Rendered by the server
-# (bash has no QR library; see docs/PROTOCOL.md) and printed under the URL.
+# (bash has no QR library; see docs/PROTOCOL.md) with the URL printed under it.
 # ---------------------------------------------------------------------------
 
 # Whether stdout is a terminal; the tests override this after sourcing the script.
@@ -1173,15 +1176,18 @@ fetch_qr() {
   return 1
 }
 
-# Prints the QR code after a session's URL, when it would be seen: only on a terminal
-# (a pipe or a log file gets the URL alone) and not when --no-qr or AFK_NO_QR=1 turned
-# it off. A failed fetch prints nothing; the session never depends on it.
-print_qr() {
-  if [ "${AFK_NO_QR:-0}" = 1 ]; then
+# Prints a session's dashboard URL, exactly once: under its QR code when the code would
+# be seen (stdout is a terminal, --no-qr or AFK_NO_QR=1 did not turn it off, and the
+# server rendered one; the server's text block ends with the URL), on a line of its
+# own otherwise. A pipe or a log file gets the URL alone, and a failed fetch costs
+# nothing but the QR; the session never depends on it.
+print_dashboard_url() {
+  printf '\n'
+  if [ "${AFK_NO_QR:-0}" != 1 ] && stdout_is_terminal && fetch_qr; then
+    printf '\n'
     return 0
   fi
-  stdout_is_terminal || return 0
-  fetch_qr || true
+  printf '  %s\n\n' "$DASHBOARD_URL"
 }
 
 cmd_qr() {
@@ -1243,8 +1249,7 @@ cmd_start() {
   gather_host_info
   create_session_or_wait
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
-  printf '\n  %s\n\n' "$DASHBOARD_URL"
-  print_qr
+  print_dashboard_url
 
   sender_loop &
   SENDER_PID=$!
@@ -1324,10 +1329,11 @@ cmd_run() {
     SESSION_DIR="$RUN_DIR"
     mkdir -p "$SESSION_DIR/queue"
   fi
-  printf '\n  %s\n\n' "$DASHBOARD_URL"
   # A joiner's URL was already printed, QR and all, by the `afk start` that owns it.
   if [ "$owner" = 1 ]; then
-    print_qr
+    print_dashboard_url
+  else
+    printf '\n  %s\n\n' "$DASHBOARD_URL"
   fi
 
   sender_loop &
