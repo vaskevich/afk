@@ -33,6 +33,7 @@ const store = new SessionStore(storage, {
   limits: config.limits,
   maxSessionDurationSeconds: config.maxSessionDurationSeconds,
   evictEndedAfterMs: config.evictEndedAfterSeconds * MS_PER_SECOND,
+  endAfterSilentMs: config.endAfterSilentSeconds * MS_PER_SECOND,
 });
 const stopTicker = store.startTicker(config.tickIntervalSeconds * MS_PER_SECOND);
 const stopSweeper = startSweeper({

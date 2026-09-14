@@ -45,12 +45,18 @@ export interface SessionStoreOptions {
   maxSessionDurationSeconds: number;
   /** How long an ended session with no viewers stays in memory before `tick` evicts it. */
   evictEndedAfterMs: number;
+  /**
+   * An active session that has received nothing for this long is ended by `tick`, at
+   * the moment the silence began plus this. `client.stale` (60 s) is the early warning.
+   */
+  endAfterSilentMs: number;
 }
 
 export const DEFAULT_STORE_OPTIONS: SessionStoreOptions = {
   limits: DEFAULT_LIMITS,
   maxSessionDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
   evictEndedAfterMs: 10 * 60 * 1000,
+  endAfterSilentMs: 10 * 60 * 1000,
 };
 
 /** How often `startTicker` runs time-based rules and evicts idle ended sessions. */
@@ -86,7 +92,6 @@ export interface IngestResult {
   duplicates: number;
 }
 
-/** Thrown by `ingest` when a batch would add an eleventh (etc.) stream to a session. */
 /** Thrown by `ingest` when a batch would push a session past `maxFramesPerSession`. */
 export class TooManyFramesError extends Error {
   constructor(readonly limit: number) {
@@ -94,6 +99,17 @@ export class TooManyFramesError extends Error {
   }
 }
 
+/** Thrown by `create` when the session to chain from already has a successor. */
+export class AlreadyContinuedError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly nextSessionId: string,
+  ) {
+    super(`session ${sessionId} already continues in ${nextSessionId}`);
+  }
+}
+
+/** Thrown by `ingest` when a batch would add an eleventh (etc.) stream to a session. */
 export class TooManyStreamsError extends Error {
   constructor(
     readonly stream: string,
@@ -154,21 +170,51 @@ export class SessionStore {
     };
   }
 
-  async create(input: { host: HostInfo; clientVersion: string }): Promise<Session> {
+  /**
+   * Creates a session. With `previous` (a session this client owns, already checked by
+   * the route) the new one continues it: both records are linked, and the previous
+   * session ends at this moment if it was still running (at its cap if it had already
+   * expired), so its viewers get an `ended` event naming the successor.
+   */
+  async create(input: {
+    host: HostInfo;
+    clientVersion: string;
+    previous?: Session;
+  }): Promise<Session> {
+    const { previous } = input;
+    if (previous && previous.nextSessionId !== null) {
+      throw new AlreadyContinuedError(previous.sessionId, previous.nextSessionId);
+    }
+    const now = Date.now();
     const record: SessionRecord = {
       sessionId: randomId(),
       ingestToken: randomToken(),
       host: input.host,
       clientVersion: input.clientVersion,
-      startedAt: Date.now(),
+      startedAt: now,
       endedAt: null,
       maxDurationSeconds: this.options.maxSessionDurationSeconds,
+      previousSessionId: previous?.sessionId ?? null,
+      nextSessionId: null,
     };
     await this.storage.putSession(record);
     const session = this.hydrate(record, []);
     this.sessions.set(session.sessionId, session);
     this.unknownIds.delete(session.sessionId);
+    if (previous) {
+      await this.continueIn(previous, session, now);
+    }
     return session;
+  }
+
+  /** Links `previous` to its successor and ends it (persisting either way). */
+  private async continueIn(previous: Session, next: Session, now: number): Promise<void> {
+    previous.nextSessionId = next.sessionId;
+    if (previous.endedAt === null) {
+      await this.end(previous, Math.min(now, sessionEndMs(previous)));
+    } else {
+      await this.storage.putSession(this.record(previous));
+    }
   }
 
   /**
@@ -264,9 +310,28 @@ export class SessionStore {
   }
 
   private record(session: Session): SessionRecord {
-    const { sessionId, ingestToken, host, clientVersion, startedAt, endedAt, maxDurationSeconds } =
-      session;
-    return { sessionId, ingestToken, host, clientVersion, startedAt, endedAt, maxDurationSeconds };
+    const {
+      sessionId,
+      ingestToken,
+      host,
+      clientVersion,
+      startedAt,
+      endedAt,
+      maxDurationSeconds,
+      previousSessionId,
+      nextSessionId,
+    } = session;
+    return {
+      sessionId,
+      ingestToken,
+      host,
+      clientVersion,
+      startedAt,
+      endedAt,
+      maxDurationSeconds,
+      previousSessionId,
+      nextSessionId,
+    };
   }
 
   status(session: Session, now = Date.now()): SessionStatus {
@@ -284,14 +349,21 @@ export class SessionStore {
       maxDurationSeconds: session.maxDurationSeconds,
       streamCount: session.latestSequence.size,
       maxStreams: this.options.limits.maxStreamsPerSession,
+      previousSessionId: session.previousSessionId,
+      nextSessionId: session.nextSessionId,
     };
   }
 
-  async end(session: Session): Promise<void> {
+  /**
+   * Ends a session at `endedAt` (now by default; a chain or the silence rule pass the
+   * moment they decided on), persists it, closes its open events, and tells subscribers.
+   * Does nothing to a session that has already ended.
+   */
+  async end(session: Session, endedAt = Date.now()): Promise<void> {
     if (session.endedAt !== null) {
       return;
     }
-    session.endedAt = Date.now();
+    session.endedAt = endedAt;
     await this.storage.putSession(this.record(session));
     this.emitEvents(session, session.engine.closeAll(session.endedAt));
     this.emit(session, { type: "ended", summary: this.summary(session) });
@@ -310,17 +382,28 @@ export class SessionStore {
 
   /**
    * Gives time-based rules (client silent) a chance to fire on every active session
-   * in memory. Returns a function that stops the ticker.
+   * in memory, and ends sessions that have gone quiet. Returns a function that stops
+   * the ticker.
    */
   startTicker(intervalMs: number): () => void {
-    const timer = setInterval(() => this.tick(Date.now()), intervalMs);
+    const timer = setInterval(() => void this.tick(Date.now()), intervalMs);
     return () => clearInterval(timer);
   }
 
-  /** One pass of the periodic work: time-based rules for live sessions, eviction for idle ended ones. */
-  tick(now: number): void {
+  /**
+   * One pass of the periodic work: time-based rules for live sessions, an end for
+   * those silent past `endAfterSilentMs`, eviction for idle ended ones. Silence is
+   * measured on the server clock (`receivedAt` of the newest frame, or the session's
+   * start), so a client with a skewed clock is not ended for it.
+   */
+  async tick(now: number): Promise<void> {
     for (const [sessionId, session] of this.sessions) {
       if (this.status(session, now) === "active") {
+        const lastHeardAt = session.frames.at(-1)?.receivedAt ?? session.startedAt;
+        if (now - lastHeardAt > this.options.endAfterSilentMs) {
+          await this.endAfterSilence(session, lastHeardAt + this.options.endAfterSilentMs);
+          continue;
+        }
         this.emitEvents(session, session.engine.onTick(now));
       } else if (
         session.listeners.size === 0 &&
@@ -328,6 +411,22 @@ export class SessionStore {
       ) {
         this.sessions.delete(sessionId);
       }
+    }
+  }
+
+  /** Ends a session the client went quiet on; a failed write is logged and retried on the next tick. */
+  private async endAfterSilence(session: Session, endedAt: number): Promise<void> {
+    try {
+      await this.end(session, endedAt);
+      console.log(
+        `[session ${session.sessionId}] ended after ${this.options.endAfterSilentMs / 1000}s of silence`,
+      );
+    } catch (err) {
+      // `end` set endedAt before the write; undo so the next tick tries again.
+      session.endedAt = null;
+      console.error(
+        `[session ${session.sessionId}] could not persist the silent end: ${String(err)}`,
+      );
     }
   }
 

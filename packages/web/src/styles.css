@@ -440,6 +440,16 @@ button:focus-visible {
   color: var(--fg);
 }
 
+/* Chain links: the sessions this one continues and is continued by. */
+.facts a {
+  color: var(--fg);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.facts a:hover {
+  text-decoration-style: solid;
+}
+
 .pill {
   display: inline-block;
   font-size: 11px;
@@ -612,6 +622,18 @@ button:focus-visible {
   font-weight: 400;
   color: var(--fg-muted);
   margin-left: auto;
+}
+
+/* "This session continued: open the next one", under the verdict once a chained session has ended. */
+.banner-continued {
+  width: 100%;
+  margin: 0;
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+.banner-continued a {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .banner-events {

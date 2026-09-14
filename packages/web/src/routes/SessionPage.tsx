@@ -56,6 +56,7 @@ export function SessionPage() {
       <StatusBanner
         status={query.data.session.status}
         events={query.data.events}
+        nextSessionId={query.data.session.nextSessionId}
         onSelectEvent={selectEvent}
       />
       <Timeline

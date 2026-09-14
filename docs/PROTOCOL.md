@@ -93,6 +93,45 @@ Status codes on create:
 A `protocolVersion` outside `[MIN_PROTOCOL_VERSION, PROTOCOL_VERSION]` is a 426, not a
 400, so an old client sees the upgrade message rather than "invalid request".
 
+### Chaining
+
+A session is capped at `maxDurationSeconds`; a client that wants to keep going creates
+a successor shortly before the cap. The create request is the same as above plus
+`previousSessionId`, and it carries the previous session's ingest token as the bearer,
+the same proof of ownership every other write to a session needs:
+
+```
+POST /api/sessions
+Authorization: Bearer <previous session's ingestToken>
+
+{ "protocolVersion": 1, "clientVersion": "0.2.0", "host": { … },
+  "previousSessionId": "D3FzMqK8qOLVva9LoHF9uc" }
+```
+
+On 201 the two sessions are linked both ways (`previousSessionId` on the new summary,
+`nextSessionId` on the old one) and the previous session is ended: its `endedAt` is the
+moment of the chain (or its cap, if it had already expired), so from that response on
+its ingest endpoint answers 410 and its open dashboards receive the `end` stream event
+with `nextSessionId` set. Anything still queued for the old session must therefore be
+sent _before_ the chain request. A previous session that has already ended can still
+be chained from (only the links are written), so a client that slept through the cap
+still gets its successor linked. Sequences are per session and start again at 1.
+
+Additional status codes on a chained create:
+
+| code | meaning                                                                | client behaviour                              |
+| ---- | ---------------------------------------------------------------------- | --------------------------------------------- |
+| 401  | the bearer is not the previous session's ingest token                  | give up chaining; the session ends at its cap |
+| 404  | `previousSessionId` is unknown                                         | same                                          |
+| 409  | the previous session already has a successor (`details.nextSessionId`) | same                                          |
+
+A chain from a still-active session is admitted even at capacity, since it frees the
+slot it takes; a chain from a session that is already over is subject to the 503 above
+like any other create. The bash client chains from `system_sampler_loop` at
+`min(30, max(2, maxDurationSeconds / 4))` seconds before the cap
+(`CHAIN_BEFORE_CAP_MAX_SECONDS` / `CHAIN_BEFORE_CAP_MIN_SECONDS` in `cli/afk`): 30 s
+for the default hour, a quarter of the cap for the short sessions the tests use.
+
 ### Ingest
 
 `Content-Type: application/x-ndjson`, one frame per line. The client queues each
@@ -127,8 +166,19 @@ queue on disk and stops, like a 410, so nothing sampled is lost.
 
 ### End
 
-Marks the session ended and returns the session summary. Sessions that never receive
-an end become `expired` once past `maxDurationSeconds`.
+Marks the session ended and returns the session summary. A session's `status` is:
+
+- `active`: accepting frames.
+- `ended`: `endedAt` is set. The client said so (this endpoint), or it chained to a
+  successor (`endedAt` is the moment of the chain, `nextSessionId` names it), or the
+  server ended it after `AFK_END_AFTER_SILENT_SECONDS` (600) without a frame, in which
+  case `endedAt` is the newest frame's server receipt plus that silence, not the moment
+  the server noticed. Ended sessions answer 410 on ingest.
+- `expired`: never ended, and past `maxDurationSeconds` since it started; also 410.
+
+A silent session gets a `client.stale` event after 60 s as the early warning, then the
+end; both reach an open dashboard over the stream. Retention counts from `endedAt`, or
+from the cap for an expired session.
 
 ### QR code
 
@@ -329,7 +379,10 @@ enough of them that resending the set is simpler than a second cursor.
 `maxStreams` (the server's per-session cap, see admission control in
 [ARCHITECTURE.md](ARCHITECTURE.md)). `afk run` checks these before joining a session
 so it can fall back to running without telemetry instead of sending a batch the server
-will reject.
+will reject. `previousSessionId` and `nextSessionId` (each a session id or `null`) link
+a session to the ones it continues and is continued by (see "Chaining" above); the
+dashboard renders them as links, and `nextSessionId` on the `end` stream event is how an
+open dashboard learns that a live session moved on.
 
 ### Stream
 

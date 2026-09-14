@@ -55,9 +55,24 @@ more collectors) can join the same session. A session is machine-wide; the first
 process that created it owns the long-running system collectors, removes both files
 on any exit, and answers `afk stop` (SIGTERM) by flushing and ending the session.
 `afk status` reads the same files, so it works offline; a joiner that finds the owner
-pid dead treats `current` as stale without asking the server. Session directories are
-swept on the next `afk start`: a day after the `done` marker `end_session` leaves, or
-two days after their last change when there is none.
+pid dead treats `current` as stale without asking the server. A second `afk start`
+while the owner is alive refuses with that session's URL (`--force` asks the owner to
+finish and takes over). Session directories are swept on the next `afk start`: a day
+after the `done` marker `end_session` (or a chain) leaves, or two days after their last
+change when there is none.
+
+Sessions are capped by the server (an hour). `afk start` chains past it: 30 s before
+the cap (a quarter of a shorter cap) `chain_session` stops the sender, flushes the old
+queue, creates a successor with `previousSessionId` and the old ingest token, prints
+the new URL and QR, rewrites `current`, and starts a sender on the new queue with
+sequences from 1. The server ends the old session at that moment and links the two
+(`nextSessionId` / `previousSessionId`, see [PROTOCOL.md](PROTOCOL.md)). A joining
+`afk run` whose sends get 410 re-reads `current` and, when it names a different session
+with a live owner, continues its `run:<runId>` stream there. A 410 the server sends
+early (frame cap, or the session ended after the machine slept) is chained at once
+through a `gone` marker from the sender. The server, for its part, ends a session that
+has sent nothing for `AFK_END_AFTER_SILENT_SECONDS` (10 minutes) in the same tick that
+runs `client.stale`, at the moment the silence began plus that.
 
 The dashboard URL is printed with a QR code under it when stdout is a terminal, so a
 phone can scan it off the screen. The code comes from the server
@@ -374,6 +389,16 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   Vite-written `dist/version.json`) at `GET /versionz`, which `infra/deploy.sh` now
   polls after waiting for the Lightsail deployment to become `ACTIVE`, so a failed
   rollout fails the deploy instead of showing green.
+- **2026-09-15** Sessions past the cap are chained, not extended: the client creates a
+  successor 30 s before the cap with `previousSessionId` and the old session's ingest
+  token as the bearer (the same proof every write needs, so no new header), the server
+  ends the old session at that moment and links both records, and the dashboard links
+  them and offers the successor rather than navigating. Raising the cap would break the
+  memory budget behind admission control; a chain keeps every trace an hour and its
+  memory bounded, and a chain from a still-active session is admitted at capacity since
+  it frees the slot it takes. The server also ends a session after ten minutes without a
+  frame (`AFK_END_AFTER_SILENT_SECONDS`), measured on its own clock, so a client that
+  died shows as ended and its slot is freed; `client.stale` stays the early warning.
 - **2026-09-15** QR rendering of the dashboard URL lives on the server for the CLI
   (`GET /api/sessions/:id/qr`, `utils/qr.ts`, behind the ingest token because the URL
   is the share link) and in the browser for the dashboard (`SharePanel.tsx`, from

@@ -9,6 +9,7 @@ import {
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS, type StoredFrame } from "@afk/shared";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
 import {
+  AlreadyContinuedError,
   DEFAULT_STORE_OPTIONS,
   SessionStore,
   TooManyFramesError,
@@ -103,6 +104,122 @@ describe("SessionStore", () => {
 
       expect(session.maxDurationSeconds).toBe(DEFAULT_MAX_SESSION_DURATION_SECONDS);
     });
+
+    it("starts every session unlinked", async () => {
+      const store = new SessionStore(new MemorySessionStorage());
+
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      expect(store.summary(session)).toMatchObject({
+        previousSessionId: null,
+        nextSessionId: null,
+      });
+    });
+  });
+
+  describe("create with a previous session (chaining)", () => {
+    it("links both records, ends the previous session at that moment, persists both, and emits ended with the successor", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(previous, highCpuFrames(31));
+      const received: SessionEvent[] = [];
+      store.subscribe(previous, (event) => received.push(event));
+      vi.setSystemTime(T0_MS + 50_000);
+
+      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+
+      expect(store.summary(next)).toMatchObject({
+        status: "active",
+        startedAt: T0_MS + 50_000,
+        previousSessionId: previous.sessionId,
+        nextSessionId: null,
+      });
+      expect(store.summary(previous)).toMatchObject({
+        status: "ended",
+        endedAt: T0_MS + 50_000,
+        nextSessionId: next.sessionId,
+      });
+      await expect(storage.getSession(previous.sessionId)).resolves.toMatchObject({
+        endedAt: T0_MS + 50_000,
+        nextSessionId: next.sessionId,
+      });
+      await expect(storage.getSession(next.sessionId)).resolves.toMatchObject({
+        previousSessionId: previous.sessionId,
+      });
+      expect(previous.engine.events).toEqual([
+        expect.objectContaining({ kind: "cpu.high", endedAt: T0_MS + 50_000 }),
+      ]);
+      expect(received).toContainEqual({
+        type: "ended",
+        summary: expect.objectContaining({ status: "ended", nextSessionId: next.sessionId }),
+      });
+    });
+
+    it("ends an expired previous session at its cap rather than at the chain moment", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage(), { maxSessionDurationSeconds: 60 });
+      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      vi.setSystemTime(T0_MS + 90_000);
+
+      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+
+      expect(store.summary(previous)).toMatchObject({
+        status: "ended",
+        endedAt: T0_MS + 60_000,
+        nextSessionId: next.sessionId,
+      });
+    });
+
+    it("links a previous session that had already ended without moving its end time", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.end(previous);
+      vi.setSystemTime(T0_MS + 5_000);
+
+      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+
+      expect(previous.endedAt).toBe(T0_MS);
+      await expect(storage.getSession(previous.sessionId)).resolves.toMatchObject({
+        endedAt: T0_MS,
+        nextSessionId: next.sessionId,
+      });
+    });
+
+    it("refuses a second successor for the same session", async () => {
+      const store = new SessionStore(new MemorySessionStorage());
+      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+
+      await expect(
+        store.create({ host: makeHost(), clientVersion: "0.1.0", previous }),
+      ).rejects.toThrow(AlreadyContinuedError);
+      expect(previous.nextSessionId).toBe(next.sessionId);
+      expect(store.stats().sessionsInMemory).toBe(2);
+    });
+
+    it("keeps the links when a chained session is reloaded from storage", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+      store.evict(previous.sessionId);
+      store.evict(next.sessionId);
+
+      const reloadedPrevious = await store.get(previous.sessionId);
+      const reloadedNext = await store.get(next.sessionId);
+
+      expect(store.summary(reloadedPrevious!)).toMatchObject({ nextSessionId: next.sessionId });
+      expect(store.summary(reloadedNext!)).toMatchObject({
+        previousSessionId: previous.sessionId,
+      });
+    });
   });
 
   describe("get", () => {
@@ -130,6 +247,8 @@ describe("SessionStore", () => {
         startedAt: T0_MS,
         endedAt: null,
         maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+        previousSessionId: null,
+        nextSessionId: null,
       };
       await storage.putSession(record);
       const frames = makeStoredFrames(highCpuFrames(31));
@@ -376,6 +495,21 @@ describe("SessionStore", () => {
 
       expect(session.endedAt).toBe(endedAtFirst);
     });
+
+    it("ends at the given moment when one is passed, closing events there too", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS + 120_000);
+      const store = new SessionStore(new MemorySessionStorage());
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, highCpuFrames(31));
+
+      await store.end(session, T0_MS + 40_000);
+
+      expect(session.endedAt).toBe(T0_MS + 40_000);
+      expect(session.engine.events).toEqual([
+        expect.objectContaining({ kind: "cpu.high", endedAt: T0_MS + 40_000 }),
+      ]);
+    });
   });
 
   describe("status and summary", () => {
@@ -406,6 +540,8 @@ describe("SessionStore", () => {
         startedAt: oldStartedAt,
         endedAt: null,
         maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+        previousSessionId: null,
+        nextSessionId: null,
       };
       await storage.putSession(record);
       const store = new SessionStore(storage);
@@ -483,7 +619,7 @@ describe("SessionStore", () => {
       await store.ingest(session, [makeSystemFrame(0)]);
 
       vi.setSystemTime(T0_MS + 90_000);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(session.engine.events).toEqual([
         expect.objectContaining({
@@ -494,6 +630,96 @@ describe("SessionStore", () => {
       ]);
     });
 
+    it("ends a session silent for longer than endAfterSilentMs at the newest frame's receipt plus the silence, persisted, with ended emitted", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage, { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      vi.setSystemTime(T0_MS + 5_000);
+      await store.ingest(session, [makeSystemFrame(5)]);
+      const received: SessionEvent[] = [];
+      store.subscribe(session, (event) => received.push(event));
+      // The early warning opens on a tick well before the end.
+      vi.setSystemTime(T0_MS + 95_000);
+      await store.tick(Date.now());
+
+      vi.setSystemTime(T0_MS + 5_000 + 600_001);
+      await store.tick(Date.now());
+
+      expect(store.summary(session)).toMatchObject({ status: "ended", endedAt: T0_MS + 605_000 });
+      await expect(storage.getSession(session.sessionId)).resolves.toMatchObject({
+        endedAt: T0_MS + 605_000,
+      });
+      expect(received).toContainEqual({
+        type: "ended",
+        summary: expect.objectContaining({ status: "ended", endedAt: T0_MS + 605_000 }),
+      });
+      // The early warning is closed at the same moment the session ends.
+      expect(session.engine.events).toEqual([
+        expect.objectContaining({ kind: "client.stale", endedAt: T0_MS + 605_000 }),
+      ]);
+    });
+
+    it("keeps a session that has been silent for exactly the limit, still warning through client.stale", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      vi.setSystemTime(T0_MS + 600_000);
+      await store.tick(Date.now());
+
+      expect(store.status(session)).toBe("active");
+      expect(session.engine.events).toEqual([
+        expect.objectContaining({ kind: "client.stale", endedAt: null }),
+      ]);
+    });
+
+    it("counts the silence of a session that never sent a frame from its start", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      vi.setSystemTime(T0_MS + 600_001);
+      await store.tick(Date.now());
+
+      expect(store.summary(session)).toMatchObject({ status: "ended", endedAt: T0_MS + 600_000 });
+    });
+
+    it("measures silence on the server clock, so a frame with an old client timestamp keeps the session alive", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS + 3_600_000);
+      const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      // Client clock an hour behind: the frame says T0 but arrives now.
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      vi.setSystemTime(T0_MS + 3_600_000 + 1_000);
+      await store.tick(Date.now());
+
+      expect(store.status(session)).toBe("active");
+    });
+
+    it("uses ten minutes of silence by default", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage());
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.endAfterSilentMs);
+      await store.tick(Date.now());
+      const stillActive = store.status(session);
+      vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.endAfterSilentMs + 1);
+      await store.tick(Date.now());
+
+      expect(stillActive).toBe("active");
+      expect(store.status(session)).toBe("ended");
+    });
+
     it("evicts an ended session with no listeners after the configured idle window", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
@@ -502,7 +728,7 @@ describe("SessionStore", () => {
       await store.end(session);
 
       vi.setSystemTime(T0_MS + 1_001);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(store.stats().sessionsInMemory).toBe(0);
     });
@@ -515,7 +741,7 @@ describe("SessionStore", () => {
       await store.end(session);
 
       vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.evictEndedAfterMs);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(store.stats().sessionsInMemory).toBe(1);
     });
@@ -529,7 +755,7 @@ describe("SessionStore", () => {
       await store.end(session);
 
       vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.evictEndedAfterMs + 1);
-      store.tick(Date.now());
+      await store.tick(Date.now());
 
       expect(store.stats().sessionsInMemory).toBe(1);
     });
@@ -559,6 +785,8 @@ describe("sessionStatus and sessionEndMs", () => {
     startedAt: T0_MS,
     endedAt: null,
     maxDurationSeconds: 60,
+    previousSessionId: null,
+    nextSessionId: null,
   };
 
   it("reports active up to the cap and expired one millisecond past it", () => {

@@ -115,4 +115,18 @@
   `AFK_NO_QR=1` to skip), and `afk qr` reprints it. The session page has a Share panel
   with the URL, a copy button, and a QR rendered in the browser. `pbcopy` was left out:
   the QR is the phone path and the dashboard's copy button covers the clipboard.
+- **2026-09-15, item 5 (chain sessions past the one-hour cap).** `afk start` opens a
+  successor session 30 s before the server's cap (a quarter of shorter caps, never under
+  2 s): it flushes the old queue first, since the server ends the old session the moment
+  the successor exists, then creates it with `previousSessionId` and the old ingest
+  token, prints the new URL and QR, and carries on with sequences starting at 1. Both
+  summaries carry `previousSessionId` / `nextSessionId`; the dashboard header links
+  them and, when the `end` event reaches a viewer of the old session, the banner offers
+  "This session continued: open the next one" rather than navigating. A joined
+  `afk run` follows the owner to the successor. The item's "first URL redirects to the
+  live session" was left out on purpose (the old trace stays readable; BACKLOG.md).
+  Also from this pass: `afk start` refuses while another one runs here (`--force` takes
+  over), and the server ends a session after ten minutes without a frame
+  (`AFK_END_AFTER_SILENT_SECONDS`), so a laptop that died mid-session shows as ended
+  instead of stale for the rest of the hour.
 - **2026-09-15, item 7 (last lines of output when a run fails).** A non-zero `afk run` puts the last 20 lines of stdout and stderr (200 bytes each) on its final frame as `output.tail`; `run.exited` ends its message with the last stderr line and keeps the tail in `details.outputTail`; the banner, nearby events, and the run details show it as a collapsed "last output" block. `AFK_RUN_TAIL_LINES=0` is the opt-out (the item said `--no-output`; an environment variable fits `afk start` and `afk run` alike and matches the other client switches). A successful command never sends output; see the P0 privacy item and the decision log in docs/ARCHITECTURE.md.

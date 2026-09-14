@@ -12,6 +12,7 @@ import {
 } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
 import { log } from "../log/logger.ts";
+import { AlreadyContinuedError, type Session } from "../store/sessions.ts";
 import { renderQrSvg, renderQrText } from "../utils/qr.ts";
 
 /** Parses the request body as JSON, or null if it isn't valid JSON. */
@@ -54,6 +55,9 @@ function dashboardUrlFor(publicBaseUrl: string, sessionId: string): string {
   return `${publicBaseUrl}/s/${sessionId}`;
 }
 
+/** Why a chain request's `previousSessionId` was refused, with the status to answer. */
+type PreviousSessionRefusal = { status: 401 | 404; message: string };
+
 /**
  * Session lifecycle: create, inspect, end, and the dashboard URL as a QR code.
  * Mounted at /api/sessions. The QR sits behind the ingest token because the URL is the
@@ -63,18 +67,29 @@ function dashboardUrlFor(publicBaseUrl: string, sessionId: string): string {
 export function sessionRoutes(deps: AppDeps) {
   const { store, config } = deps;
 
+  /**
+   * The session a create request wants to continue. Chaining is proven the same way as
+   * every other write to a session: the previous session's ingest token as the bearer.
+   * Unlike ingest, an ended or expired session may still be chained from, so a client
+   * that was late (the machine slept through the cap) still gets its successor linked.
+   */
+  async function resolvePreviousSession(
+    c: Context<AppEnv>,
+    previousSessionId: string,
+  ): Promise<Session | PreviousSessionRefusal> {
+    const previous = await store.get(previousSessionId);
+    if (!previous) {
+      return { status: 404, message: "unknown previous session" };
+    }
+    const auth = c.req.header("authorization") ?? "";
+    if (auth !== `Bearer ${previous.ingestToken}`) {
+      return { status: 401, message: "bad ingest token for the previous session" };
+    }
+    return previous;
+  }
+
   return new Hono<AppEnv>()
     .post("/", clientVersion(deps), limitBody(MAX_CREATE_BODY_BYTES), async (c) => {
-      if (!store.hasCapacity()) {
-        // TODO(hardening): also rate limit creation per client address.
-        c.header("Retry-After", String(CAPACITY_RETRY_AFTER_SECONDS));
-        return errorResponse(
-          c,
-          503,
-          `server is at capacity (${config.limits.maxActiveSessions} active sessions); try again later`,
-        );
-      }
-
       const request = await readJsonBody(c);
       // The schema would reject an out-of-range protocolVersion with a 400 like any other
       // invalid field; intercept it first so an old client gets the upgrade message instead.
@@ -97,10 +112,41 @@ export function sessionRoutes(deps: AppDeps) {
         return errorResponse(c, 400, "invalid session request", parsed.error.flatten());
       }
 
-      const session = await store.create({
-        host: parsed.data.host,
-        clientVersion: parsed.data.clientVersion,
-      });
+      let previous: Session | undefined;
+      if (parsed.data.previousSessionId !== undefined) {
+        const resolved = await resolvePreviousSession(c, parsed.data.previousSessionId);
+        if (!("sessionId" in resolved)) {
+          return errorResponse(c, resolved.status, resolved.message);
+        }
+        previous = resolved;
+      }
+
+      // A chain from a still-active session frees that session's slot as it takes one,
+      // so it is admitted at capacity; anything else waits for room.
+      const replacesActiveSession = previous !== undefined && store.status(previous) === "active";
+      if (!store.hasCapacity() && !replacesActiveSession) {
+        // TODO(hardening): also rate limit creation per client address.
+        c.header("Retry-After", String(CAPACITY_RETRY_AFTER_SECONDS));
+        return errorResponse(
+          c,
+          503,
+          `server is at capacity (${config.limits.maxActiveSessions} active sessions); try again later`,
+        );
+      }
+
+      let session: Session;
+      try {
+        session = await store.create({
+          host: parsed.data.host,
+          clientVersion: parsed.data.clientVersion,
+          previous,
+        });
+      } catch (err) {
+        if (err instanceof AlreadyContinuedError) {
+          return errorResponse(c, 409, err.message, { nextSessionId: err.nextSessionId });
+        }
+        throw err;
+      }
       const dashboardUrl = dashboardUrlFor(config.publicBaseUrl, session.sessionId);
       log.info("session created", {
         session: session.sessionId,
@@ -108,7 +154,15 @@ export function sessionRoutes(deps: AppDeps) {
         client: session.clientVersion,
         cpus: session.host.cpuCount,
         url: dashboardUrl,
+        ...(previous ? { continues: previous.sessionId } : {}),
       });
+      if (previous) {
+        log.info(replacesActiveSession ? "session ended by chain" : "session linked to successor", {
+          session: previous.sessionId,
+          frames: previous.frames.length,
+          next: session.sessionId,
+        });
+      }
       const body: CreateSessionResponse = {
         sessionId: session.sessionId,
         ingestToken: session.ingestToken,

@@ -68,6 +68,26 @@ export function SessionHeader({ session, connection }: Props) {
           <dt>client</dt>
           <dd>v{session.clientVersion}</dd>
         </div>
+        {session.previousSessionId !== null && (
+          <div>
+            <dt>continues</dt>
+            <dd>
+              <Link to="/s/$sessionId" params={{ sessionId: session.previousSessionId }}>
+                ← previous session
+              </Link>
+            </dd>
+          </div>
+        )}
+        {session.nextSessionId !== null && (
+          <div>
+            <dt>continued in</dt>
+            <dd>
+              <Link to="/s/$sessionId" params={{ sessionId: session.nextSessionId }}>
+                next session →
+              </Link>
+            </dd>
+          </div>
+        )}
       </dl>
     </header>
   );

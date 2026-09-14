@@ -1,4 +1,5 @@
 import type { AnomalyEvent, SessionStatus } from "@afk/shared";
+import { Link } from "@tanstack/react-router";
 import { isOpenEvent, pluralize, worstSeverity } from "../events.ts";
 import { OutputTail } from "./OutputTail.tsx";
 import { TopProcesses } from "./TopProcesses.tsx";
@@ -7,6 +8,12 @@ interface Props {
   status: SessionStatus;
   /** Every event of the session, sorted by start. */
   events: readonly AnomalyEvent[];
+  /**
+   * The session that continues this one, once it has ended by chaining. Arrives with
+   * the `end` stream event while a viewer is watching live, so the banner offers the
+   * link rather than navigating: the viewer may be reading this trace.
+   */
+  nextSessionId: string | null;
   /** Move the cursor to an event the viewer clicked. */
   onSelectEvent(event: AnomalyEvent): void;
 }
@@ -17,12 +24,21 @@ interface Props {
  * so they can change without shipping a new client or dashboard.
  *
  * While the session is active the banner reflects what is wrong right now (open
- * events). Once it is over it summarises what happened.
+ * events). Once it is over it summarises what happened, and says where the trace
+ * continues when the client chained to a successor.
  */
-export function StatusBanner({ status, events, onSelectEvent }: Props) {
+export function StatusBanner({ status, events, nextSessionId, onSelectEvent }: Props) {
   const active = status === "active";
   const listed = active ? events.filter(isOpenEvent) : events;
   const worst = worstSeverity(listed);
+  const continuation = !active && nextSessionId !== null && (
+    <p className="banner-continued">
+      This session continued:{" "}
+      <Link to="/s/$sessionId" params={{ sessionId: nextSessionId }}>
+        open the next one
+      </Link>
+    </p>
+  );
 
   if (listed.length === 0) {
     return (
@@ -30,6 +46,7 @@ export function StatusBanner({ status, events, onSelectEvent }: Props) {
         <span className="dot" />
         All normal
         <small>{active ? "no open anomalies" : "no anomalies during this session"}</small>
+        {continuation}
       </div>
     );
   }
@@ -68,6 +85,7 @@ export function StatusBanner({ status, events, onSelectEvent }: Props) {
           </li>
         ))}
       </ul>
+      {continuation}
     </div>
   );
 }

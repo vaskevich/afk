@@ -429,7 +429,7 @@ describe("send_oldest_batch", () => {
     expect(kept).toBe("AAA\n");
   });
 
-  it("returns 2, keeps the queued files, and prints the upgrade hint on a 426 response", async () => {
+  it("returns 3, keeps the queued files, and prints the upgrade hint on a 426 response", async () => {
     const sessionDir = await makeQueue();
     await writeFile(join(sessionDir, "queue", "0000000001.ndjson"), "AAA\n");
     const server = await startServer(() => ({
@@ -446,7 +446,7 @@ describe("send_oldest_batch", () => {
       AFK_SERVER: server.url,
     });
 
-    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "2" });
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "3" });
     expect(stderr).toContain("below the minimum 0.3.0");
     expect(stderr).toContain("client 0.3.0 and protocol 2 or newer");
     expect(stderr).toContain(`update with: curl -fsSL ${server.url}/install | sh`);
@@ -700,6 +700,131 @@ describe("system_sampler_loop", () => {
       "sleep=1",
     ]);
   });
+
+  it("stops at the cap without chaining unless SESSION_CHAINING is set", async () => {
+    const sessionDir = await makeTempDir();
+
+    const { stdout, stderr, code } = await runBash(
+      [
+        "FAKE_NOW=1000",
+        "now_seconds() { printf '%s' \"$FAKE_NOW\"; }",
+        "sleep() { FAKE_NOW=$((FAKE_NOW + $1)); }",
+        "sample_once() { printf 'tick=%s\\n' \"$FAKE_NOW\"; }",
+        "chain_session() { printf 'chain=%s\\n' \"$FAKE_NOW\"; return 0; }",
+        "system_sampler_loop",
+      ].join("\n"),
+      { SESSION_DIR: sessionDir, MAX_DURATION_SECONDS: "3" },
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stdout.split("\n").filter((line) => line !== "")).toEqual([
+      "tick=1000",
+      "tick=1001",
+      "tick=1002",
+    ]);
+    expect(stderr).toContain("reached the maximum session length");
+    expect(await exists(join(sessionDir, "stop"))).toBe(true);
+  });
+});
+
+describe("system_sampler_loop chaining", () => {
+  /**
+   * The loop against a fake clock with a stub chain_session that reports when it was
+   * called and succeeds or fails as told. Runs until `ticks` samples have been taken.
+   */
+  async function runChainingLoop(options: {
+    maxDurationSeconds: number;
+    ticks: number;
+    chainResult: number;
+    goneOnTick?: number;
+  }): Promise<{ lines: string[]; stderr: string; code: number; sessionDir: string }> {
+    const sessionDir = await makeTempDir();
+    const { stdout, stderr, code } = await runBash(
+      [
+        "FAKE_NOW=1000; TICKS=0",
+        "now_seconds() { printf '%s' \"$FAKE_NOW\"; }",
+        "sleep() { FAKE_NOW=$((FAKE_NOW + $1)); }",
+        "sample_once() {",
+        "  TICKS=$((TICKS + 1)); printf 'tick=%s\\n' \"$FAKE_NOW\"",
+        '  [ "$TICKS" = "$GONE_ON_TICK" ] && touch "$SESSION_DIR/gone"',
+        '  [ "$TICKS" -ge "$MAX_TICKS" ] && touch "$SESSION_DIR/stop"',
+        "  return 0",
+        "}",
+        "chain_session() {",
+        "  printf 'chain=%s\\n' \"$FAKE_NOW\"",
+        '  [ "$CHAIN_RESULT" = 0 ] && rm -f "$SESSION_DIR/gone"',
+        '  return "$CHAIN_RESULT"',
+        "}",
+        "system_sampler_loop",
+      ].join("\n"),
+      {
+        SESSION_DIR: sessionDir,
+        SESSION_CHAINING: "1",
+        MAX_DURATION_SECONDS: String(options.maxDurationSeconds),
+        MAX_TICKS: String(options.ticks),
+        CHAIN_RESULT: String(options.chainResult),
+        GONE_ON_TICK: String(options.goneOnTick ?? 0),
+      },
+    );
+    return { lines: stdout.split("\n").filter((line) => line !== ""), stderr, code, sessionDir };
+  }
+
+  it("chains a quarter of a short cap before it and again a cap later, counting from the successor", async () => {
+    // Cap 20 s: chain 5 s before, at 15 s of each session.
+    const { lines, stderr, code } = await runChainingLoop({
+      maxDurationSeconds: 20,
+      ticks: 32,
+      chainResult: 0,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(lines.filter((line) => line.startsWith("chain="))).toEqual(["chain=1015", "chain=1030"]);
+    expect(lines).toHaveLength(34);
+    expect(stderr).not.toContain("reached the maximum session length");
+  });
+
+  it("chains 30 s before the default hour, a quarter of a short cap, and never under 2 s", async () => {
+    const before = async (maxDurationSeconds: number) =>
+      (
+        await runBash("chain_before_cap_seconds", {
+          MAX_DURATION_SECONDS: String(maxDurationSeconds),
+        })
+      ).stdout.trim();
+
+    expect(await before(3600)).toBe("30");
+    expect(await before(120)).toBe("30");
+    expect(await before(40)).toBe("10");
+    expect(await before(12)).toBe("3");
+    expect(await before(4)).toBe("2");
+  });
+
+  it("retries a failed chain every CHAIN_RETRY_SECONDS and stops at the cap like before", async () => {
+    const { lines, stderr, code, sessionDir } = await runChainingLoop({
+      maxDurationSeconds: 20,
+      ticks: 40,
+      chainResult: 1,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(lines.filter((line) => line.startsWith("chain="))).toEqual(["chain=1015", "chain=1020"]);
+    expect(lines.filter((line) => line.startsWith("tick=")).at(-1)).toBe("tick=1019");
+    expect(stderr).toContain("reached the maximum session length");
+    expect(await exists(join(sessionDir, "stop"))).toBe(true);
+  });
+
+  it("chains at once when the sender reports the session gone, once the session is old enough", async () => {
+    // Cap 400 s: the sender marks the session gone at tick 3 (session age 2 s); the
+    // chain waits until the session is CHAIN_MIN_SESSION_SECONDS (60 s) old.
+    const { lines, stderr, code } = await runChainingLoop({
+      maxDurationSeconds: 400,
+      ticks: 70,
+      chainResult: 0,
+      goneOnTick: 3,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(lines.filter((line) => line.startsWith("chain="))).toEqual(["chain=1060"]);
+  });
 });
 
 describe("create_session", () => {
@@ -837,17 +962,329 @@ describe("create_session failures", () => {
     expect(await exists(join(afkHome, "current"))).toBe(false);
   });
 
-  it("dies naming curl's reason when the server is unreachable", async () => {
+  it("returns 3 naming curl's reason when the server is unreachable, and afk start's wait loop exits 1 on that", async () => {
     const afkHome = await makeTempDir();
+    const env = { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: "http://127.0.0.1:1" };
 
-    const { code, stderr } = await runBash("create_session", {
+    const direct = await runBash('create_session; printf "RC=%d" "$?"', env);
+    const waited = await runBash("create_session_or_wait", env);
+
+    expect(parseKeyValueLines(direct.stdout), direct.stderr).toMatchObject({ RC: "3" });
+    expect(direct.stderr).toMatch(/could not reach http:\/\/127\.0\.0\.1:1: .*connect/i);
+    expect(waited.code).toBe(1);
+    expect(waited.stderr).toMatch(/could not reach/);
+  });
+
+  it("returns 1 rather than exiting when the server refuses with a 500, so a chain can retry", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 500, body: '{"error":"boom"}' }));
+
+    const { stdout, stderr } = await runBash('create_session; printf "RC=%d" "$?"', {
       ...hostEnv,
       AFK_HOME: afkHome,
-      AFK_SERVER: "http://127.0.0.1:1",
+      AFK_SERVER: server.url,
     });
 
-    expect(code).toBe(1);
-    expect(stderr).toMatch(/could not reach http:\/\/127\.0\.0\.1:1: .*connect/i);
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "1" });
+    expect(stderr).toContain("HTTP 500");
+    expect(await exists(join(afkHome, "current"))).toBe(false);
+  });
+});
+
+describe("create_session with a previous session", () => {
+  const hostEnv = {
+    HOST_NAME: "test-host",
+    HOST_PLATFORM: "darwin",
+    HOST_OS_VERSION: "26.0",
+    HOST_CPU_COUNT: "8",
+    HOST_MEMORY_BYTES: "17179869184",
+  };
+
+  it("sends previousSessionId with the previous session's token as the bearer and switches to the successor", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({
+      status: 201,
+      body: '{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/newSession","maxDurationSeconds":3600}',
+    }));
+
+    const { stdout, stderr } = await runBash(
+      [
+        'create_session oldSession tok-old; printf "RC=%d\\n" "$?"',
+        'printf "SESSION_ID=%s\\nINGEST_TOKEN=%s\\n" "$SESSION_ID" "$INGEST_TOKEN"',
+        'printf "CURRENT_ID=%s\\n" "$(sed -n "s/^sessionId=//p" "$AFK_HOME/current")"',
+      ].join("\n"),
+      { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({
+      RC: "0",
+      SESSION_ID: "newSession",
+      INGEST_TOKEN: "tok-new",
+      CURRENT_ID: "newSession",
+    });
+    expect(server.requests).toHaveLength(1);
+    const [request] = server.requests;
+    expect(request).toMatchObject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: expect.objectContaining({ authorization: "Bearer tok-old" }),
+    });
+    expect(JSON.parse(request!.body)).toMatchObject({ previousSessionId: "oldSession" });
+  });
+
+  it("sends no bearer without a previous session", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({
+      status: 201,
+      body: '{"sessionId":"abc123","ingestToken":"tok","dashboardUrl":"http://example.test/s/abc123","maxDurationSeconds":3600}',
+    }));
+
+    await runBash("create_session", { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url });
+
+    expect(server.requests[0]!.headers.authorization).toBeUndefined();
+    expect(JSON.parse(server.requests[0]!.body)).not.toHaveProperty("previousSessionId");
+  });
+});
+
+/**
+ * A stand-in for the real server during a chain: the old session's ingest answers as
+ * configured, the create answers 201 with a new session, the new session's ingest
+ * answers 200.
+ */
+function chainServer(oldSessionId: string, newSessionId: string, oldIngestStatus = 200) {
+  return startServer((req) => {
+    if (req.url === "/api/sessions") {
+      return {
+        status: 201,
+        body: `{"sessionId":"${newSessionId}","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/${newSessionId}","maxDurationSeconds":3600}`,
+      };
+    }
+    if (req.url === `/api/sessions/${oldSessionId}/frames`) {
+      return { status: oldIngestStatus, body: '{"error":"session ended"}' };
+    }
+    return { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' };
+  });
+}
+
+describe("chain_session", () => {
+  const hostEnv = {
+    HOST_NAME: "test-host",
+    HOST_PLATFORM: "darwin",
+    HOST_OS_VERSION: "26.0",
+    HOST_CPU_COUNT: "8",
+    HOST_MEMORY_BYTES: "17179869184",
+  };
+
+  /** The old session as `afk start` leaves it: current, owner.pid, and a queue with one frame. */
+  async function makeOldSession(afkHome: string, serverUrl: string): Promise<string> {
+    const sessionDir = join(afkHome, "sessions", "oldSession");
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(sessionDir, "queue", "0000000007-system.ndjson"), "OLD\n");
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=oldSession\ningestToken=tok-old\nserver=${serverUrl}\ndashboardUrl=http://example.test/s/oldSession\n`,
+    );
+    return sessionDir;
+  }
+
+  const sessionEnv = (afkHome: string, serverUrl: string) => ({
+    ...hostEnv,
+    AFK_HOME: afkHome,
+    AFK_SERVER: serverUrl,
+    SESSION_ID: "oldSession",
+    INGEST_TOKEN: "tok-old",
+    SESSION_DIR: join(afkHome, "sessions", "oldSession"),
+    MAX_DURATION_SECONDS: "3600",
+    SEQ_SYSTEM: "7",
+    SEQ_PROCESSES: "2",
+    SAMPLE_TICK: "7",
+  });
+
+  it("flushes the old queue, creates the successor from it, rewrites current, restarts the sender, and resets sequences", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession");
+    const oldDir = await makeOldSession(afkHome, server.url);
+
+    const { stdout, stderr } = await runBash(
+      [
+        // A sleeping background job stands in for the old sender.
+        "sleep 30 & SENDER_PID=$!; OLD_SENDER=$!",
+        'chain_session > "$AFK_HOME/chain.out"; printf "RC=%d\\n" "$?"',
+        'printf "SESSION_ID=%s\\nINGEST_TOKEN=%s\\nSESSION_DIR=%s\\n" "$SESSION_ID" "$INGEST_TOKEN" "$SESSION_DIR"',
+        'printf "SEQ=%s/%s/%s\\n" "$SEQ_SYSTEM" "$SEQ_PROCESSES" "$SAMPLE_TICK"',
+        'printf "CURRENT_ID=%s\\n" "$(sed -n "s/^sessionId=//p" "$AFK_HOME/current")"',
+        'printf "OLD_SENDER_ALIVE=%s\\n" "$(kill -0 "$OLD_SENDER" 2>/dev/null && echo yes || echo no)"',
+        'printf "NEW_SENDER_ALIVE=%s\\n" "$(kill -0 "$SENDER_PID" 2>/dev/null && echo yes || echo no)"',
+        'printf "OLD_DONE=%s\\n" "$(test -e "$OLD_DIR/done" && echo yes || echo no)"',
+        'printf "URL=%s\\n" "$DASHBOARD_URL"',
+        'printf "PRINTED=%s\\n" "$(tr -d "\\n " < "$AFK_HOME/chain.out")"',
+        'kill "$SENDER_PID"; wait "$SENDER_PID" 2>/dev/null',
+      ].join("\n"),
+      { ...sessionEnv(afkHome, server.url), OLD_DIR: oldDir },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({
+      RC: "0",
+      SESSION_ID: "newSession",
+      INGEST_TOKEN: "tok-new",
+      SESSION_DIR: join(afkHome, "sessions", "newSession"),
+      SEQ: "0/0/0",
+      CURRENT_ID: "newSession",
+      OLD_SENDER_ALIVE: "no",
+      NEW_SENDER_ALIVE: "yes",
+      OLD_DONE: "yes",
+      URL: "http://example.test/s/newSession",
+      // The new URL is printed the way the first one was; no QR off a terminal.
+      PRINTED: "http://example.test/s/newSession",
+    });
+    // The old queue went to the old session before the successor was asked for.
+    expect(server.requests.map((req) => req.url)).toEqual([
+      "/api/sessions/oldSession/frames",
+      "/api/sessions",
+    ]);
+    expect(server.requests[0]!.body).toBe("OLD\n");
+    expect(server.requests[1]!.headers.authorization).toBe("Bearer tok-old");
+    expect(JSON.parse(server.requests[1]!.body)).toMatchObject({ previousSessionId: "oldSession" });
+    expect(await queueFiles(oldDir)).toEqual([]);
+    expect(stderr).toContain("continuing in session newSession");
+  });
+
+  it("does not create the successor while the old queue cannot be flushed, and restarts the old sender", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession", 500);
+    const oldDir = await makeOldSession(afkHome, server.url);
+
+    const { stdout, stderr } = await runBash(
+      [
+        "sleep 30 & SENDER_PID=$!",
+        'chain_session > "$AFK_HOME/chain.out"; printf "RC=%d\\n" "$?"',
+        'printf "SESSION_ID=%s\\n" "$SESSION_ID"',
+        'printf "SENDER_ALIVE=%s\\n" "$(kill -0 "$SENDER_PID" 2>/dev/null && echo yes || echo no)"',
+        'kill "$SENDER_PID"; wait "$SENDER_PID" 2>/dev/null',
+      ].join("\n"),
+      sessionEnv(afkHome, server.url),
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({
+      RC: "1",
+      SESSION_ID: "oldSession",
+      SENDER_ALIVE: "yes",
+    });
+    expect(server.requests.map((req) => req.url)).toEqual(["/api/sessions/oldSession/frames"]);
+    expect(await queueFiles(oldDir)).toEqual(["0000000007-system.ndjson"]);
+  });
+
+  it("goes ahead when the old session already answers 410, since nothing more can reach it", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession", 410);
+    await makeOldSession(afkHome, server.url);
+
+    const { stdout, stderr } = await runBash(
+      [
+        "sleep 30 & SENDER_PID=$!",
+        'chain_session > "$AFK_HOME/chain.out"; printf "RC=%d\\n" "$?"',
+        'printf "SESSION_ID=%s\\n" "$SESSION_ID"',
+        'kill "$SENDER_PID"; wait "$SENDER_PID" 2>/dev/null',
+      ].join("\n"),
+      sessionEnv(afkHome, server.url),
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0", SESSION_ID: "newSession" });
+    expect(server.requests.map((req) => req.url)).toEqual([
+      "/api/sessions/oldSession/frames",
+      "/api/sessions",
+    ]);
+  });
+});
+
+describe("sender_loop when the session is over on the server", () => {
+  const baseEnv = { INGEST_TOKEN: "tok-old", SESSION_ID: "oldSession", AFK_VERSION: "0.1.0" };
+
+  /** A joiner's queue: one run frame under its run directory. */
+  async function makeJoinerQueue(afkHome: string): Promise<string> {
+    const runDir = join(afkHome, "sessions", "oldSession", "runs", "ab12cd34");
+    await mkdir(join(runDir, "queue"), { recursive: true });
+    await writeFile(join(runDir, "queue", "0000000003-run:ab12cd34.ndjson"), "RUN\n");
+    return runDir;
+  }
+
+  it("re-attaches a joiner to the successor named in current and resends its queue there", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession", 410);
+    const runDir = await makeJoinerQueue(afkHome);
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=newSession\ningestToken=tok-new\nserver=${server.url}\ndashboardUrl=http://example.test/s/newSession\n`,
+    );
+
+    const { stdout, stderr } = await runBash(
+      [
+        'echo "$$" > "$AFK_HOME/owner.pid"',
+        'sender_loop 2>"$AFK_HOME/sender.log" & SENDER=$!',
+        // 410, a one second look again at current, the resend, then idle.
+        "sleep 3",
+        'kill "$SENDER"; wait "$SENDER" 2>/dev/null',
+        'cat "$AFK_HOME/sender.log"',
+        'printf "STOP=%s\\n" "$(test -e "$SESSION_DIR/stop" && echo yes || echo no)"',
+      ].join("\n"),
+      {
+        ...baseEnv,
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+        SESSION_DIR: runDir,
+        SESSION_ROLE: "joiner",
+      },
+    );
+
+    expect(stdout, stderr).toContain("session oldSession ended; continuing in session newSession");
+    expect(stdout).toContain("STOP=no");
+    expect(server.requests.map((req) => [req.url, req.headers.authorization])).toEqual([
+      ["/api/sessions/oldSession/frames", "Bearer tok-old"],
+      ["/api/sessions/newSession/frames", "Bearer tok-new"],
+    ]);
+    expect(server.requests[1]!.body).toBe("RUN\n");
+    expect(await queueFiles(runDir)).toEqual([]);
+  });
+
+  it("stops a joiner when current still names the ended session", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession", 410);
+    const runDir = await makeJoinerQueue(afkHome);
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=oldSession\ningestToken=tok-old\nserver=${server.url}\ndashboardUrl=http://example.test/s/oldSession\n`,
+    );
+
+    const { code, stderr } = await runBash('echo "$$" > "$AFK_HOME/owner.pid"; sender_loop', {
+      ...baseEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      SESSION_DIR: runDir,
+      SESSION_ROLE: "joiner",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests.map((req) => req.url)).toEqual(["/api/sessions/oldSession/frames"]);
+    expect(await exists(join(runDir, "stop"))).toBe(true);
+    expect(await queueFiles(runDir)).toEqual(["0000000003-run:ab12cd34.ndjson"]);
+  });
+
+  it("leaves a gone marker for a chaining owner and a stop marker otherwise", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession", 410);
+    const sessionDir = join(afkHome, "sessions", "oldSession");
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "SYS\n");
+    const env = { ...baseEnv, AFK_HOME: afkHome, AFK_SERVER: server.url, SESSION_DIR: sessionDir };
+
+    const chaining = await runBash("sender_loop", { ...env, SESSION_CHAINING: "1" });
+    const plain = await runBash('rm -f "$SESSION_DIR/gone"; sender_loop', env);
+
+    expect(chaining.code, chaining.stderr).toBe(0);
+    expect(plain.code, plain.stderr).toBe(0);
+    expect(server.requests).toHaveLength(2);
+    expect(await exists(join(sessionDir, "gone"))).toBe(false);
+    expect(await exists(join(sessionDir, "stop"))).toBe(true);
   });
 });
 
@@ -1163,6 +1600,92 @@ describe("afk stop", () => {
     expect(code).toBe(1);
     expect(stderr).toContain("no session running");
   });
+});
+
+describe("afk start with a session already running", () => {
+  const created =
+    '{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/newSession","maxDurationSeconds":3600}';
+
+  /** A server with one active session and room for another; frames and ends are accepted. */
+  function startGuardServer(): Promise<TestServer> {
+    return startServer((req) => {
+      if (req.url === "/api/sessions" && req.method === "POST") {
+        return { status: 201, body: created };
+      }
+      if (req.url === "/api/sessions/oldSession") {
+        return {
+          status: 200,
+          body: '{"status":"active","maxDurationSeconds":3600,"streamCount":1,"maxStreams":10}',
+        };
+      }
+      return { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' };
+    });
+  }
+
+  async function writeCurrent(afkHome: string, serverUrl: string): Promise<void> {
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=oldSession\ningestToken=tok-old\nserver=${serverUrl}\ndashboardUrl=http://example.test/s/oldSession\n`,
+    );
+  }
+
+  // check_platform runs first and only passes on macOS.
+  it.skipIf(process.platform !== "darwin")(
+    "refuses with the running session's URL and the hint, exiting 1 without creating anything",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startGuardServer();
+      await writeCurrent(afkHome, server.url);
+
+      const { stdout, stderr, code } = await runBash(
+        'echo "$$" > "$AFK_HOME/owner.pid"; main start --no-qr',
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+      );
+
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("already running on this machine");
+      expect(stderr).toContain("http://example.test/s/oldSession");
+      expect(stderr).toContain("afk start --force");
+      expect(server.requests.map((req) => req.url)).toEqual(["/api/sessions/oldSession"]);
+      expect(await exists(join(afkHome, "current"))).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "--force ends the old owner, clears its files, and starts a new session on the given server",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startGuardServer();
+      await writeCurrent(afkHome, server.url);
+
+      // A sleeping background job stands in for the old owner; it dies of the SIGTERM
+      // without cleaning up, the way a crashed owner would.
+      const { stdout, stderr } = await runBash(
+        [
+          'sleep 30 & OWNER=$!; echo "$OWNER" > "$AFK_HOME/owner.pid"',
+          'main start --force --no-qr > "$AFK_HOME/out.txt" 2> "$AFK_HOME/err.txt" & START=$!',
+          'for _ in $(seq 1 40); do grep -q "/s/newSession" "$AFK_HOME/out.txt" 2>/dev/null && break; sleep 0.1; done',
+          'kill -TERM "$START"; wait "$START"; printf "START_RC=%d\\n" "$?"',
+          'wait "$OWNER" 2>/dev/null; printf "OWNER_RC=%d\\n" "$?"',
+          'printf "URL=%s\\n" "$(grep -o "http://example.test/s/[A-Za-z]*" "$AFK_HOME/out.txt")"',
+          'printf "TAKEOVER=%s\\n" "$(grep -c "taking over" "$AFK_HOME/err.txt")"',
+        ].join("\n"),
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+      );
+
+      expect(parseKeyValueLines(stdout), stderr).toEqual({
+        START_RC: "0",
+        OWNER_RC: "143",
+        URL: "http://example.test/s/newSession",
+        TAKEOVER: "1",
+      });
+      const urls = server.requests.map((req) => req.url);
+      expect(urls.slice(0, 2)).toEqual(["/api/sessions/oldSession", "/api/sessions"]);
+      expect(urls.at(-1)).toBe("/api/sessions/newSession/end");
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+    },
+  );
 });
 
 describe("afk with no state", () => {

@@ -13,6 +13,7 @@ import { MemorySessionStorage } from "../store/storage.ts";
 import { MAX_CREATE_BODY_BYTES } from "./sessions.ts";
 import {
   CLIENT_VERSION_HEADER,
+  chainTestSession,
   createTestSession,
   endTestSession,
   makeAppConfig,
@@ -95,6 +96,125 @@ describe("POST /api/sessions", () => {
 
     expect(res.status).toBe(413);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("exceeds") });
+  });
+});
+
+describe("POST /api/sessions with previousSessionId (chaining)", () => {
+  it("creates the successor, ends the previous session, and links the two summaries both ways", async () => {
+    const app = buildApp();
+    const first = await createTestSession(app);
+    await postFrames(app, first.sessionId, first.ingestToken, [makeSystemFrame(0)]);
+
+    const { res, sessionId, ingestToken } = await chainTestSession(
+      app,
+      first.sessionId,
+      first.ingestToken,
+    );
+
+    expect(res.status).toBe(201);
+    expect(sessionId).not.toBe(first.sessionId);
+    expect(ingestToken).not.toBe(first.ingestToken);
+    const previous = await (await app.request(`/api/sessions/${first.sessionId}`)).json();
+    const next = await (await app.request(`/api/sessions/${sessionId}`)).json();
+    expect(previous).toMatchObject({
+      status: "ended",
+      endedAt: expect.any(Number),
+      previousSessionId: null,
+      nextSessionId: sessionId,
+    });
+    expect(next).toMatchObject({
+      status: "active",
+      previousSessionId: first.sessionId,
+      nextSessionId: null,
+    });
+  });
+
+  it("rejects frames for the previous session with 410 and accepts them for the successor", async () => {
+    const app = buildApp();
+    const first = await createTestSession(app);
+    const next = await chainTestSession(app, first.sessionId, first.ingestToken);
+
+    const old = await postFrames(app, first.sessionId, first.ingestToken, [makeSystemFrame(0)]);
+    const fresh = await postFrames(app, next.sessionId, next.ingestToken, [makeSystemFrame(0)]);
+
+    expect(old.status).toBe(410);
+    expect(fresh.status).toBe(200);
+  });
+
+  it("returns 401 when the bearer is not the previous session's ingest token", async () => {
+    const app = buildApp();
+    const first = await createTestSession(app);
+
+    const { res } = await chainTestSession(app, first.sessionId, "wrong-token");
+
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toContain("previous session");
+    expect(await (await app.request(`/api/sessions/${first.sessionId}`)).json()).toMatchObject({
+      status: "active",
+      nextSessionId: null,
+    });
+  });
+
+  it("returns 401 when the bearer is missing altogether", async () => {
+    const app = buildApp();
+    const first = await createTestSession(app);
+
+    const { res } = await createTestSession(app, { previousSessionId: first.sessionId });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for an unknown previous session", async () => {
+    const app = buildApp();
+
+    const { res } = await chainTestSession(app, "does-not-exist", "whatever");
+
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 409 naming the successor when the previous session was already continued", async () => {
+    const app = buildApp();
+    const first = await createTestSession(app);
+    const next = await chainTestSession(app, first.sessionId, first.ingestToken);
+
+    const { res } = await chainTestSession(app, first.sessionId, first.ingestToken);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ details: { nextSessionId: next.sessionId } });
+  });
+
+  it("is admitted at capacity because it replaces the active session it continues", async () => {
+    const app = buildApp({
+      maxActiveSessions: 1,
+      maxStreamsPerSession: 10,
+      maxFramesPerSession: 15_000,
+    });
+    const first = await createTestSession(app);
+    expect((await createTestSession(app)).res.status).toBe(503);
+
+    const { res, sessionId } = await chainTestSession(app, first.sessionId, first.ingestToken);
+
+    expect(res.status).toBe(201);
+    expect(await (await app.request(`/api/sessions/${sessionId}`)).json()).toMatchObject({
+      status: "active",
+      previousSessionId: first.sessionId,
+    });
+  });
+
+  it("still returns 503 at capacity when the previous session is already over", async () => {
+    const app = buildApp({
+      maxActiveSessions: 1,
+      maxStreamsPerSession: 10,
+      maxFramesPerSession: 15_000,
+    });
+    const first = await createTestSession(app);
+    await endTestSession(app, first.sessionId, first.ingestToken);
+    const blocker = await createTestSession(app);
+    expect(blocker.res.status).toBe(201);
+
+    const { res } = await chainTestSession(app, first.sessionId, first.ingestToken);
+
+    expect(res.status).toBe(503);
   });
 });
 
@@ -209,6 +329,8 @@ describe("GET /api/sessions/:id", () => {
       status: "active",
       streamCount: 0,
       maxStreams: 5,
+      previousSessionId: null,
+      nextSessionId: null,
     });
   });
 

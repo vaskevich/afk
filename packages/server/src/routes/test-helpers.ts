@@ -44,7 +44,12 @@ export function makeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 /** Creates a session through the API with boring defaults; returns its id, token, and the raw response. */
 export async function createTestSession(
   app: App,
-  overrides: Partial<{ protocolVersion: number; clientVersion: string; host: HostInfo }> = {},
+  overrides: Partial<{
+    protocolVersion: number;
+    clientVersion: string;
+    host: HostInfo;
+    previousSessionId: string;
+  }> = {},
   headers: Record<string, string> = CLIENT_VERSION_HEADER,
 ): Promise<{ res: Response; sessionId: string; ingestToken: string }> {
   const res = await app.request("/api/sessions", {
@@ -59,6 +64,23 @@ export async function createTestSession(
   });
   const body = (await res.clone().json()) as { sessionId?: string; ingestToken?: string };
   return { res, sessionId: body.sessionId ?? "", ingestToken: body.ingestToken ?? "" };
+}
+
+/**
+ * Creates a session that continues `previousSessionId`, the way the client chains past
+ * the cap: `previousSessionId` in the body and the previous session's ingest token as
+ * the bearer.
+ */
+export async function chainTestSession(
+  app: App,
+  previousSessionId: string,
+  previousIngestToken: string,
+): Promise<{ res: Response; sessionId: string; ingestToken: string }> {
+  return createTestSession(
+    app,
+    { previousSessionId },
+    { ...CLIENT_VERSION_HEADER, authorization: `Bearer ${previousIngestToken}` },
+  );
 }
 
 /** Posts a raw NDJSON body with the session's bearer token. */

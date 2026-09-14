@@ -63,7 +63,14 @@ describe("event lists", () => {
   });
 
   it("StatusBanner shows the tail beside the event button, not inside it", () => {
-    render(<StatusBanner status="ended" events={[failed]} onSelectEvent={() => {}} />);
+    render(
+      <StatusBanner
+        status="ended"
+        events={[failed]}
+        nextSessionId={null}
+        onSelectEvent={() => {}}
+      />,
+    );
 
     expect(preBlocks()).toEqual(["fatal: boom"]);
     expect(document.querySelector("button details")).toBeNull();
