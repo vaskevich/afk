@@ -1202,6 +1202,44 @@ describe("print_qr", () => {
     });
   });
 
+  // Regression: the QR check once used grep on a partial UTF-8 byte pair, which macOS
+  // grep rejects with "illegal byte sequence" under a UTF-8 locale (the user's shell).
+  it("prints the QR under a UTF-8 locale too", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
+
+    const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+      ...sessionEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      LANG: "en_US.UTF-8",
+      LC_ALL: "en_US.UTF-8",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stderr).not.toContain("illegal byte sequence");
+    expect(stdout).toBe(QR_TEXT);
+  });
+
+  // Regression: an older server answered the QR path with the dashboard's index.html and
+  // a 200 from its single-page fallback, and the client printed the whole page.
+  it("prints nothing when a 200 response is not a QR code", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({
+      status: 200,
+      body: "<!doctype html>\n<html><body>afk dashboard</body></html>\n",
+    }));
+
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+      ...sessionEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toBe("");
+  });
+
   it("prints nothing and asks the server for nothing with AFK_NO_QR=1", async () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));

@@ -63,6 +63,9 @@ server can hold port 4141 and silently serve old code: kill it with
   `middleware/`, wiring only in `app.ts`.
 - **Commits**: small and logical, as you go, not one at the end. Stage specific paths,
   never `git add -A`, because subagents may be working in the tree concurrently.
+- **Every bug fix ships with a regression test** that fails without the fix, in the
+  suite that would have caught it (a locale-specific shell bug gets a CLI test run under
+  that locale; a server response bug gets a route test). Name it for the symptom.
 - **Prettier and ESLint** are the formatting and style authority; run them before
   committing.
 - Leave `TODO(topic):` comments for deferred abstractions and mirror anything
