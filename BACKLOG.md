@@ -4,6 +4,7 @@ Working list of things deliberately deferred to get to an MVP. Roughly ordered b
 priority within each section. Migrate to a proper tracker if it outgrows a file.
 
 ## Next up (MVP path)
+
 - [ ] Server: persist frames to disk (append-only NDJSON per session) instead of memory
 - [ ] Server: history endpoint + SSE stream with `Last-Event-ID` catch-up
 - [ ] Web: Vite + React + TanStack scaffold, dark theme, live status page
@@ -15,12 +16,14 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [ ] Server rules for runs: exited non-zero, no output for N seconds
 
 ## Storage & retention
+
 - [ ] Store session files in S3 with a lifecycle expiration policy (7 days)
 - [ ] Local sweeper for expired sessions until S3 lands
 - [ ] Persist only what the dashboard needs (truncate process lists, drop unused fields)
 - [ ] Downsample or window frames for the browser if sessions ever exceed a few MB compressed
 
 ## Sessions
+
 - [ ] Auto-chain a new session when the 1 hour cap is hit, print the new URL
 - [ ] Mark a session ended after the client goes silent for N minutes
 - [ ] Multiple processes joining one session: only the first runs the long-lived collectors
@@ -28,6 +31,7 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [ ] Sampling drift: subtract collector runtime from the sleep
 
 ## Hardening (server)
+
 - [ ] Minimum client version check using the `X-Afk-Client` header
 - [ ] Security headers (Hono `secureHeaders`)
 - [ ] Request body size limit on ingest
@@ -36,6 +40,7 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [ ] Decide what to do with batches the server rejects (currently parked in `rejected/`)
 
 ## Hardening (client)
+
 - [ ] Spool rotate race: no `flock` on macOS; currently a 100 ms pause after rename
 - [ ] Verify behavior across sleep/wake and wifi loss end-to-end (design says it retries; test it)
 - [ ] Clock skew between client `timestamp` and server `receivedAt`
@@ -43,11 +48,13 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [ ] Plugin collectors: any executable that prints JSON
 
 ## Testing
+
 - [ ] vitest for shared schemas and server routes
 - [ ] bats tests for the bash client (json helpers, collector output validates against the schema)
 - [ ] Contract test: run the real `afk` collector output through the Zod schema
 
 ## Deployment
+
 - [ ] Lightsail, cheapest instance; Caddy for TLS; Route53 `afk.osv.im` record via existing terraform
 - [ ] Serve the built dashboard from the Node server
 - [ ] Installer one-liner that downloads `cli/afk`
