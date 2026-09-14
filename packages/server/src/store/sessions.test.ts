@@ -9,9 +9,11 @@ import {
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS, type StoredFrame } from "@afk/shared";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
 import {
-  EVICT_ENDED_AFTER_MS,
+  DEFAULT_STORE_OPTIONS,
   SessionStore,
   TooManyStreamsError,
+  sessionEndMs,
+  sessionStatus,
   type SessionEvent,
 } from "./sessions.ts";
 
@@ -78,6 +80,26 @@ describe("SessionStore", () => {
         clientVersion: "0.1.0",
       });
     });
+
+    it("stamps the configured max duration on every new session", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage, { maxSessionDurationSeconds: 120 });
+
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      expect(session.maxDurationSeconds).toBe(120);
+      await expect(storage.getSession(session.sessionId)).resolves.toMatchObject({
+        maxDurationSeconds: 120,
+      });
+    });
+
+    it("uses the shared default max duration when none is configured", async () => {
+      const store = new SessionStore(new MemorySessionStorage());
+
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      expect(session.maxDurationSeconds).toBe(DEFAULT_MAX_SESSION_DURATION_SECONDS);
+    });
   });
 
   describe("get", () => {
@@ -129,6 +151,29 @@ describe("SessionStore", () => {
       const found = await store.get("doesNotExist");
 
       expect(found).toBeUndefined();
+    });
+  });
+
+  describe("evict", () => {
+    it("drops the cached copy so the next get reads storage again", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const created = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const getSessionSpy = vi.spyOn(storage, "getSession");
+
+      const wasCached = store.evict(created.sessionId);
+      const reloaded = await store.get(created.sessionId);
+
+      expect(wasCached).toBe(true);
+      expect(getSessionSpy).toHaveBeenCalledWith(created.sessionId);
+      expect(reloaded).not.toBe(created);
+      expect(reloaded?.sessionId).toBe(created.sessionId);
+    });
+
+    it("returns false for a session that was not in memory", async () => {
+      const store = new SessionStore(new MemorySessionStorage());
+
+      expect(store.evict("neverLoaded")).toBe(false);
     });
   });
 
@@ -187,8 +232,7 @@ describe("SessionStore", () => {
 
     it("throws TooManyStreamsError when a batch would add more streams than the session's limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        maxActiveSessions: 20,
-        maxStreamsPerSession: 1,
+        limits: { maxActiveSessions: 20, maxStreamsPerSession: 1 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
@@ -275,8 +319,7 @@ describe("SessionStore", () => {
 
     it("summarizes the stream count and the session's stream limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        maxActiveSessions: 20,
-        maxStreamsPerSession: 5,
+        limits: { maxActiveSessions: 20, maxStreamsPerSession: 5 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
@@ -298,8 +341,7 @@ describe("SessionStore", () => {
 
     it("hasCapacity is false once active sessions reach the configured limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        maxActiveSessions: 1,
-        maxStreamsPerSession: 10,
+        limits: { maxActiveSessions: 1, maxStreamsPerSession: 10 },
       });
 
       await store.create({ host: makeHost(), clientVersion: "0.1.0" });
@@ -309,8 +351,7 @@ describe("SessionStore", () => {
 
     it("hasCapacity is true while active sessions are under the limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        maxActiveSessions: 2,
-        maxStreamsPerSession: 10,
+        limits: { maxActiveSessions: 2, maxStreamsPerSession: 10 },
       });
 
       await store.create({ host: makeHost(), clientVersion: "0.1.0" });
@@ -320,8 +361,7 @@ describe("SessionStore", () => {
 
     it("reports session and frame totals", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        maxActiveSessions: 5,
-        maxStreamsPerSession: 10,
+        limits: { maxActiveSessions: 5, maxStreamsPerSession: 10 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
@@ -357,17 +397,30 @@ describe("SessionStore", () => {
       ]);
     });
 
-    it("evicts an ended session with no listeners after EVICT_ENDED_AFTER_MS", async () => {
+    it("evicts an ended session with no listeners after the configured idle window", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0_MS);
+      const store = new SessionStore(new MemorySessionStorage(), { evictEndedAfterMs: 1_000 });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.end(session);
+
+      vi.setSystemTime(T0_MS + 1_001);
+      store.tick(Date.now());
+
+      expect(store.stats().sessionsInMemory).toBe(0);
+    });
+
+    it("keeps an ended session in memory until the default idle window has passed", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage());
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.end(session);
 
-      vi.setSystemTime(T0_MS + EVICT_ENDED_AFTER_MS + 1);
+      vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.evictEndedAfterMs);
       store.tick(Date.now());
 
-      expect(store.stats().sessionsInMemory).toBe(0);
+      expect(store.stats().sessionsInMemory).toBe(1);
     });
 
     it("keeps an ended session with a subscriber past the eviction window", async () => {
@@ -378,7 +431,7 @@ describe("SessionStore", () => {
       store.subscribe(session, () => {});
       await store.end(session);
 
-      vi.setSystemTime(T0_MS + EVICT_ENDED_AFTER_MS + 1);
+      vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.evictEndedAfterMs + 1);
       store.tick(Date.now());
 
       expect(store.stats().sessionsInMemory).toBe(1);
@@ -397,5 +450,31 @@ describe("SessionStore", () => {
 
       expect(received).toEqual([]);
     });
+  });
+});
+
+describe("sessionStatus and sessionEndMs", () => {
+  const record: SessionRecord = {
+    sessionId: "record1",
+    ingestToken: "token1",
+    host: makeHost(),
+    clientVersion: "0.1.0",
+    startedAt: T0_MS,
+    endedAt: null,
+    maxDurationSeconds: 60,
+  };
+
+  it("reports active up to the cap and expired one millisecond past it", () => {
+    expect(sessionStatus(record, T0_MS + 60_000)).toBe("active");
+    expect(sessionStatus(record, T0_MS + 60_001)).toBe("expired");
+  });
+
+  it("reports ended whenever endedAt is set, even before the cap", () => {
+    expect(sessionStatus({ ...record, endedAt: T0_MS + 5_000 }, T0_MS + 6_000)).toBe("ended");
+  });
+
+  it("ends at endedAt when set, otherwise at the cap", () => {
+    expect(sessionEndMs({ ...record, endedAt: T0_MS + 5_000 })).toBe(T0_MS + 5_000);
+    expect(sessionEndMs(record)).toBe(T0_MS + 60_000);
   });
 });

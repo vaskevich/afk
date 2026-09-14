@@ -24,8 +24,8 @@ export type SessionRecord = z.infer<typeof SessionRecord>;
  * file append on disk or one new object per batch in a bucket; `readFrames` returns them
  * concatenated in order either way.
  *
- * TODO(retention): a sweeper that deletes sessions older than 7 days via listSessionIds/getSession/deleteSession.
- * TODO(storage): S3-compatible implementation (Lightsail object storage, real S3, MinIO).
+ * Retention is `store/sweeper.ts`, built on listSessionIds/getSession/deleteSession so it
+ * works the same against every backend.
  */
 export interface SessionStorage {
   /** Creates or replaces the session record (called on create and on end). */
