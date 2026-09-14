@@ -254,8 +254,11 @@ Two process-level ones:
 
 - **Logging** (`log/logger.ts`). One line per event, `<ISO timestamp> <level> <message>
 key=value ...`, threshold from `AFK_LOG_LEVEL` (default `info`). `info` is one line
-  per accepted batch, session lifecycle step, anomaly event, and sweeper run; `debug`
-  adds one line per frame. Session ids appear at `info` on purpose: an operator needs
+  per accepted batch, session lifecycle step, anomaly event, sweeper run, session loaded
+  from storage (`frames=`, `storageMs=`, `ms=`), and slow request (`SLOW_REQUEST_MS`, one
+  second, in `middleware/request-timing.ts`: `method=`, `path=`, `status=`, `ms=`, the
+  time to produce the response, which for the SSE route is its headers); `debug` adds
+  one line per request and per frame. Session ids appear at `info` on purpose: an operator needs
   one to find a session, and the alternative (hashing or omitting them) would make the
   logs useless for exactly the cases they exist for. The consequence is that the logs
   identify sessions for as long as they are kept, and that retention is Lightsail's
@@ -384,6 +387,22 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** A cold dashboard load costs round trips, not bytes. The first visit to
+  `/s/DbTEUHkKfXpo7biKEmk7XC` after the cache had let the session go took 40 s on the
+  hosted instance, every reload after it milliseconds: the session was 4,320 frames in
+  2,798 bucket objects (one per ingested batch, one batch a second), and `readFrames`
+  fetched them one after another at ~14 ms each. The container log had nothing (read
+  routes logged nothing) and the only trace was a CPU and memory bump in the Lightsail
+  metrics. Fixed within the layout: `readFrames` fetches `READ_CONCURRENCY` (16) objects
+  at a time (the same session loads in about 3 s in a reproduction against a fake bucket
+  with 14 ms per request), the bucket client has request and connection timeouts and two
+  attempts, and both a load from storage and any request over a second are logged.
+  Deliberately not done here: changing the layout. Compacting a session's `frames/`
+  objects into one `frames.ndjson` when it ends would make a cold load a single GET, but
+  it is a new storage write from `SessionStore.end` and the sweeper, needs the read path
+  to handle both layouts and a half-finished compaction, and touches the single-writer
+  assumptions in the SRE review's data item, so it is a backlog item under "Storage &
+  retention" rather than part of the fix.
 - **2026-09-14** The image runs compiled JavaScript; `tsx` is dev-only. `pnpm build`
   compiles `@afk/shared` and `@afk/server` with `tsc` (`rewriteRelativeImportExtensions`
   turns the `.ts` imports into `.js`), and the runtime stage carries no TypeScript
