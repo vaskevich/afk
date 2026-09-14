@@ -1,4 +1,6 @@
 import { S3Client } from "@aws-sdk/client-s3";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { T0_MS, makeHost, makeStoredFrames, makeSystemFrame } from "@afk/shared/testing";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
@@ -241,5 +243,32 @@ describe("S3SessionStorage", () => {
 
     expect([...objects.keys()].some((key) => key.startsWith("sessions/sessionA/"))).toBe(false);
     await expect(storage.getSession("sessionB")).resolves.not.toBeNull();
+  });
+
+  it("gives up on a bucket that accepts the connection but never answers", async () => {
+    // A real loopback socket, not the fake: the timeout lives in the SDK's HTTP
+    // handler, below anything a stubbed `send` would exercise.
+    const server = createServer(() => {
+      // Never respond.
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const storage = new S3SessionStorage({
+      bucket: "test-bucket",
+      region: "us-east-1",
+      endpoint: `http://127.0.0.1:${port}`,
+      accessKeyId: "key",
+      secretAccessKey: "secret",
+      requestTimeoutMs: 50,
+    });
+
+    try {
+      await expect(storage.getSession("session1")).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

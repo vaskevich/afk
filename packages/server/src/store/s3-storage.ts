@@ -29,6 +29,23 @@ const DELETE_BATCH_SIZE = 1000;
  */
 export const READ_CONCURRENCY = 16;
 
+/**
+ * How long one bucket request may take before the SDK gives up on it, and how long
+ * opening its connection may take. The SDK's own defaults are no request timeout at
+ * all, so a hung request would hold its caller forever: an ingest write blocks every
+ * later batch of that session (`writeQueue`), a read blocks the coalesced load every
+ * dashboard visitor is waiting on. Objects are at most a batch (~130 KB), so anything
+ * past a few seconds is a fault, not a slow transfer.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+export const DEFAULT_CONNECTION_TIMEOUT_MS = 3_000;
+/**
+ * Attempts per request, including the first. The SDK's default is three; two keeps a
+ * dead bucket from tying a caller up for three timeouts when the client will retry
+ * the whole batch anyway.
+ */
+export const MAX_ATTEMPTS = 2;
+
 export interface S3StorageOptions {
   bucket: string;
   region: string;
@@ -37,6 +54,9 @@ export interface S3StorageOptions {
   endpoint?: string;
   accessKeyId: string;
   secretAccessKey: string;
+  /** Overrides for tests; production runs on the defaults above. */
+  requestTimeoutMs?: number;
+  connectionTimeoutMs?: number;
 }
 
 /**
@@ -70,6 +90,15 @@ export class S3SessionStorage implements SessionStorage {
         accessKeyId: options.accessKeyId,
         secretAccessKey: options.secretAccessKey,
       },
+      // A plain options object here becomes the SDK's own NodeHttpHandler, so no
+      // dependency on @smithy/node-http-handler is needed for the timeouts. Without
+      // `throwOnRequestTimeout` the request timeout only prints a warning.
+      requestHandler: {
+        requestTimeout: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+        throwOnRequestTimeout: true,
+        connectionTimeout: options.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS,
+      },
+      maxAttempts: MAX_ATTEMPTS,
     });
   }
 
