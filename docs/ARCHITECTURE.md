@@ -308,7 +308,10 @@ storage; the server is one Docker image that builds the dashboard and runs Node.
 `AFK_SERVER` variable points the client at any other server, including one on a
 private network, and a client installed with `curl -fsSL <origin>/install | sh`
 defaults to the server it came from. See `infra/` and the Deployment section of
-BACKLOG.md.
+BACKLOG.md. The Lightsail front end was confirmed to pass `GET
+/api/sessions/:id/stream` through unbuffered (2026-09-15): a live multi-minute stream
+against the hosted server delivered frames at ~1/s with 15 s keepalives, and both a
+`Last-Event-ID` reconnect and streaming an ended session behaved correctly.
 
 ## Decision log
 
