@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { CreateSessionRequest } from "@afk/shared";
 import type { CreateSessionResponse } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
-import { errorResponse } from "../errors.ts";
+import { errorResponse } from "../http/errors.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
 
 /** Session lifecycle: create, inspect, end. Mounted at /api/sessions. */

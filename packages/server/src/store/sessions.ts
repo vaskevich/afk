@@ -1,6 +1,6 @@
 import type { Frame, HostInfo, SessionSummary, SessionStatus } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
-import { randomId, randomToken } from "./ids.ts";
+import { randomId, randomToken } from "../utils/ids.ts";
 
 export interface StoredFrame {
   frame: Frame;

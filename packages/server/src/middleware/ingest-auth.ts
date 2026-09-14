@@ -1,6 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import type { AppDeps, AppEnv } from "../env.ts";
-import { errorResponse } from "../errors.ts";
+import { errorResponse } from "../http/errors.ts";
 
 /**
  * Resolves `:sessionId`, checks the bearer ingest token, and rejects sessions that are

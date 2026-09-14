@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import type { IngestResponse } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
-import { errorResponse } from "../errors.ts";
+import { errorResponse } from "../http/errors.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
-import { parseFrames } from "../ndjson.ts";
-import { describeFrame } from "../describe.ts";
+import { parseFrames } from "../utils/ndjson.ts";
+import { describeFrame } from "../log/describe.ts";
 
 /** Frame ingest. Mounted at /api/sessions. Body is newline-delimited JSON, one frame per line. */
 export function frameRoutes(deps: AppDeps) {

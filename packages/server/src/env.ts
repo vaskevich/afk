@@ -1,4 +1,4 @@
-import type { Session, SessionStore } from "./sessions.ts";
+import type { Session, SessionStore } from "./store/sessions.ts";
 
 export interface AppConfig {
   /** Public origin used to build dashboard URLs, e.g. https://afk.osv.im */
