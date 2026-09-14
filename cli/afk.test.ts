@@ -676,14 +676,12 @@ describe("print_qr", () => {
 
   it("prints nothing and still succeeds when the server cannot be reached", async () => {
     const afkHome = await makeTempDir();
-    const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
-    // Closing the server leaves its port refusing connections.
-    await server.close();
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
       ...sessionEnv,
       AFK_HOME: afkHome,
-      AFK_SERVER: server.url,
+      // Port 1 needs root to bind and nothing listens there: the connection is refused.
+      AFK_SERVER: "http://127.0.0.1:1",
     });
 
     expect(code).toBe(0);
