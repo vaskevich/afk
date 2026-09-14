@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "rewriteRelativeImportExtensions": true,
+    "customConditions": ["afk-compiled"]
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/routes/test-helpers.ts"]
+}
