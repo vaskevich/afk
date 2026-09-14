@@ -810,6 +810,33 @@ describe("enforce_spool_cap", () => {
       ]);
     },
   );
+
+  // Regression: dropped frames vanished without a trace once the log line had gone by.
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "keeps a running count of what it dropped in the session's dropped file across enforcements",
+    async () => {
+      const sessionDir = await makeOverfullQueue();
+
+      // 200 bytes over a 100-byte cap drops three 40-byte frames; two more files
+      // (160 bytes) drop another two.
+      const { code, stderr } = await runBash(
+        [
+          "enforce_spool_cap",
+          'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000006-system.ndjson"',
+          'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000007-system.ndjson"',
+          "enforce_spool_cap",
+        ].join("\n"),
+        { SESSION_DIR: sessionDir, AFK_SPOOL_MAX_BYTES: "100" },
+      );
+
+      expect(code, stderr).toBe(0);
+      expect(await readFile(join(sessionDir, "dropped"), "utf8")).toBe("5 200\n");
+      expect(stderr).toContain(
+        "dropped the oldest 3 frames (120 bytes), 3 frames since the session started",
+      );
+    },
+  );
 });
 
 describe("system_sampler_loop", () => {
@@ -1945,11 +1972,33 @@ describe("afk status", () => {
 
       expect(code, stderr).toBe(0);
       expect(stdout).toMatch(/\nqueue\s+3 frames, 70 bytes\n/);
+      expect(stdout).not.toContain("dropped");
       expect(stdout.split("\n").filter((line) => line.startsWith("run "))).toEqual([
         expect.stringMatching(/^run\s+pid [0-9]+, running: npm test -- --watch$/),
       ]);
     },
   );
+
+  it("shows what the queue cap dropped, the owner's and the joined runs' together", async () => {
+    const afkHome = await makeTempDir();
+    const sessionDir = join(afkHome, "sessions", "abc123");
+    await mkdir(join(sessionDir, "runs", "ab12cd34", "queue"), { recursive: true });
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(sessionDir, "dropped"), "5 200\n");
+    await writeFile(join(sessionDir, "runs", "ab12cd34", "dropped"), "2 80\n");
+    await writeFile(join(afkHome, "current"), "sessionId=abc123\ningestToken=tok-abc\n");
+
+    const { stdout, stderr, code } = await runBash(
+      'echo "$$" > "$AFK_HOME/owner.pid"; main status',
+      {
+        AFK_HOME: afkHome,
+        AFK_SPOOL_MAX_BYTES: "1000",
+      },
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toMatch(/\ndropped\s+7 frames, 280 bytes \(queue over 1000 bytes/);
+  });
 });
 
 describe("afk stop", () => {

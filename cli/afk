@@ -20,7 +20,8 @@
 #                        otherwise starts one (with machine telemetry) for the
 #                        lifetime of the command
 #   afk status           show the session running on this machine, its queue (the
-#                        joined runs' included), and the runs still going
+#                        joined runs' included), what the queue cap dropped, and the
+#                        runs still going
 #   afk stop             end that session (asks the `afk start` process to finish)
 #   afk qr               print the current session's dashboard URL as a QR code again
 #   afk version
@@ -60,7 +61,9 @@
 #   sessions/<id>/queue/<seq>-<stream>.ndjson
 #                                  one sampled frame per file, waiting to be sent; a
 #                                  batch is the oldest files concatenated, deleted on 2xx
-#   sessions/<id>/done             written when the session ended (or was continued by
+#   sessions/<id>/dropped          how many frames (and bytes) the queue cap threw away
+#                                  during an outage; `afk status` shows it
+#   sessions/<id>/done            written when the session ended (or was continued by
 #                                  a successor); `afk start` removes session
 #                                  directories a day after this (two days after their
 #                                  last change if it is missing)
@@ -972,14 +975,16 @@ send_oldest_batch() {
 
 # Drops the oldest queued frames until the queue is back under SPOOL_MAX_BYTES. Only
 # an outage grows the queue, so the sender calls this after every failed send. Frames
-# dropped here are gone for good; the log line is rate limited because a long outage
-# would otherwise print one per retry.
+# dropped here are gone for good, so the session keeps a running count of them in
+# `dropped` (frames and bytes, for `afk status`); the log line is rate limited because
+# a long outage would otherwise print one per retry, and carries the running total.
 SPOOL_DROPPED_BYTES=0
 SPOOL_DROPPED_FRAMES=0
 SPOOL_DROP_LOGGED_AT=0
+DROPPED_RECORD_NAME=dropped
 
 enforce_spool_cap() {
-  local total f size now
+  local total f size now frames=0 bytes=0
   total=$(queue_bytes)
   [ "$total" -gt "$SPOOL_MAX_BYTES" ] || return 0
   for f in "$SESSION_DIR"/queue/*.ndjson; do
@@ -988,16 +993,34 @@ enforce_spool_cap() {
     size=$(file_size "$f")
     rm -f "$f"
     total=$((total - size))
-    SPOOL_DROPPED_BYTES=$((SPOOL_DROPPED_BYTES + size))
-    SPOOL_DROPPED_FRAMES=$((SPOOL_DROPPED_FRAMES + 1))
+    frames=$((frames + 1))
+    bytes=$((bytes + size))
   done
+  SPOOL_DROPPED_FRAMES=$((SPOOL_DROPPED_FRAMES + frames))
+  SPOOL_DROPPED_BYTES=$((SPOOL_DROPPED_BYTES + bytes))
+  record_dropped "$SESSION_DIR" "$frames" "$bytes"
   now=$(now_seconds)
   if [ $((now - SPOOL_DROP_LOGGED_AT)) -ge "$SPOOL_DROP_LOG_INTERVAL_SECONDS" ]; then
-    log "queue is over ${SPOOL_MAX_BYTES} bytes; dropped the oldest ${SPOOL_DROPPED_FRAMES} frames (${SPOOL_DROPPED_BYTES} bytes)"
+    log "queue is over ${SPOOL_MAX_BYTES} bytes; dropped the oldest ${SPOOL_DROPPED_FRAMES} frames (${SPOOL_DROPPED_BYTES} bytes), $(dropped_frames "$SESSION_DIR") frames since the session started"
     SPOOL_DROPPED_BYTES=0
     SPOOL_DROPPED_FRAMES=0
     SPOOL_DROP_LOGGED_AT=$now
   fi
+}
+
+# The `dropped` record is one line, `<frames> <bytes>`, added to on every enforcement
+# (the sender that drops and the `afk status` that reports are different processes).
+record_dropped() { # session-dir frames bytes
+  local frames bytes
+  frames=$(dropped_frames "$1")
+  bytes=$(dropped_bytes "$1")
+  printf '%d %d\n' $((frames + $2)) $((bytes + $3)) > "$1/$DROPPED_RECORD_NAME"
+}
+dropped_frames() { # session-dir
+  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ f += $1 } END { print f + 0 }'
+}
+dropped_bytes() { # session-dir
+  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ b += $2 } END { print b + 0 }'
 }
 
 # The session being over on the server (410) ends the sender, and with it the sampler,
@@ -1329,7 +1352,7 @@ cmd_run() {
 # runs/<runId>/), and every run whose command is still going is listed with the
 # command's pid.
 cmd_status() {
-  local pid owner run_dir run_pid
+  local pid owner dir total_dropped_frames total_dropped_bytes run_dir run_pid
   if ! read_current_file; then
     printf 'no session running on this machine\n'
     exit 1
@@ -1346,6 +1369,16 @@ cmd_status() {
     "$SESSION_ID" "$DASHBOARD_URL" "$owner" \
     "$(queue_count "$SESSION_DIR/queue" "$SESSION_DIR"/runs/*/queue)" \
     "$(queue_bytes "$SESSION_DIR/queue" "$SESSION_DIR"/runs/*/queue)"
+  # Frames the queue cap threw away, the owner's and the joined runs' together.
+  total_dropped_frames=0; total_dropped_bytes=0
+  for dir in "$SESSION_DIR" "$SESSION_DIR"/runs/*; do
+    total_dropped_frames=$((total_dropped_frames + $(dropped_frames "$dir")))
+    total_dropped_bytes=$((total_dropped_bytes + $(dropped_bytes "$dir")))
+  done
+  if [ "$total_dropped_frames" -gt 0 ]; then
+    printf 'dropped    %s frames, %s bytes (queue over %s bytes while the server was unreachable)\n' \
+      "$total_dropped_frames" "$total_dropped_bytes" "$SPOOL_MAX_BYTES"
+  fi
   for run_dir in "$SESSION_DIR"/runs/*; do
     run_pid=$(cat "$run_dir/pid" 2>/dev/null)
     pid_alive "$run_pid" || continue
