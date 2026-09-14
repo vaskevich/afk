@@ -52,6 +52,25 @@ describe("ThemeToggle", () => {
     expect(option("Force dark")).toBeNull();
   });
 
+  it("shows only the glyph while closed and keeps the theme in its accessible name", () => {
+    renderToggle();
+
+    expect(summary().textContent).toBe("☀︎");
+    expect(summary().getAttribute("aria-label")).toMatch(/^Theme: light/);
+    expect(summary().getAttribute("title")).toMatch(/^Theme: light/);
+  });
+
+  it("labels the choices in Sentence case", () => {
+    renderToggle();
+
+    fireEvent.pointerEnter(menu(), MOUSE);
+
+    const labels = ["Force light", "Force dark", "Follow the system"].map(
+      (name) => option(name)!.textContent,
+    );
+    expect(labels).toEqual(["☀︎ Light", "☾︎ Dark", "◐︎ System"]);
+  });
+
   it("closes a hover-opened menu on Escape wherever focus is", () => {
     renderToggle();
     fireEvent.pointerEnter(menu(), MOUSE);

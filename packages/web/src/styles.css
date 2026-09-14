@@ -31,6 +31,8 @@
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   --radius: 6px;
+  /* The height of the session header controls, text or icon alike. */
+  --control-height: 30px;
   --gutter: 16px;
 }
 
@@ -150,15 +152,30 @@ button:focus-visible {
 .header-actions .share {
   margin-left: 0;
 }
+/* Share, the theme toggle, and Delete share one height whether they hold a word or
+   only a glyph. Only the controls themselves match, not the panels under them. */
+.header-actions > * > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height);
+}
+/* Square, so a glyph sits centred at the same size as a word next to it. */
+.header-actions > * > .icon-button {
+  width: var(--control-height);
+  padding: 0;
+}
 
 .theme-menu {
   position: relative;
   display: inline-flex;
 }
 
+/* The glyph alone reads small at text size; 16px matches the icon buttons next to it. */
 .theme-menu-summary {
   position: relative;
   white-space: nowrap;
+  font-size: 16px;
 }
 .theme-menu-summary[aria-expanded="true"] {
   color: var(--fg);

@@ -16,14 +16,16 @@ const RESOLVED_GLYPHS: Record<ResolvedTheme, string> = {
 };
 
 const OPTIONS: { preference: ThemePreference; label: string; description: string }[] = [
-  { preference: "light", label: "☀︎ light", description: "Force light" },
-  { preference: "dark", label: "☾︎ dark", description: "Force dark" },
-  { preference: "system", label: "◐︎ system", description: "Follow the system" },
+  { preference: "light", label: "☀︎ Light", description: "Force light" },
+  { preference: "dark", label: "☾︎ Dark", description: "Force dark" },
+  { preference: "system", label: "◐︎ System", description: "Follow the system" },
 ];
 
 /**
- * At rest, a button styled like its neighbours showing the theme in use, with a dot
- * when it was chosen here rather than taken from the operating system. Hovering it,
+ * At rest, a square button styled like its neighbours showing only the glyph of the
+ * theme in use (its name and where it came from are in the accessible name and the
+ * tooltip), with a dot when it was chosen here rather than taken from the operating
+ * system. Hovering it,
  * focusing it from the keyboard, or tapping it (touch has no hover) drops the three
  * choices down below it. Choosing one, pressing Escape, or pressing the pointer
  * anywhere else closes them again.
@@ -119,13 +121,13 @@ export function ThemeToggle() {
       <button
         ref={summaryRef}
         type="button"
-        className={`theme-menu-summary${overriding ? " theme-menu-overriding" : ""}`}
+        className={`theme-menu-summary icon-button${overriding ? " theme-menu-overriding" : ""}`}
         aria-label={summary}
         aria-expanded={expanded}
         title={summary}
         onClick={() => setTapped((open) => !open)}
       >
-        {RESOLVED_GLYPHS[resolved]} {resolved}
+        {RESOLVED_GLYPHS[resolved]}
       </button>
       {/* The wrapper's top padding is the gap below the button, kept hoverable so the
           pointer never leaves the menu on its way down to a choice. */}
