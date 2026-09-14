@@ -89,3 +89,7 @@
 - **Agents collector.** Parked in BACKLOG.md: undocumented tool internals, session names leaving the machine. Its payoff, "an agent has waited on you for 10 minutes", is a notification, so it follows item 6; `afk run -- claude` and the `processes` row cover the rest today.
 - **Accounts and a server-side session list.** The unguessable id (docs/PROTOCOL.md) is the whole auth model and keeps time-to-first-value at one command. Item 9 covers the second day locally.
 - **A client rewrite or Linux port.** docs/CLIENT.md names the triggers (a Linux port, a second contributor, a thousand lines, a quoting bug); none has fired at 550 lines. The contract test makes a later port safe.
+
+## Implemented
+
+- **2026-09-15, item 7 (last lines of output when a run fails).** A non-zero `afk run` puts the last 20 lines of stdout and stderr (200 bytes each) on its final frame as `output.tail`; `run.exited` ends its message with the last stderr line and keeps the tail in `details.outputTail`; the banner, nearby events, and the run details show it as a collapsed "last output" block. `AFK_RUN_TAIL_LINES=0` is the opt-out (the item said `--no-output`; an environment variable fits `afk start` and `afk run` alike and matches the other client switches). A successful command never sends output; see the P0 privacy item and the decision log in docs/ARCHITECTURE.md.

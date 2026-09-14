@@ -14,6 +14,7 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [x] CLI: `afk run -- <cmd>` joins the current session; reports stdout/stderr bytes per tick + exit code
 - [x] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps` -- `collect_processes`, every 5 s on the `processes` stream; `cpu.high` names the top three in `details.topProcesses`. The agents collector is still open, see the wishlist below
 - [x] Server rules for runs: exited non-zero, no output for N seconds -- `rules/run.ts` (`run.exited`, `run.stalled`)
+- [x] Ship the last lines of output when a run fails (docs/PRODUCT.md item 7) -- `run_output_tail` in `cli/afk` puts `output.tail` (20 lines of stdout and stderr, 200 bytes each) on the final frame of a non-zero exit, `run.exited` ends its message with the last stderr line and keeps the tail in `details.outputTail`, the dashboard shows it as a collapsed "last output" block; `AFK_RUN_TAIL_LINES=0` is the privacy switch
 
 ## Wishlist: agents collector (claude / codex)
 
