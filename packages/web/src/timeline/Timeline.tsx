@@ -23,7 +23,7 @@ interface Props {
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
 export function Timeline({ model, cursor, onCursorChange }: Props) {
-  const { t0, t1 } = model;
+  const { t0, t1, latest } = model;
   const axisRef = useRef<HTMLDivElement>(null);
   const [plot, setPlot] = useState({ left: 0, width: 0 });
   const dragging = useRef(false);
@@ -120,7 +120,7 @@ export function Timeline({ model, cursor, onCursorChange }: Props) {
         </span>
         <span>{formatClock(cursor)}</span>
         <span className="spacer" />
-        <button type="button" onClick={() => onCursorChange(null)} disabled={cursor >= t1}>
+        <button type="button" onClick={() => onCursorChange(null)} disabled={cursor >= latest}>
           Latest
         </button>
       </div>

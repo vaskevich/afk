@@ -133,4 +133,10 @@ export const fixtureSource: SessionSource = {
   load(sessionId) {
     return Promise.resolve(generateDemoSession(sessionId));
   },
+  // The demo session is already over, so there is nothing to follow.
+  // TODO(dev): optionally replay the generated tail on a timer to exercise live mode offline.
+  subscribe(_sessionId, _afterIndex, handlers) {
+    handlers.onConnection("closed");
+    return () => {};
+  },
 };

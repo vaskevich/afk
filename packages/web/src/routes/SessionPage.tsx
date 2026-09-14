@@ -4,6 +4,7 @@ import { DetailsPanel } from "../components/DetailsPanel.tsx";
 import { SessionHeader } from "../components/SessionHeader.tsx";
 import { StatusBanner } from "../components/StatusBanner.tsx";
 import { useSession } from "../data/useSession.ts";
+import { useNow } from "../useNow.ts";
 import { buildModel } from "../timeline/model.ts";
 import { Timeline } from "../timeline/Timeline.tsx";
 
@@ -11,12 +12,14 @@ const route = getRouteApi("/s/$sessionId");
 
 export function SessionPage() {
   const { sessionId } = route.useParams();
-  const query = useSession(sessionId);
-  // null means "follow the latest frame", which is what a live session should do by
-  // default once streaming lands; a number is an explicit position the user picked.
+  const { query, connection } = useSession(sessionId);
+  // null means "follow the latest frame", which is the default while a session is live;
+  // a number is an explicit position the user picked by scrubbing.
   const [cursor, setCursor] = useState<number | null>(null);
 
-  const model = useMemo(() => (query.data ? buildModel(query.data) : null), [query.data]);
+  const active = query.data?.session.status === "active";
+  const now = useNow(active);
+  const model = useMemo(() => (query.data ? buildModel(query.data, now) : null), [query.data, now]);
 
   if (query.isPending) {
     return <div className="centered">Loading session…</div>;
@@ -29,11 +32,11 @@ export function SessionPage() {
     );
   }
 
-  const effectiveCursor = cursor ?? model.t1;
+  const effectiveCursor = cursor ?? model.latest;
 
   return (
     <main className="page">
-      <SessionHeader session={query.data.session} />
+      <SessionHeader session={query.data.session} connection={active ? connection : null} />
       <StatusBanner />
       <Timeline model={model} cursor={effectiveCursor} onCursorChange={setCursor} />
       <DetailsPanel model={model} cursor={effectiveCursor} />

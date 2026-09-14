@@ -185,6 +185,29 @@ button:focus-visible {
   background: var(--warn-soft);
   border-color: var(--warn);
 }
+.pill-connection {
+  color: var(--fg-muted);
+  border-color: var(--border-strong);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+.pill-connection-live {
+  color: var(--ok);
+}
+.pill-connection-live::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--ok);
+  vertical-align: 1px;
+}
+.pill-connection-reconnecting {
+  color: var(--warn);
+}
 
 /* ---- status banner --------------------------------------------------- */
 
