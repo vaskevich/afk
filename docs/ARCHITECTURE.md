@@ -35,16 +35,9 @@ shareable dashboard. Three pieces, one shared contract.
 A single bash 3.2 script (what macOS ships) with only curl and stock tools as
 dependencies, so it can be downloaded, read, and run. Two loops:
 
-- **Sampler**: ticks once a second, runs each collector on its own interval (`system`
-  every tick, `processes` every 5 s), and appends one frame per line to
-  `~/.afk/sessions/<id>/current.ndjson`.
-- **Sender** (background subshell): atomically renames `current.ndjson` into
-  `queue/`, ships the oldest queued batches in one request, deletes them on a 2xx,
-  and backs off up to 30 s on anything else. Nothing sent is kept; nothing unsent is
-  dropped. A 410 from the server ends the session; a 4xx moves the batch to
-- **Sampler**: runs each collector on its interval, scheduling ticks against a
-  deadline so collector runtime does not drift the rate, and writes each frame as its
-  own file, `~/.afk/sessions/<id>/queue/<sequence>-<stream>.ndjson`, through a temp
+- **Sampler**: ticks once a second and runs each collector on its own interval
+  (`system` every tick, `processes` every 5 s), scheduling ticks against a deadline so
+  collector runtime does not drift the rate, and writes each frame as its own file, `~/.afk/sessions/<id>/queue/<sequence>-<stream>.ndjson`, through a temp
   file and an atomic rename (macOS has no `flock`, so a shared spool file would race).
 - **Sender** (background subshell): concatenates the oldest queued files into one
   request, deletes them on a 2xx, and backs off up to 30 s on anything else. Nothing
