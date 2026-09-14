@@ -250,9 +250,12 @@ collect_processes() {
   local listing total
   listing=$(ps -Aro pid=,ppid=,%cpu=,%mem=,rss=,comm=)
   total=$(printf '%s\n' "$listing" | wc -l | tr -d ' ')
-  printf '%s\n' "$listing" | head -n "$PROCESSES_TOP_MAX" | awk -v total="$total" -v max_length="$PROCESS_COMMAND_MAX_LENGTH" '
+  # awk reads the whole listing (instead of `head`, which closes the pipe early and makes
+  # printf report a broken pipe once the listing outgrows the pipe buffer).
+  printf '%s\n' "$listing" | awk -v total="$total" -v max="$PROCESSES_TOP_MAX" -v max_length="$PROCESS_COMMAND_MAX_LENGTH" '
     function json_escape(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
     BEGIN { printf "{\"sampledCount\":%d,\"top\":[", total }
+    NR > max { next }
     {
       # Everything after the five numeric columns, spaces intact.
       match($0, /^ *[0-9]+ +[0-9]+ +[0-9.]+ +[0-9.]+ +[0-9]+ +/)
@@ -695,7 +698,9 @@ fetch_qr() {
   status=$(curl -sS -o "$file" -w '%{http_code}' --connect-timeout 3 --max-time 5 \
     -H "Authorization: Bearer $INGEST_TOKEN" -H "X-Afk-Client: bash/$AFK_VERSION" \
     "$AFK_SERVER/api/sessions/$SESSION_ID/qr" 2>/dev/null) || status=000
-  if [ "$status" = 200 ]; then
+  # Only print what looks like a QR code: an older server answers unknown /api paths
+  # with the dashboard's HTML and a 200, and that must never be dumped on the terminal.
+  if [ "$status" = 200 ] && head -c 3 "$file" | grep -q "$(printf '\342\226')"; then
     cat "$file"
     rm -f "$file"
     return 0

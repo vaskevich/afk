@@ -28,13 +28,19 @@ export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
   // The installer routes go before the dashboard, whose catch-all would otherwise
   // answer /install with index.html.
-  return new Hono()
-    .use("*", securityHeaders())
-    .route("/api/health", healthRoutes)
-    .route("/api/stats", statsRoutes(deps))
-    .route("/api/sessions", sessionRoutes(deps))
-    .route("/api/sessions", frameRoutes(deps))
-    .route("/api/sessions", streamRoutes(deps))
-    .route("/", installRoutes(deps))
-    .route("/", webRoutes(config.webDistDir));
+  return (
+    new Hono()
+      .use("*", securityHeaders())
+      .route("/api/health", healthRoutes)
+      .route("/api/stats", statsRoutes(deps))
+      .route("/api/sessions", sessionRoutes(deps))
+      .route("/api/sessions", frameRoutes(deps))
+      .route("/api/sessions", streamRoutes(deps))
+      // Unknown API paths must be a JSON 404, never the dashboard's index.html from the
+      // single-page fallback below: a client talking to an older server would otherwise
+      // get HTML with a 200 and print it.
+      .all("/api/*", (c) => c.json({ error: `no such endpoint: ${c.req.path}` }, 404))
+      .route("/", installRoutes(deps))
+      .route("/", webRoutes(config.webDistDir))
+  );
 }
