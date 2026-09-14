@@ -11,8 +11,9 @@ const DEFAULT_WORDMARK_HEIGHT_PX = 36;
 
 /** The 64 x 64 icon box; the glyphs sit inside it. */
 const ICON_VIEW_BOX = "0 0 64 64";
-/** Just the glyphs, cropped to their ink for the wordmark. */
-const GLYPHS_VIEW_BOX = "7 17 50 32";
+/** Just the glyphs, cropped to their ink for the wordmark: x, y, width, height in icon units. */
+const GLYPHS_BOX = { x: 7, y: 17, width: 50, height: 32 };
+const GLYPHS_VIEW_BOX = `${GLYPHS_BOX.x} ${GLYPHS_BOX.y} ${GLYPHS_BOX.width} ${GLYPHS_BOX.height}`;
 const STROKE_WIDTH = 5.5;
 /** The bowl of the a; its stem starts where the bowl ends. */
 const A_BOWL = { cx: 16.5, cy: 39, r: 6.5 };
@@ -52,12 +53,11 @@ export function AfkMark({ size = DEFAULT_MARK_SIZE_PX }: { size?: number }) {
 
 /** The same glyphs without the box, in the surrounding text colour. */
 export function AfkWordmark({ height = DEFAULT_WORDMARK_HEIGHT_PX }: { height?: number }) {
-  const [, , width, viewHeight] = GLYPHS_VIEW_BOX.split(" ").map(Number);
   return (
     <svg
       className="afk-wordmark"
       height={height}
-      width={(height * width) / viewHeight}
+      width={(height * GLYPHS_BOX.width) / GLYPHS_BOX.height}
       viewBox={GLYPHS_VIEW_BOX}
       role="img"
       aria-label="afk"
