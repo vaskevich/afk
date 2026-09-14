@@ -24,6 +24,10 @@
 #                        runs still going
 #   afk stop             end that session (asks the `afk start` process to finish)
 #   afk qr               print the current session's dashboard URL as a QR code again
+#   afk delete [session-id]
+#                        delete that session (or the one named) from the server, with
+#                        everything it recorded; a running `afk start` or `afk run`
+#                        on it stops its telemetry on its own
 #   afk update           replace this copy with the client the server serves (the same
 #                        installer as curl -fsSL <origin>/install | sh), in this copy's
 #                        directory unless AFK_INSTALL_DIR says where
@@ -86,6 +90,10 @@
 #                                  a successor); `afk start` removes session
 #                                  directories a day after this (two days after their
 #                                  last change if it is missing)
+#   sessions/<id>/deleted          written when the server said the session was deleted
+#                                  (a 404 on ingest): the samplers stop, the queue is
+#                                  dropped, and nothing chains; a joiner's copy lives
+#                                  under its runs/<runId>/ next to its own queue
 #   sessions/<id>/runs/<runId>/    an `afk run`: the command's pid and command line, the
 #                                  newest chunks of its stdout and stderr (capped, and
 #                                  deleted when it exits), and (when it joined an
@@ -618,7 +626,9 @@ run_sampler_loop() {
   while [ ! -s "$RUN_DIR/pid" ]; do
     sleep 0.1
   done
-  while true; do
+  # A session deleted on the server (the sender leaves the marker) has nowhere for
+  # these frames to go; the command itself is not touched.
+  while ! session_is_deleted; do
     seq=$((seq + 1))
     echo "$seq" > "$RUN_DIR/seq"
     data=$(collect_run running)
@@ -844,6 +854,11 @@ chain_session() {
   local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_cap=$MAX_DURATION_SECONDS rc f
   stop_background_job "$SENDER_PID"
   flush_queue
+  # A session deleted under us (the flush got a 404) has no successor: the sampler
+  # loop stops on the marker, and a create naming it would only be refused.
+  if session_is_deleted; then
+    return 1
+  fi
   # A 410 means the old session is already over on the server (it hit the cap, or its
   # frame limit, or was ended after a long silence); nothing queued for it can be sent
   # any more, and the server still links a successor to an ended session.
@@ -913,14 +928,36 @@ follow_current_session() {
   return 1
 }
 
+# Tells the server the session is over and clears the owner's state. Returns 1 when
+# the server no longer knows the session (it was deleted; see session_deleted), so the
+# caller does not promise a dashboard that is gone; a server that cannot be reached is
+# still a 0, since the session ends on its own there.
 end_session() {
-  http_request -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
+  local deleted=0
+  if http_request -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
     -K "$(auth_config_file)" \
-    "$AFK_SERVER/api/sessions/$SESSION_ID/end" >/dev/null \
-    || log "could not tell the server the session ended ($HTTP_ERROR); it will expire on its own"
+    "$AFK_SERVER/api/sessions/$SESSION_ID/end" >/dev/null; then
+    [ "$HTTP_STATUS" = 404 ] && deleted=1
+  else
+    log "could not tell the server the session ended ($HTTP_ERROR); it will expire on its own"
+  fi
   remove_current_session_files
   rm -f "$SESSION_DIR/response.json" "$SESSION_DIR/batch.ndjson"
   # Tells the startup cleanup this directory is finished with.
+  touch "$SESSION_DIR/done"
+  if [ "$deleted" = 1 ]; then
+    session_deleted
+    return 1
+  fi
+  return 0
+}
+
+# The owner's way out of a session that was deleted under it (session_is_deleted):
+# nothing to flush or end, just the state files, so the directory is swept like an
+# ended one's and a later `afk run` does not try to join it.
+discard_deleted_session() {
+  remove_current_session_files
+  rm -f "$SESSION_DIR"/queue/*.ndjson
   touch "$SESSION_DIR/done"
 }
 
@@ -958,9 +995,8 @@ resend_leftover_queues() {
     rc=0
     while [ "$(queue_count)" -gt 0 ]; do
       send_oldest_batch; rc=$?
-      # An unknown session is parked as a rejection by the sender; here it means the
-      # server has forgotten the session, the same as a 410.
-      if [ "$rc" = 0 ] && [ "$HTTP_STATUS" = 404 ]; then
+      # A deleted session (404) is over just like an ended one (410): its queue goes.
+      if [ "$rc" = 4 ]; then
         rc=2
       fi
       [ "$rc" = 0 ] || break
@@ -1029,8 +1065,10 @@ sample_once() {
 
 # Sends up to SEND_MAX_FILES_PER_BATCH oldest queue files (one frame each) as one request.
 # Returns 0 on success (files deleted), 1 on a retryable failure, 2 when the session is
-# over on the server (410), and 3 when the server will no longer talk to this client
-# version (426). The queue is kept on 2 and 3.
+# over on the server (410), 3 when the server will no longer talk to this client
+# version (426), and 4 when the server no longer knows the session at all (404), which
+# means it was deleted (see session_deleted). The queue is kept on 2, 3, and 4; the
+# caller decides what becomes of it.
 send_oldest_batch() {
   local batch="$SESSION_DIR/batch.ndjson" files="" count=0 f status
   for f in "$SESSION_DIR"/queue/*.ndjson; do
@@ -1062,7 +1100,12 @@ send_oldest_batch() {
       # queue, and print the hint on how to update.
       log_upgrade_required "$(cat "$SESSION_DIR/response.json" 2>/dev/null)"
       return 3 ;;
-    400|401|404|413|422)
+    404)
+      # The session is gone from the server: deleted (docs/PROTOCOL.md, "Delete"). The
+      # server never forgets a live session for any other reason, so this is not
+      # something a retry, a park, or a successor session can do anything about.
+      return 4 ;;
+    400|401|413|422)
       # The server will never accept this batch; keep it out of the way so we don't stall.
       # TODO(hardening): decide whether to keep these for debugging or drop them.
       log "server rejected batch with HTTP $status: $(cat "$SESSION_DIR/response.json" 2>/dev/null)"
@@ -1129,9 +1172,34 @@ dropped_bytes() { # session-dir
   awk '{ b += $2 } END { print b + 0 }' "$1/$DROPPED_RECORD_NAME"
 }
 
+# The session was deleted on the server (a 404 on ingest or end; see docs/PROTOCOL.md,
+# "Delete"): telemetry stops for good. What is queued is dropped, since there is
+# nothing to send it to; a `deleted` marker next to `stop` tells the sampler loops
+# (system_sampler_loop stops on `stop`, run_sampler_loop on `deleted`) and the main
+# process, which skips the final frame, the flush, and the end; and one line says so.
+# Nothing chains: a 410 means "over, continue in a successor", a 404 means "someone
+# did not want this one". Whichever process notices first (the sender in the
+# background, or the main process flushing at the end) leaves the marker, and the
+# marker is what keeps the line from being printed twice. A joiner's SESSION_DIR is
+# its own run directory, so this touches nothing of the owner's.
+DELETED_MARKER_NAME=deleted
+session_is_deleted() { [ -e "$SESSION_DIR/$DELETED_MARKER_NAME" ]; }
+session_deleted() {
+  if ! session_is_deleted; then
+    touch "$SESSION_DIR/$DELETED_MARKER_NAME"
+    log "session $SESSION_ID was deleted on the server; telemetry stopped"
+  fi
+  touch "$SESSION_DIR/stop"
+  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
+    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+}
+
 # The session being over on the server (410) ends the sender, and with it the sampler,
 # except that a joiner follows its owner to a successor session, and an `afk start`
 # owner is told (a `gone` marker, see system_sampler_loop) so it can open one itself.
+# A session deleted on the server (404) ends the sender the same way, but for good (see
+# session_deleted); only a joiner whose owner has already moved on to a successor
+# (someone deleted the old session after the chain) follows it there.
 sender_loop() {
   local backoff=1 rc
   while true; do
@@ -1155,6 +1223,14 @@ sender_loop() {
         fi
         return ;;
       3) touch "$SESSION_DIR/stop"; return ;;
+      4)
+        if reattach_to_current_session; then
+          log "session $REATTACHED_FROM was deleted; continuing in session $SESSION_ID"
+          backoff=1
+          continue
+        fi
+        session_deleted
+        return ;;
     esac
   done
 }
@@ -1176,9 +1252,14 @@ adopt_interrupted_frames() {
 }
 
 flush_queue() {
+  local rc
   adopt_interrupted_frames
   while [ "$(queue_count)" -gt 0 ]; do
-    send_oldest_batch || break
+    send_oldest_batch; rc=$?
+    if [ "$rc" = 4 ]; then
+      session_deleted
+    fi
+    [ "$rc" = 0 ] || break
   done
 }
 
@@ -1462,11 +1543,19 @@ cmd_start() {
   # set by create_session still removes the owner's state files).
   finish() {
     trap abandon INT TERM
+    # A session deleted on the server (the sender noticed and stopped the sampler)
+    # has nothing left to send or end; the deleted line was printed when it happened.
+    if session_is_deleted; then
+      stop_background_job "$SENDER_PID"
+      discard_deleted_session
+      exit 0
+    fi
     log "ending session... (Ctrl-C again to skip sending what is still queued)"
     stop_background_job "$SENDER_PID"
     flush_queue
-    end_session
-    log "session ended. Dashboard stays available at $DASHBOARD_URL"
+    if end_session; then
+      log "session ended. Dashboard stays available at $DASHBOARD_URL"
+    fi
     exit 0
   }
   # shellcheck disable=SC2329,SC2317 # invoked through the trap finish sets (2317 is the older code)
@@ -1576,6 +1665,18 @@ cmd_run() {
   if [ "$owner" = 1 ] && follow_current_session; then
     SENDER_PID=""
   fi
+  # The session was deleted on the server while the command ran (the sender noticed,
+  # stopped the samplers, and said so): only the telemetry is over. The command's exit
+  # code is still its own, and nothing is sent, flushed, or ended.
+  if session_is_deleted; then
+    stop_background_job "$SENDER_PID"
+    remove_run_captures
+    log "command exited with status $EXIT_CODE"
+    if [ "$owner" = 1 ]; then
+      discard_deleted_session
+    fi
+    exit "$EXIT_CODE"
+  fi
   local seq
   seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
   # Only a failure ships any output, and only its tail (empty for exit code 0). The
@@ -1594,8 +1695,11 @@ cmd_run() {
     flush_queue
   fi
   if [ "$owner" = 1 ]; then
-    end_session
-    log "session ended. Dashboard stays available at $DASHBOARD_URL"
+    if session_is_deleted; then
+      discard_deleted_session
+    elif end_session; then
+      log "session ended. Dashboard stays available at $DASHBOARD_URL"
+    fi
   fi
   exit "$EXIT_CODE"
 }
@@ -1663,6 +1767,51 @@ cmd_stop() {
   fi
 }
 
+# `afk delete [session-id]`: deletes a session from the server, with everything it
+# recorded (docs/PROTOCOL.md, "Delete"). Without an id it is the session running on
+# this machine (`~/.afk/current`); with one, that session, sending its ingest token
+# when this machine still has it (the session's own record) and nothing otherwise,
+# since holding the id is enough. A running `afk start` or `afk run` on the session
+# notices on its next send and stops its telemetry on its own.
+cmd_delete() {
+  local id=${1:-} file response server=$AFK_SERVER
+  detect_curl_features
+  if [ -z "$id" ]; then
+    read_current_file || die "no session running on this machine; name one: afk delete <session-id>"
+    id=$SESSION_ID
+  elif read_current_file && [ "$SESSION_ID" = "$id" ]; then
+    :
+  elif read_session_record "$AFK_HOME/sessions/$id"; then
+    :
+  else
+    SESSION_ID=$id
+    INGEST_TOKEN=""
+    SESSION_DIR="$AFK_HOME/sessions/$id"
+    AFK_SERVER=$server
+  fi
+  file=$(mktemp "${TMPDIR:-/tmp}/afk-delete.XXXXXX")
+  if [ -n "$INGEST_TOKEN" ]; then
+    http_request -o "$file" --connect-timeout 5 --max-time 30 -X DELETE \
+      -K "$(auth_config_file)" "$AFK_SERVER/api/sessions/$id"
+  else
+    http_request -o "$file" --connect-timeout 5 --max-time 30 -X DELETE \
+      "$AFK_SERVER/api/sessions/$id"
+  fi || {
+    rm -f "$file"
+    die "could not reach $AFK_SERVER: $HTTP_ERROR"
+  }
+  response=$(cat "$file" 2>/dev/null)
+  rm -f "$file"
+  case "$HTTP_STATUS" in
+    200)
+      log "deleted session $id from $AFK_SERVER ($(json_get_number "$response" frames) frames)" ;;
+    404)
+      die "session $id is not on $AFK_SERVER (${response:+$(json_get_string "$response" error)})" ;;
+    *)
+      die "$AFK_SERVER refused to delete session $id (HTTP $HTTP_STATUS): $(json_get_string "$response" error)" ;;
+  esac
+}
+
 # The header comment from the "afk —" line to the first blank line, without the license
 # notice above it.
 usage() {
@@ -1676,6 +1825,7 @@ main() {
     status)  cmd_status ;;
     stop)    cmd_stop ;;
     qr)      cmd_qr ;;
+    delete)  shift; cmd_delete "$@" ;;
     update)  cmd_update ;;
     version) shift; cmd_version "$@" ;;
     -h|--help|help|"") usage ;;

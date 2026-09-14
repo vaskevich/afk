@@ -72,7 +72,11 @@ with a live owner, continues its `run:<runId>` stream there. A 410 the server se
 early (frame cap, or the session ended after the machine slept) is chained at once
 through a `gone` marker from the sender. The server, for its part, ends a session that
 has sent nothing for `AFK_END_AFTER_SILENT_SECONDS` (10 minutes) in the same tick that
-runs `client.stale`, at the moment the silence began plus that.
+runs `client.stale`, at the moment the silence began plus that. A 404 from the sender
+is the other way a session stops, for good: the session was deleted (`DELETE
+/api/sessions/:id`, from the dashboard or `afk delete`), so a `deleted` marker stops
+the samplers, the queue is dropped, one line says so, and nothing chains; `afk run`'s
+command is not touched (see [CLIENT.md](CLIENT.md)).
 
 The dashboard URL is printed once: under a QR code when stdout is a terminal, so a
 phone can scan it off the screen, and on a line of its own otherwise. The code comes

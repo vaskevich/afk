@@ -34,6 +34,23 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   installer, without ever holding up a start nobody is watching or a wrapped command;
   `afk update` does the same on demand and `afk version --check` just asks. See
   "The latest client" in [VERSIONING.md](VERSIONING.md).
+- Stop cleanly when the session is deleted under it, and let the user delete one.
+  A `404` on ingest or end means the server no longer has the session (it never
+  forgets a live one for any other reason; see "Delete" in [PROTOCOL.md](PROTOCOL.md)):
+  the sender leaves a `deleted` marker next to `stop`, drops the queue, and prints
+  `afk: session <id> was deleted on the server; telemetry stopped` once; the sampler
+  loops stop on the marker; nothing chains, which is what sets it apart from the `410`
+  that means "over, continue in a successor". `afk start` then exits 0. `afk run`
+  keeps its command running with stdout and stderr flowing exactly as before and still
+  exits with the command's status; only the telemetry stops, no final frame, flush, or
+  end is sent, and a joiner whose owner's session was deleted stops the same way
+  inside its own run directory. `afk delete [session-id]` deletes the session running
+  on this machine, or the one named, sending the ingest token when this machine still
+  has it (`~/.afk/current` or the session's own `session.json`) and nothing otherwise,
+  since holding the id is enough; a running `afk start` or `afk run` on that session
+  notices on its next send. The server refuses to delete the demo session by name, and
+  `afk delete demo` reports that refusal as it does any other (`<server> refused to
+delete session demo (HTTP 403): the demo session cannot be deleted`).
 - Today: macOS only. Wanted: Linux.
 
 ## Current decision
