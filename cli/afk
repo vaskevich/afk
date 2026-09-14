@@ -19,7 +19,9 @@
 #                        started by `afk start` if one is running on this machine,
 #                        otherwise starts one (with machine telemetry) for the
 #                        lifetime of the command
-#   afk status           show the session running on this machine and its queue
+#   afk status           show the session running on this machine, its queue (the
+#                        joined runs' included), what the queue cap dropped, and the
+#                        runs still going
 #   afk stop             end that session (asks the `afk start` process to finish)
 #   afk qr               print the current session's dashboard URL as a QR code again
 #   afk version
@@ -27,9 +29,10 @@
 # The dashboard URL is printed with a QR code under it when stdout is a terminal, so
 # you can point a phone at the screen instead of typing it; --no-qr skips that.
 #
-# The server caps a session (an hour by default). Shortly before that `afk start`
-# opens a successor session that continues the old one and prints its URL (and QR);
-# the two dashboards link to each other. An `afk run` that joined the old session
+# The server caps a session (an hour by default). Shortly before that `afk start`, or
+# an `afk run` that started its own session, opens a successor session that continues
+# the old one and prints its URL (and QR); the two dashboards link to each other, and
+# a run's frames carry on in the successor. An `afk run` that joined the old session
 # follows along on its own.
 #
 # Environment:
@@ -51,16 +54,24 @@
 #                                  afk processes can join it
 #   owner.pid                      pid of the process that created it; a dead owner
 #                                  marks `current` stale without asking the server
+#   sessions/<id>/session.json     the same record, kept with the session's files so a
+#                                  later `afk start` can send what was left in its queue
+#                                  (a session that ended while the server was unreachable)
+#   sessions/<id>/auth             the ingest token as a curl config file (`header = ...`),
+#                                  so curl reads it with -K instead of showing it in `ps`
 #   sessions/<id>/queue/<seq>-<stream>.ndjson
 #                                  one sampled frame per file, waiting to be sent; a
 #                                  batch is the oldest files concatenated, deleted on 2xx
-#   sessions/<id>/done             written when the session ended (or was continued by
+#   sessions/<id>/dropped          how many frames (and bytes) the queue cap threw away
+#                                  during an outage; `afk status` shows it
+#   sessions/<id>/done            written when the session ended (or was continued by
 #                                  a successor); `afk start` removes session
 #                                  directories a day after this (two days after their
 #                                  last change if it is missing)
-#   sessions/<id>/runs/<runId>/    an `afk run`: its pid, the newest chunks of its stdout
-#                                  and stderr (capped, and deleted when it exits), and
-#                                  (when it joined an existing session) its own queue
+#   sessions/<id>/runs/<runId>/    an `afk run`: the command's pid and command line, the
+#                                  newest chunks of its stdout and stderr (capped, and
+#                                  deleted when it exits), and (when it joined an
+#                                  existing session) its own queue
 # The directory and everything in it are readable by the user alone (mode 700 and 600).
 #
 # The client is deliberately dumb: it ships raw measurements and lets the server
@@ -113,6 +124,8 @@ case "${AFK_RUN_CAPTURE_MAX_BYTES:-}" in
   *) RUN_CAPTURE_MAX_BYTES=$AFK_RUN_CAPTURE_MAX_BYTES ;;
 esac
 RUN_CAPTURE_KEEP_CHUNKS=2
+# The wrapped command line is kept for `afk status` cut to this many characters.
+RUN_COMMAND_MAX_CHARS=256
 # split names chunks with this many letters after the prefix: 26^6 chunks of 64 MiB.
 RUN_CAPTURE_SUFFIX_LENGTH=6
 SEND_INTERVAL_SECONDS=1
@@ -203,16 +216,71 @@ file_age_seconds() { echo $(( $(now_seconds) - $(file_mtime "$1") )); }
 
 pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
+# Stops one of this script's background jobs (the sender, a sampler) and waits for it.
+# The job is signalled first and then everything under it, so a curl in flight dies
+# with its sender instead of outliving the session: bash 3.2 forks a subshell that
+# only acts on TERM once its foreground child has returned when an EXIT trap was set
+# at the time of the fork (create_session sets one), so signalling the sender alone
+# would leave `afk stop` waiting out the rest of curl's --max-time. `wait` only knows
+# this shell's own children; a sibling job (the sender, stopped from the sampler
+# subshell of an `afk run` that chains) is polled instead, for at most
+# JOB_STOP_POLL_LIMIT times JOB_STOP_POLL_SECONDS.
+JOB_STOP_POLL_SECONDS=0.1
+JOB_STOP_POLL_LIMIT=20
+stop_background_job() { # pid
+  local polls=0
+  [ -n "${1:-}" ] || return 0
+  kill_process_tree "$1"
+  wait "$1" 2>/dev/null
+  while pid_alive "$1" && [ "$polls" -lt "$JOB_STOP_POLL_LIMIT" ]; do
+    sleep "$JOB_STOP_POLL_SECONDS"
+    polls=$((polls + 1))
+  done
+  return 0
+}
+
+# TERMs a process and everything under it. The whole tree is listed before anything
+# is signalled: the sender's request is sender -> command-substitution shell -> curl,
+# and the middle one dies at once, which would hand curl to launchd before a walk
+# reached it. Parents go first so a subshell with the signal pending dies the moment
+# its child does, without running the rest of its loop. A second pass catches a child
+# started between the listing and the kill (the sender's next sleep or curl).
+KILL_TREE_PASSES=2
+kill_process_tree() { # pid
+  local pids
+  for _ in $(seq 1 "$KILL_TREE_PASSES"); do
+    pids=$(process_tree "$1")
+    # shellcheck disable=SC2086 # one pid per word is the point
+    kill $pids 2>/dev/null
+  done
+  return 0
+}
+
+# A process and its descendants, one pid per line, each parent before its children
+# (pgrep -P is on every Mac).
+process_tree() { # pid
+  local child
+  printf '%s\n' "$1"
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    process_tree "$child"
+  done
+}
+
 # The pid that created ~/.afk/current, empty when unknown.
 owner_pid() { cat "$AFK_HOME/owner.pid" 2>/dev/null; }
 
 remove_current_session_files() { rm -f "$AFK_HOME/current" "$AFK_HOME/owner.pid"; }
 
 # The queue holds one frame per file (see emit_frame); these size it up for the
-# sender's log, `afk status`, and the disk cap.
-queue_count() { find "$SESSION_DIR/queue" -name '*.ndjson' -type f 2>/dev/null | wc -l | tr -d ' '; }
-queue_bytes() {
-  find "$SESSION_DIR/queue" -name '*.ndjson' -type f -exec sh -c 'wc -c < "$1"' _ {} \; 2>/dev/null \
+# sender's log, `afk status`, and the disk cap. They take the session's own queue
+# unless given other queue directories (`afk status` adds the joiners' queues).
+queue_count() { # [queue-dir...]
+  [ $# -gt 0 ] || set -- "$SESSION_DIR/queue"
+  find "$@" -name '*.ndjson' -type f 2>/dev/null | wc -l | tr -d ' '
+}
+queue_bytes() { # [queue-dir...]
+  [ $# -gt 0 ] || set -- "$SESSION_DIR/queue"
+  find "$@" -name '*.ndjson' -type f -exec sh -c 'wc -c < "$1"' _ {} \; 2>/dev/null \
     | awk '{ s += $1 } END { print s + 0 }'
 }
 
@@ -234,6 +302,32 @@ detect_curl_features() {
   if curl --help all 2>/dev/null | grep -q -- --fail-with-body; then
     CURL_FAIL_FLAG="--fail-with-body"
   fi
+}
+
+# The bearer header for curl's config file syntax (-K). macOS shows every user's
+# process arguments, so the ingest token must never be a curl argument; it goes
+# through a file readable by the user alone instead. Backslashes and quotes are
+# escaped the way curl's config parser reads them (the server never sends either).
+auth_config_line() { # token
+  printf 'header = "Authorization: Bearer %s"' \
+    "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+# The config file holding the session's bearer header, written under the session
+# directory (mode 600 under the umask) the first time it is needed and rewritten when
+# the token changes, as when a joiner follows its owner to a successor session. Prints
+# the path, for `-K "$(auth_config_file)"`. Given a token and a directory it does the
+# same for another session (a chain sends the previous session's token).
+AUTH_CONFIG_NAME=auth
+auth_config_file() { # [token dir]
+  local token=${1:-$INGEST_TOKEN} dir=${2:-$SESSION_DIR} file line
+  file="$dir/$AUTH_CONFIG_NAME"
+  line=$(auth_config_line "$token")
+  if [ "$(cat "$file" 2>/dev/null)" != "$line" ]; then
+    mkdir -p "$dir"
+    printf '%s\n' "$line" > "$file"
+  fi
+  printf '%s' "$file"
 }
 
 # Every request goes through here. curl's own retries are off so they never double
@@ -449,16 +543,22 @@ collect_run() { # state [exitCode] [output-tail-json]
 }
 
 # Samples the run every second until killed. Keeps its sequence in a file so the
-# final "exited" frame, emitted by the main process, can continue the count.
+# final "exited" frame, emitted by the main process, can continue the count. In an
+# `afk run` that owns its session (SESSION_CHAINING) the frames go to whichever
+# session `current` names, so a chain by the system sampler carries the run along.
 run_sampler_loop() {
-  local seq=0
+  local seq=0 data
   while [ ! -s "$RUN_DIR/pid" ]; do
     sleep 0.1
   done
   while true; do
     seq=$((seq + 1))
     echo "$seq" > "$RUN_DIR/seq"
-    emit_frame "run:$RUN_ID" run "$seq" "$(collect_run running)"
+    data=$(collect_run running)
+    if [ "${SESSION_CHAINING:-0}" = 1 ]; then
+      follow_current_session || true
+    fi
+    emit_frame "run:$RUN_ID" run "$seq" "$data"
     sleep "$SAMPLE_INTERVAL_SECONDS"
   done
 }
@@ -495,7 +595,8 @@ create_session() { # [previous-session-id previous-ingest-token]
 
   if [ -n "$previous_id" ]; then
     http_request -o "$response_file" --connect-timeout 5 --max-time 15 \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $previous_token" \
+      -H 'Content-Type: application/json' \
+      -K "$(auth_config_file "$previous_token" "$AFK_HOME/sessions/$previous_id")" \
       --data "$body" "$AFK_SERVER/api/sessions"
   else
     http_request -o "$response_file" --connect-timeout 5 --max-time 15 \
@@ -533,19 +634,50 @@ create_session() { # [previous-session-id previous-ingest-token]
 
   SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
   mkdir -p "$SESSION_DIR/queue"
-  # Lets a later `afk run` join this session, and `afk status`/`afk stop` find its owner.
-  printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
-    "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$AFK_HOME/current"
+  write_session_records
   echo "$$" > "$AFK_HOME/owner.pid"
   # Whatever way this process ends (Ctrl-C, `afk stop`, a die), the files that let
   # others join it must not outlive it. Bash resets traps in subshells, so the sender
-  # and samplers running in the background do not trigger this when they are killed.
-  trap remove_owner_state EXIT
+  # and samplers running in the background do not trigger this when they are killed;
+  # the sampler subshell of an `afk run` that chains (see cmd_run) must not set one
+  # either, since the main process is still the owner.
+  if [ "${BASH_SUBSHELL:-0}" = 0 ]; then
+    trap remove_owner_state EXIT
+  fi
 }
 
 remove_owner_state() {
   remove_current_session_files
   rm -f "$AFK_HOME/create-response.json"
+}
+
+# Two records of the session just created. `current` lets a later `afk run` join it
+# and `afk status`/`afk stop` find its owner; it goes through a temp file and a rename
+# so a process re-reading it during a chain never sees half of it. The session's own
+# `session.json` stays with its queue after `current` is gone, so a later `afk start`
+# can still send what this one could not (resend_leftover_queues).
+SESSION_RECORD_NAME=session.json
+write_session_records() {
+  local temp="$AFK_HOME/.current.tmp"
+  printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
+    "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$temp" \
+    && mv "$temp" "$AFK_HOME/current"
+  printf '{"sessionId":"%s","ingestToken":"%s","server":"%s","dashboardUrl":"%s"}\n' \
+    "$(json_string "$SESSION_ID")" "$(json_string "$INGEST_TOKEN")" \
+    "$(json_string "$AFK_SERVER")" "$(json_string "$DASHBOARD_URL")" > "$SESSION_DIR/$SESSION_RECORD_NAME"
+}
+
+# Loads a session's own record (see write_session_records) into the session variables.
+# Returns 1 when there is none or it is incomplete.
+read_session_record() { # session-dir
+  local record
+  record=$(cat "$1/$SESSION_RECORD_NAME" 2>/dev/null) || return 1
+  SESSION_ID=$(json_get_string "$record" sessionId)
+  INGEST_TOKEN=$(json_get_string "$record" ingestToken)
+  AFK_SERVER=$(json_get_string "$record" server)
+  DASHBOARD_URL=$(json_get_string "$record" dashboardUrl)
+  [ -n "$SESSION_ID" ] && [ -n "$INGEST_TOKEN" ] && [ -n "$AFK_SERVER" ] || return 1
+  SESSION_DIR=$1
 }
 
 # For `afk start`: a machine you are about to leave should get a session eventually,
@@ -626,18 +758,21 @@ chain_before_cap_seconds() {
   echo "$before"
 }
 
-# Continues the session in a new one (`afk start` only; see docs/PROTOCOL.md,
-# "Chaining"). The server ends the old session the moment its successor exists and
-# answers 410 for it from then on, so the old queue is drained first: the sender is
-# stopped, what it left is flushed, and only then is the successor created. The new
-# URL is printed like the first one, `current` now names the new session (a joining
-# `afk run` follows it, see reattach_to_current_session), the sequence counters start
-# over because sequences are per session, and a sender is started on the new queue.
-# Returns 1, with the old session's sender running again, when the flush did not get
-# through or the server would not create the successor; the caller retries.
+# Continues the session in a new one (see docs/PROTOCOL.md, "Chaining"). The server
+# ends the old session the moment its successor exists and answers 410 for it from
+# then on, so the old queue is drained first: the sender is stopped, what it left is
+# flushed, and only then is the successor created. The new URL is printed like the
+# first one, `current` now names the new session (a joining `afk run` follows it, see
+# reattach_to_current_session; an owning one, see follow_current_session), the
+# sequence counters start over because sequences are per session, and a sender is
+# started on the new queue. Run frames still in the old queue (an owning `afk run`'s
+# sampler wrote them between the flush and the create) move to the new one: their
+# sequences continue, which is all the server needs. Returns 1, with the old
+# session's sender running again, when the flush did not get through or the server
+# would not create the successor; the caller retries.
 chain_session() {
-  local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_cap=$MAX_DURATION_SECONDS rc
-  kill "$SENDER_PID" 2>/dev/null; wait "$SENDER_PID" 2>/dev/null
+  local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_cap=$MAX_DURATION_SECONDS rc f
+  stop_background_job "$SENDER_PID"
   flush_queue
   # A 410 means the old session is already over on the server (it hit the cap, or its
   # frame limit, or was ended after a long silence); nothing queued for it can be sent
@@ -656,6 +791,9 @@ chain_session() {
   fi
   rm -f "$old_dir/response.json" "$old_dir/batch.ndjson" "$old_dir/gone"
   touch "$old_dir/done"
+  for f in "$old_dir"/queue/*-run:*.ndjson; do
+    [ -e "$f" ] && mv "$f" "$SESSION_DIR/queue/"
+  done
   SEQ_SYSTEM=0
   SEQ_PROCESSES=0
   SAMPLE_TICK=0
@@ -690,9 +828,25 @@ reattach_to_current_session() {
   return 1
 }
 
+# For an `afk run` that owns its session: its system sampler runs in a subshell and
+# chains there (chain_session rewrites `current`), so the run sampler and the main
+# process, which write the run's frames, pick the successor up from `current` each
+# time they look. Switches every session variable, the queue directory included, and
+# returns 0 when `current` names a different session than before; when it is gone
+# (the session is being ended) nothing changes and it returns 1.
+follow_current_session() {
+  local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_url=${DASHBOARD_URL:-} old_server=$AFK_SERVER
+  if read_current_file && [ "$SESSION_ID" != "$old_id" ]; then
+    return 0
+  fi
+  SESSION_ID=$old_id; INGEST_TOKEN=$old_token; SESSION_DIR=$old_dir
+  DASHBOARD_URL=$old_url; AFK_SERVER=$old_server
+  return 1
+}
+
 end_session() {
   http_request -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
-    -H "Authorization: Bearer $INGEST_TOKEN" \
+    -K "$(auth_config_file)" \
     "$AFK_SERVER/api/sessions/$SESSION_ID/end" >/dev/null \
     || log "could not tell the server the session ended ($HTTP_ERROR); it will expire on its own"
   remove_current_session_files
@@ -714,6 +868,48 @@ cleanup_old_sessions() {
       [ "$(file_age_seconds "$dir")" -gt "$SESSION_ORPHAN_RETENTION_SECONDS" ] && rm -rf "$dir"
     fi
   done
+  return 0
+}
+
+# Frames a previous session could not send before its owner exited (the server was
+# unreachable, or the owner was killed) are still in its queue, and the server accepts
+# them until that session expires. Before a new session is created, every old queue
+# whose session.json is still there is sent once, with the sender's batching: what the
+# server accepts is deleted, a 410 or 404 means the session is over and its queue is
+# dropped, and anything else leaves the rest for the next start or the sweep. One
+# line is logged per session touched. A server that cannot be reached ends the whole
+# pass, since the next queue would fail the same way and `afk start` is waiting.
+resend_leftover_queues() {
+  local dir count left rc server=$AFK_SERVER
+  for dir in "$AFK_HOME"/sessions/*; do
+    [ -d "$dir/queue" ] || continue
+    read_session_record "$dir" || continue
+    count=$(queue_count)
+    [ "$count" -gt 0 ] || continue
+    rc=0
+    while [ "$(queue_count)" -gt 0 ]; do
+      send_oldest_batch; rc=$?
+      # An unknown session is parked as a rejection by the sender; here it means the
+      # server has forgotten the session, the same as a 410.
+      if [ "$rc" = 0 ] && [ "$HTTP_STATUS" = 404 ]; then
+        rc=2
+      fi
+      [ "$rc" = 0 ] || break
+    done
+    left=$(queue_count)
+    case "$rc" in
+      0)
+        log "sent $count frames left over from session $SESSION_ID" ;;
+      2)
+        rm -rf "$dir/queue"
+        touch "$dir/done"
+        log "session $SESSION_ID is over on the server; dropped its $left unsent frames" ;;
+      *)
+        log "could not send the $left frames left over from session $SESSION_ID (${HTTP_ERROR:-HTTP $HTTP_STATUS}); they stay for the next start"
+        break ;;
+    esac
+  done
+  AFK_SERVER=$server
   return 0
 }
 
@@ -780,7 +976,7 @@ send_oldest_batch() {
   cat $files > "$batch"
   http_request -o "$SESSION_DIR/response.json" \
     --connect-timeout 5 --max-time 20 \
-    -H "Authorization: Bearer $INGEST_TOKEN" -H 'Content-Type: application/x-ndjson' \
+    -K "$(auth_config_file)" -H 'Content-Type: application/x-ndjson' \
     --data-binary "@$batch" "$AFK_SERVER/api/sessions/$SESSION_ID/frames"
   status=$HTTP_STATUS
 
@@ -812,14 +1008,16 @@ send_oldest_batch() {
 
 # Drops the oldest queued frames until the queue is back under SPOOL_MAX_BYTES. Only
 # an outage grows the queue, so the sender calls this after every failed send. Frames
-# dropped here are gone for good; the log line is rate limited because a long outage
-# would otherwise print one per retry.
+# dropped here are gone for good, so the session keeps a running count of them in
+# `dropped` (frames and bytes, for `afk status`); the log line is rate limited because
+# a long outage would otherwise print one per retry, and carries the running total.
 SPOOL_DROPPED_BYTES=0
 SPOOL_DROPPED_FRAMES=0
 SPOOL_DROP_LOGGED_AT=0
+DROPPED_RECORD_NAME=dropped
 
 enforce_spool_cap() {
-  local total f size now
+  local total f size now frames=0 bytes=0
   total=$(queue_bytes)
   [ "$total" -gt "$SPOOL_MAX_BYTES" ] || return 0
   for f in "$SESSION_DIR"/queue/*.ndjson; do
@@ -828,16 +1026,34 @@ enforce_spool_cap() {
     size=$(file_size "$f")
     rm -f "$f"
     total=$((total - size))
-    SPOOL_DROPPED_BYTES=$((SPOOL_DROPPED_BYTES + size))
-    SPOOL_DROPPED_FRAMES=$((SPOOL_DROPPED_FRAMES + 1))
+    frames=$((frames + 1))
+    bytes=$((bytes + size))
   done
+  SPOOL_DROPPED_FRAMES=$((SPOOL_DROPPED_FRAMES + frames))
+  SPOOL_DROPPED_BYTES=$((SPOOL_DROPPED_BYTES + bytes))
+  record_dropped "$SESSION_DIR" "$frames" "$bytes"
   now=$(now_seconds)
   if [ $((now - SPOOL_DROP_LOGGED_AT)) -ge "$SPOOL_DROP_LOG_INTERVAL_SECONDS" ]; then
-    log "queue is over ${SPOOL_MAX_BYTES} bytes; dropped the oldest ${SPOOL_DROPPED_FRAMES} frames (${SPOOL_DROPPED_BYTES} bytes)"
+    log "queue is over ${SPOOL_MAX_BYTES} bytes; dropped the oldest ${SPOOL_DROPPED_FRAMES} frames (${SPOOL_DROPPED_BYTES} bytes), $(dropped_frames "$SESSION_DIR") frames since the session started"
     SPOOL_DROPPED_BYTES=0
     SPOOL_DROPPED_FRAMES=0
     SPOOL_DROP_LOGGED_AT=$now
   fi
+}
+
+# The `dropped` record is one line, `<frames> <bytes>`, added to on every enforcement
+# (the sender that drops and the `afk status` that reports are different processes).
+record_dropped() { # session-dir frames bytes
+  local frames bytes
+  frames=$(dropped_frames "$1")
+  bytes=$(dropped_bytes "$1")
+  printf '%d %d\n' $((frames + $2)) $((bytes + $3)) > "$1/$DROPPED_RECORD_NAME"
+}
+dropped_frames() { # session-dir
+  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ f += $1 } END { print f + 0 }'
+}
+dropped_bytes() { # session-dir
+  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ b += $2 } END { print b + 0 }'
 }
 
 # The session being over on the server (410) ends the sender, and with it the sampler,
@@ -882,11 +1098,10 @@ flush_queue() {
 # ---------------------------------------------------------------------------
 
 # Samples machine health until the session is stopped (by the server via the
-# sender, or by hitting the cap). Runs in the foreground for `afk start`, which sets
+# sender, or by hitting the cap). Runs in the foreground for `afk start` and in a
+# background subshell for an `afk run` that had to start its own session; both set
 # SESSION_CHAINING so the loop hands over to a successor session before the cap (see
-# chain_session), and in the background for an `afk run` that had to start its own
-# session, which stops at the cap: its run sampler and final frame would not follow
-# a switch (TODO(sessions), see BACKLOG.md).
+# chain_session; the run's own frames follow through follow_current_session).
 system_sampler_loop() {
   local started now deadline chain_at chain_attempted_at=0
   started=$(now_seconds)
@@ -945,7 +1160,7 @@ stdout_is_terminal() { [ -t 1 ]; }
 fetch_qr() {
   local file="$AFK_HOME/qr-$$.txt" status
   status=$(curl -sS -o "$file" -w '%{http_code}' --connect-timeout 3 --max-time 5 \
-    -H "Authorization: Bearer $INGEST_TOKEN" -H "X-Afk-Client: bash/$AFK_VERSION" \
+    -K "$(auth_config_file)" -H "X-Afk-Client: bash/$AFK_VERSION" \
     "$AFK_SERVER/api/sessions/$SESSION_ID/qr" 2>/dev/null) || status=000
   # Only print what looks like a QR code: an older server answers unknown /api paths
   # with the dashboard's HTML and a 200, and that must never be dumped on the terminal.
@@ -1024,6 +1239,7 @@ cmd_start() {
   check_platform
   guard_running_session "$force"
   cleanup_old_sessions
+  resend_leftover_queues
   gather_host_info
   create_session_or_wait
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
@@ -1039,7 +1255,7 @@ cmd_start() {
   finish() {
     trap abandon INT TERM
     log "ending session... (Ctrl-C again to skip sending what is still queued)"
-    kill "$SENDER_PID" 2>/dev/null; wait "$SENDER_PID" 2>/dev/null
+    stop_background_job "$SENDER_PID"
     flush_queue
     end_session
     log "session ended. Dashboard stays available at $DASHBOARD_URL"
@@ -1101,6 +1317,8 @@ cmd_run() {
   RUN_COMMAND_JSON=$(json_string "$*" | cut -c1-200)
   RUN_DIR="$AFK_HOME/sessions/$SESSION_ID/runs/$RUN_ID"
   mkdir -p "$RUN_DIR"
+  # For `afk status`, which lists the runs still going.
+  printf '%s\n' "$*" | cut -c "1-$RUN_COMMAND_MAX_CHARS" > "$RUN_DIR/command"
   if [ "$owner" = 0 ]; then
     # A joiner keeps its own spool so it never races the owner's sender.
     SESSION_DIR="$RUN_DIR"
@@ -1116,6 +1334,11 @@ cmd_run() {
   SENDER_PID=$!
   SYSTEM_PID=""
   if [ "$owner" = 1 ]; then
+    # The sampler chains before the cap like `afk start`'s, from its subshell: it
+    # stops this sender, creates the successor, rewrites `current`, and starts a
+    # sender of its own under itself. The run sampler and this process follow
+    # `current` (follow_current_session) so the run's frames go to the successor.
+    SESSION_CHAINING=1
     system_sampler_loop &
     SYSTEM_PID=$!
   fi
@@ -1133,8 +1356,16 @@ cmd_run() {
   EXIT_CODE=$?
   trap - INT TERM
 
-  kill "$RUN_SAMPLER_PID" 2>/dev/null; wait "$RUN_SAMPLER_PID" 2>/dev/null
+  stop_background_job "$RUN_SAMPLER_PID"
   sleep 0.3
+  # The system sampler goes first so that `current` holds still: if it chained during
+  # the command, the final frame and the flush below go to the successor, whose
+  # sender (started under the sampler) died with it; the sender started here was
+  # stopped by the chain.
+  stop_background_job "$SYSTEM_PID"
+  if [ "$owner" = 1 ] && follow_current_session; then
+    SENDER_PID=""
+  fi
   local seq
   seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
   # Only a failure ships any output, and only its tail (empty for exit code 0). The
@@ -1143,10 +1374,7 @@ cmd_run() {
   remove_run_captures
   log "command exited with status $EXIT_CODE"
 
-  if [ -n "$SYSTEM_PID" ]; then
-    kill "$SYSTEM_PID" 2>/dev/null; wait "$SYSTEM_PID" 2>/dev/null
-  fi
-  kill "$SENDER_PID" 2>/dev/null; wait "$SENDER_PID" 2>/dev/null
+  stop_background_job "$SENDER_PID"
   flush_queue
   # A joiner whose owner moved on to a successor during the command (the sender in the
   # background followed it; this shell still has the old session) sends what is left,
@@ -1164,9 +1392,11 @@ cmd_run() {
 
 # Reports on the session in ~/.afk/current from local state only: no network, so it
 # answers instantly even when the server is unreachable. The queue counted is the
-# owner's; an `afk run` that joined keeps its own under runs/<runId>/.
+# owner's plus those of the `afk run`s that joined (each keeps its own under
+# runs/<runId>/), and every run whose command is still going is listed with the
+# command's pid.
 cmd_status() {
-  local pid owner
+  local pid owner dir total_dropped_frames total_dropped_bytes run_dir run_pid
   if ! read_current_file; then
     printf 'no session running on this machine\n'
     exit 1
@@ -1180,13 +1410,32 @@ cmd_status() {
     owner="pid $pid, not running (stale; afk stop clears it)"
   fi
   printf 'session    %s\ndashboard  %s\nowner      %s\nqueue      %s frames, %s bytes\n' \
-    "$SESSION_ID" "$DASHBOARD_URL" "$owner" "$(queue_count)" "$(queue_bytes)"
+    "$SESSION_ID" "$DASHBOARD_URL" "$owner" \
+    "$(queue_count "$SESSION_DIR/queue" "$SESSION_DIR"/runs/*/queue)" \
+    "$(queue_bytes "$SESSION_DIR/queue" "$SESSION_DIR"/runs/*/queue)"
+  # Frames the queue cap threw away, the owner's and the joined runs' together.
+  total_dropped_frames=0; total_dropped_bytes=0
+  for dir in "$SESSION_DIR" "$SESSION_DIR"/runs/*; do
+    total_dropped_frames=$((total_dropped_frames + $(dropped_frames "$dir")))
+    total_dropped_bytes=$((total_dropped_bytes + $(dropped_bytes "$dir")))
+  done
+  if [ "$total_dropped_frames" -gt 0 ]; then
+    printf 'dropped    %s frames, %s bytes (queue over %s bytes while the server was unreachable)\n' \
+      "$total_dropped_frames" "$total_dropped_bytes" "$SPOOL_MAX_BYTES"
+  fi
+  for run_dir in "$SESSION_DIR"/runs/*; do
+    run_pid=$(cat "$run_dir/pid" 2>/dev/null)
+    pid_alive "$run_pid" || continue
+    printf 'run        pid %s, running: %s\n' "$run_pid" "$(cat "$run_dir/command" 2>/dev/null)"
+  done
 }
 
 # Ends the session by asking its owner (the `afk start` or owning `afk run` process)
 # to finish, the same as a Ctrl-C there: it flushes what it can and tells the server.
-# Bash runs a trap after the command in flight, so the owner may take up to one
-# request's timeout to react.
+# The owner reacts within about a second (its sender's request in flight is cut short,
+# see stop_background_job); the flush itself can still take one request's timeout
+# against a server that accepts connections but never answers, and a second `afk stop`
+# skips it.
 cmd_stop() {
   local pid
   if ! read_current_file; then

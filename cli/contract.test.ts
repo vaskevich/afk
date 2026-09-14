@@ -602,5 +602,59 @@ describe.skipIf(process.platform !== "darwin")(
         expect(await readStats()).toMatchObject({ activeSessions: 0 });
       },
     );
+
+    it(
+      "an afk run that owns its session chains before the cap and finishes the run in the successor, ending it",
+      { timeout: CHAIN_TEST_TIMEOUT_MS },
+      async () => {
+        await server.close();
+        server = await startServer(DEFAULT_LIMITS, webDistDir, {
+          maxSessionDurationSeconds: CHAIN_CAP_SECONDS,
+        });
+        const run = spawnAfk(["run", "--", "sleep", String(CHAIN_RUN_SECONDS)], afkHome);
+        const first = await dashboardSessionId(run);
+
+        const second = await waitFor(
+          "the run to print its successor's URL",
+          () => {
+            const ids = [...run.stdout().matchAll(new RegExp(DASHBOARD_URL_PATTERN, "g"))];
+            return ids.map((match) => match[1]).find((id) => id !== first);
+          },
+          CHAIN_DEADLINE_MS,
+        );
+        const exitCode = await run.exited;
+
+        expect(exitCode).toBe(0);
+        const firstSession = await readSummary(first);
+        const { frames: firstFrames } = await readFrames(first);
+        const { session: secondSession, frames: secondFrames } = await readFrames(second);
+        expect(firstSession).toMatchObject({ status: "ended", nextSessionId: second });
+        expect(secondSession).toMatchObject({
+          status: "ended",
+          previousSessionId: first,
+          nextSessionId: null,
+        });
+        // The run's stream spans the chain: sampled in the first session, exited in the
+        // second with its sequence still counting up.
+        const final = finalRunFrame(secondFrames)!;
+        expect(final.frame.data).toMatchObject({
+          command: `sleep ${CHAIN_RUN_SECONDS}`,
+          exitCode: 0,
+        });
+        const runStream = final.frame.stream;
+        const firstRunSequences = firstFrames
+          .filter((f) => f.frame.stream === runStream)
+          .map((f) => f.frame.sequence);
+        expect(firstRunSequences.length).toBeGreaterThan(0);
+        expect(final.frame.sequence).toBeGreaterThan(Math.max(...firstRunSequences));
+        expect(systemSequences(secondFrames)[0]).toBe(1);
+        expect(run.stderr()).toContain(
+          `session ${first} reached its ${CHAIN_CAP_SECONDS}s cap; continuing in session ${second}`,
+        );
+        expect(await readStats()).toMatchObject({ activeSessions: 0 });
+        expect(await readdir(join(afkHome, "sessions", first, "queue"))).toEqual([]);
+        expect(await readdir(join(afkHome, "sessions", second, "queue"))).toEqual([]);
+      },
+    );
   },
 );

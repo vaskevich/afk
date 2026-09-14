@@ -1,9 +1,11 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
@@ -63,12 +65,16 @@ interface BashResult {
 }
 
 /** Sources cli/afk and runs `snippet` under bash 3.2 (/bin/bash on macOS), with `env` merged in. */
-async function runBash(snippet: string, env: NodeJS.ProcessEnv = {}): Promise<BashResult> {
+async function runBash(
+  snippet: string,
+  env: NodeJS.ProcessEnv = {},
+  timeoutMs = 5000,
+): Promise<BashResult> {
   const script = `source "${AFK_SCRIPT}"\n${snippet}`;
   try {
     const { stdout, stderr } = await execFileAsync("/bin/bash", ["-c", script], {
       env: { ...process.env, AFK_SOURCED: "1", ...env },
-      timeout: 5000,
+      timeout: timeoutMs,
     });
     return { stdout, stderr, code: 0 };
   } catch (error) {
@@ -88,6 +94,82 @@ async function runAfk(args: string[], env: NodeJS.ProcessEnv = {}): Promise<Bash
   } catch (error) {
     const failure = error as { stdout?: string; stderr?: string; code?: number };
     return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", code: failure.code ?? 1 };
+  }
+}
+
+interface AfkProcess {
+  child: ChildProcess;
+  stdout: () => string;
+  stderr: () => string;
+  /** The exit code once the process has exited and its output has been drained. */
+  exited: Promise<number | null>;
+}
+
+const spawned: AfkProcess[] = [];
+
+/**
+ * Starts cli/afk as a long-running child (an `afk start` to be stopped from outside),
+ * in its own process group so a failing test can still kill its background jobs.
+ */
+function spawnAfk(args: string[], env: NodeJS.ProcessEnv = {}): AfkProcess {
+  const child = spawn("/bin/bash", [AFK_SCRIPT, ...args], {
+    env: { ...process.env, AFK_SOURCED: "0", ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  const exited = new Promise<number | null>((resolve) => {
+    child.on("close", (code) => resolve(code));
+  });
+  const proc: AfkProcess = { child, stdout: () => stdout, stderr: () => stderr, exited };
+  spawned.push(proc);
+  return proc;
+}
+
+afterEach(() => {
+  for (const { child } of spawned.splice(0)) {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+});
+
+const POLL_INTERVAL_MS = 50;
+
+/** Polls `condition` until it holds, or fails with `description` once the deadline passes. */
+async function waitUntil(
+  description: string,
+  condition: () => boolean | Promise<boolean>,
+  deadlineMs: number,
+): Promise<void> {
+  const deadline = Date.now() + deadlineMs;
+  while (!(await condition())) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out after ${deadlineMs} ms waiting for ${description}`);
+    }
+    await delay(POLL_INTERVAL_MS);
+  }
+}
+
+/** The pids of every process whose arguments mention `text`, e.g. a curl talking to a test server. */
+async function processesMentioning(text: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", text]);
+    return stdout.split("\n").filter((line) => line !== "");
+  } catch {
+    // pgrep exits 1 when nothing matches.
+    return [];
   }
 }
 
@@ -132,9 +214,23 @@ interface TestServer {
 
 const servers: TestServer[] = [];
 
-/** A local HTTP server that records every request and answers each with `respond`'s result. */
+interface TestResponse {
+  status: number;
+  body?: string;
+}
+
+/** A response that never comes: the server holds the request open until it closes. */
+const HOLD_REQUEST = new Promise<TestResponse>(() => {
+  // Never resolves.
+});
+
+/**
+ * A local HTTP server that records every request and answers each with `respond`'s
+ * result, once it resolves (HOLD_REQUEST keeps a request in flight until the server
+ * closes, which drops every open connection).
+ */
 async function startServer(
-  respond: (req: RecordedRequest) => { status: number; body?: string },
+  respond: (req: RecordedRequest) => TestResponse | Promise<TestResponse>,
 ): Promise<TestServer> {
   const requests: RecordedRequest[] = [];
   const server = createServer((req, res) => {
@@ -150,9 +246,11 @@ async function startServer(
         body: Buffer.concat(chunks).toString("utf8"),
       };
       requests.push(recorded);
-      const { status, body } = respond(recorded);
-      res.writeHead(status, { "Content-Type": "application/json" });
-      res.end(body ?? "{}");
+      void (async () => {
+        const { status, body } = await respond(recorded);
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(body ?? "{}");
+      })();
     });
   });
 
@@ -167,6 +265,7 @@ async function startServer(
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
+        server.closeAllConnections();
       }),
   };
   servers.push(testServer);
@@ -557,6 +656,95 @@ describe("send_oldest_batch", () => {
   });
 });
 
+describe("the ingest token", () => {
+  const TOKEN = "tok-secret-abc";
+  const hostEnv = {
+    HOST_NAME: "test-host",
+    HOST_PLATFORM: "darwin",
+    HOST_OS_VERSION: "26.0",
+    HOST_CPU_COUNT: "8",
+    HOST_MEMORY_BYTES: "17179869184",
+  };
+  const successor =
+    '{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/newSession","maxDurationSeconds":3600}';
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  const QR_TEXT = "█████████\nhttp://example.test/s/sess123\n";
+
+  /** The argument lists of every process mentioning `text`: what `ps` shows any user. */
+  async function processArgumentsMentioning(text: string): Promise<string[]> {
+    const pids = await processesMentioning(text);
+    if (pids.length === 0) {
+      return [];
+    }
+    const { stdout } = await execFileAsync("ps", ["-o", "args=", "-p", pids.join(",")]);
+    return stdout.split("\n").filter((line) => line !== "");
+  }
+
+  // Regression: the token used to be a `-H` argument, visible to every user of a shared
+  // Mac through `ps`. Reads the file mode with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "is not in curl's arguments while frames, qr, end, and a chained create are in flight, yet reaches the server as the bearer",
+    async () => {
+      const afkHome = await makeTempDir();
+      const sessionDir = join(afkHome, "sessions", "sess123");
+      await mkdir(join(sessionDir, "queue"), { recursive: true });
+      await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "AAA\n");
+      const inFlight: string[][] = [];
+      const server = await startServer(async (req) => {
+        // Taken while curl is waiting for the answer.
+        inFlight.push(await processArgumentsMentioning(`http://${req.headers.host}`));
+        if (req.url === "/api/sessions") {
+          return { status: 201, body: successor };
+        }
+        if (req.url.endsWith("/qr")) {
+          return { status: 200, body: QR_TEXT };
+        }
+        return { status: 200, body: accepted };
+      });
+
+      const { stdout, stderr } = await runBash(
+        [
+          'send_oldest_batch; printf "SEND=%s\\n" "$?"',
+          'fetch_qr > /dev/null; printf "QR=%s\\n" "$?"',
+          'end_session; printf "END=%s\\n" "$?"',
+          'create_session sess123 "$INGEST_TOKEN"; printf "CREATE=%s\\n" "$?"',
+          'printf "MODE=%s\\n" "$(stat -f %Lp "$AFK_HOME/sessions/sess123/auth")"',
+        ].join("\n"),
+        {
+          ...hostEnv,
+          AFK_HOME: afkHome,
+          AFK_SERVER: server.url,
+          SESSION_ID: "sess123",
+          INGEST_TOKEN: TOKEN,
+          SESSION_DIR: sessionDir,
+        },
+      );
+
+      expect(inFlight).toHaveLength(4);
+      for (const processes of inFlight) {
+        expect(processes.some((args) => args.includes("curl"))).toBe(true);
+        expect(processes.join("\n")).not.toContain(TOKEN);
+      }
+      expect(server.requests.map((req) => [req.url, req.headers.authorization])).toEqual([
+        ["/api/sessions/sess123/frames", `Bearer ${TOKEN}`],
+        ["/api/sessions/sess123/qr", `Bearer ${TOKEN}`],
+        ["/api/sessions/sess123/end", `Bearer ${TOKEN}`],
+        ["/api/sessions", `Bearer ${TOKEN}`],
+      ]);
+      for (const req of server.requests) {
+        expect(req.headers["x-afk-client"]).toMatch(/^bash\/\d+\.\d+\.\d+$/);
+      }
+      expect(parseKeyValueLines(stdout), stderr).toEqual({
+        SEND: "0",
+        QR: "0",
+        END: "0",
+        CREATE: "0",
+        MODE: "600",
+      });
+    },
+  );
+});
+
 describe("enforce_spool_cap", () => {
   /** Five 40-byte frames named in emission order. */
   async function makeOverfullQueue(): Promise<string> {
@@ -624,6 +812,33 @@ describe("enforce_spool_cap", () => {
         "0000000006-system.ndjson",
         "0000000007-system.ndjson",
       ]);
+    },
+  );
+
+  // Regression: dropped frames vanished without a trace once the log line had gone by.
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "keeps a running count of what it dropped in the session's dropped file across enforcements",
+    async () => {
+      const sessionDir = await makeOverfullQueue();
+
+      // 200 bytes over a 100-byte cap drops three 40-byte frames; two more files
+      // (160 bytes) drop another two.
+      const { code, stderr } = await runBash(
+        [
+          "enforce_spool_cap",
+          'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000006-system.ndjson"',
+          'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000007-system.ndjson"',
+          "enforce_spool_cap",
+        ].join("\n"),
+        { SESSION_DIR: sessionDir, AFK_SPOOL_MAX_BYTES: "100" },
+      );
+
+      expect(code, stderr).toBe(0);
+      expect(await readFile(join(sessionDir, "dropped"), "utf8")).toBe("5 200\n");
+      expect(stderr).toContain(
+        "dropped the oldest 3 frames (120 bytes), 3 frames since the session started",
+      );
     },
   );
 });
@@ -855,6 +1070,7 @@ describe("create_session", () => {
         // The owner removes both files when it exits, so read them while it is alive.
         'printf "CURRENT_FILE=%s\\n" "$(tr "\\n" "|" < "$AFK_HOME/current")"',
         'printf "OWNER_PID_FILE=%s\\n" "$(cat "$AFK_HOME/owner.pid")"',
+        'printf "SESSION_RECORD=%s\\n" "$(cat "$SESSION_DIR/session.json")"',
       ].join("\n"),
       { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
     );
@@ -874,6 +1090,13 @@ describe("create_session", () => {
         "dashboardUrl=http://example.test/s/D3FzMqK8qOLVva9LoHF9uc|",
       // The creating process is the owner; afk status/stop and joiners check it is alive.
       OWNER_PID_FILE: values.PID,
+      // Stays with the session's queue after current is gone, for resend_leftover_queues.
+      SESSION_RECORD: JSON.stringify({
+        sessionId: "D3FzMqK8qOLVva9LoHF9uc",
+        ingestToken: "tok-abc",
+        server: server.url,
+        dashboardUrl: "http://example.test/s/D3FzMqK8qOLVva9LoHF9uc",
+      }),
     });
     const queueStat = await stat(join(afkHome, "sessions", "D3FzMqK8qOLVva9LoHF9uc", "queue"));
     expect(queueStat.isDirectory()).toBe(true);
@@ -1508,6 +1731,166 @@ describe("cleanup_old_sessions", () => {
   });
 });
 
+describe("resend_leftover_queues", () => {
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+
+  /** A session whose owner exited with frames still queued: its record and queue, no `current`. */
+  async function makeLeftoverSession(
+    afkHome: string,
+    serverUrl: string,
+    id = "oldSession",
+  ): Promise<string> {
+    const sessionDir = join(afkHome, "sessions", id);
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(
+      join(sessionDir, "session.json"),
+      JSON.stringify({
+        sessionId: id,
+        ingestToken: `tok-${id}`,
+        server: serverUrl,
+        dashboardUrl: `http://example.test/s/${id}`,
+      }),
+    );
+    await writeFile(join(sessionDir, "queue", "0000000007-system.ndjson"), "SEVEN\n");
+    await writeFile(join(sessionDir, "queue", "0000000008-system.ndjson"), "EIGHT\n");
+    return sessionDir;
+  }
+
+  it("sends an old session's queue with its own token and server, deletes what was accepted, and logs it", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: accepted }));
+    const oldDir = await makeLeftoverSession(afkHome, server.url);
+
+    const { code, stderr } = await runBash("resend_leftover_queues", {
+      AFK_HOME: afkHome,
+      AFK_SERVER: "http://the-new-server.test",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toMatchObject([
+      {
+        url: "/api/sessions/oldSession/frames",
+        headers: expect.objectContaining({ authorization: "Bearer tok-oldSession" }),
+        body: "SEVEN\nEIGHT\n",
+      },
+    ]);
+    expect(await queueFiles(oldDir)).toEqual([]);
+    expect(stderr).toContain("sent 2 frames left over from session oldSession");
+  });
+
+  it("goes back to the server afk start was given once the old queues are done", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: accepted }));
+    await makeLeftoverSession(afkHome, server.url);
+
+    const { stdout, stderr } = await runBash(
+      'resend_leftover_queues; printf "AFK_SERVER=%s\\n" "$AFK_SERVER"',
+      { AFK_HOME: afkHome, AFK_SERVER: "http://the-new-server.test" },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({
+      AFK_SERVER: "http://the-new-server.test",
+    });
+  });
+
+  it.each([410, 404])(
+    "drops the queue and marks the session done when the server answers %i, since the session is over",
+    async (status) => {
+      const afkHome = await makeTempDir();
+      const server = await startServer(() => ({ status, body: '{"error":"gone"}' }));
+      const oldDir = await makeLeftoverSession(afkHome, server.url);
+
+      const { code, stderr } = await runBash("resend_leftover_queues", { AFK_HOME: afkHome });
+
+      expect(code, stderr).toBe(0);
+      expect(server.requests).toHaveLength(1);
+      expect(await exists(join(oldDir, "queue"))).toBe(false);
+      expect(await exists(join(oldDir, "done"))).toBe(true);
+      expect(stderr).toContain("session oldSession is over on the server");
+    },
+  );
+
+  it("keeps the queue for the next start when the server cannot be reached", async () => {
+    const afkHome = await makeTempDir();
+    const oldDir = await makeLeftoverSession(afkHome, "http://127.0.0.1:1");
+
+    const { code, stderr } = await runBash("resend_leftover_queues", { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(oldDir)).toEqual([
+      "0000000007-system.ndjson",
+      "0000000008-system.ndjson",
+    ]);
+    expect(stderr).toMatch(/could not send the 2 frames left over from session oldSession/);
+  });
+
+  it("keeps the rest of the queue when a batch fails part way", async () => {
+    const afkHome = await makeTempDir();
+    let batches = 0;
+    const server = await startServer(() => {
+      batches += 1;
+      return batches === 1 ? { status: 200, body: accepted } : { status: 500, body: "{}" };
+    });
+    const oldDir = await makeLeftoverSession(afkHome, server.url);
+
+    const { code, stderr } = await runBash("SEND_MAX_FILES_PER_BATCH=1\nresend_leftover_queues", {
+      AFK_HOME: afkHome,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(oldDir)).toEqual(["0000000008-system.ndjson"]);
+    expect(stderr).toContain("could not send the 1 frames left over");
+  });
+
+  it("leaves a queue without a session record alone, since it has no token to send it with", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: accepted }));
+    const oldDir = await makeLeftoverSession(afkHome, server.url);
+    await rm(join(oldDir, "session.json"));
+
+    const { code, stderr } = await runBash("resend_leftover_queues", { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toHaveLength(0);
+    expect(await queueFiles(oldDir)).toHaveLength(2);
+  });
+
+  // check_platform runs first and only passes on macOS.
+  it.skipIf(process.platform !== "darwin")(
+    "afk start sends the leftovers before it creates its own session",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startServer((req) =>
+        req.url === "/api/sessions"
+          ? {
+              status: 201,
+              body: '{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/newSession","maxDurationSeconds":3600}',
+            }
+          : { status: 200, body: accepted },
+      );
+      await makeLeftoverSession(afkHome, server.url);
+
+      const { stdout, stderr } = await runBash(
+        [
+          'main start --no-qr > "$AFK_HOME/out.txt" 2> "$AFK_HOME/err.txt" & START=$!',
+          'for _ in $(seq 1 40); do grep -q "/s/newSession" "$AFK_HOME/out.txt" 2>/dev/null && break; sleep 0.1; done',
+          'kill -TERM "$START"; wait "$START"; printf "START_RC=%d\\n" "$?"',
+          'printf "LEFTOVER_LOG=%s\\n" "$(grep -c "left over from session oldSession" "$AFK_HOME/err.txt")"',
+        ].join("\n"),
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+      );
+
+      expect(parseKeyValueLines(stdout), stderr).toEqual({ START_RC: "0", LEFTOVER_LOG: "1" });
+      expect(
+        server.requests.slice(0, 2).map((req) => [req.url, req.headers.authorization]),
+      ).toEqual([
+        ["/api/sessions/oldSession/frames", "Bearer tok-oldSession"],
+        ["/api/sessions", undefined],
+      ]);
+    },
+  );
+});
+
 describe("afk status", () => {
   it("reports no session and exits 1 when there is no current file", async () => {
     const afkHome = await makeTempDir();
@@ -1558,6 +1941,68 @@ describe("afk status", () => {
     expect(code, stderr).toBe(0);
     expect(stdout).toMatch(/\nowner\s+pid [0-9]+, not running/);
   });
+
+  // Sizes files with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "counts the joined runs' queues too and lists the runs still going with their command",
+    async () => {
+      const afkHome = await makeTempDir();
+      const sessionDir = join(afkHome, "sessions", "abc123");
+      await mkdir(join(sessionDir, "queue"), { recursive: true });
+      await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "x".repeat(10));
+      const running = join(sessionDir, "runs", "ab12cd34");
+      const finished = join(sessionDir, "runs", "ef56ab78");
+      for (const runDir of [running, finished]) {
+        await mkdir(join(runDir, "queue"), { recursive: true });
+        await writeFile(join(runDir, "queue", "0000000003-run.ndjson"), "x".repeat(30));
+      }
+      await writeFile(join(running, "command"), "npm test -- --watch\n");
+      await writeFile(join(finished, "command"), "make\n");
+      await writeFile(
+        join(afkHome, "current"),
+        "sessionId=abc123\ningestToken=tok-abc\nserver=http://example.test\ndashboardUrl=http://example.test/s/abc123\n",
+      );
+
+      // This shell stands in for the running command; an exited subshell for the finished one.
+      const { stdout, stderr, code } = await runBash(
+        [
+          'echo "$$" > "$AFK_HOME/owner.pid"',
+          'echo "$$" > "$RUNNING/pid"',
+          '(exit 0) & wait "$!"; echo "$!" > "$FINISHED/pid"',
+          "main status",
+        ].join("\n"),
+        { AFK_HOME: afkHome, RUNNING: running, FINISHED: finished },
+      );
+
+      expect(code, stderr).toBe(0);
+      expect(stdout).toMatch(/\nqueue\s+3 frames, 70 bytes\n/);
+      expect(stdout).not.toContain("dropped");
+      expect(stdout.split("\n").filter((line) => line.startsWith("run "))).toEqual([
+        expect.stringMatching(/^run\s+pid [0-9]+, running: npm test -- --watch$/),
+      ]);
+    },
+  );
+
+  it("shows what the queue cap dropped, the owner's and the joined runs' together", async () => {
+    const afkHome = await makeTempDir();
+    const sessionDir = join(afkHome, "sessions", "abc123");
+    await mkdir(join(sessionDir, "runs", "ab12cd34", "queue"), { recursive: true });
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(sessionDir, "dropped"), "5 200\n");
+    await writeFile(join(sessionDir, "runs", "ab12cd34", "dropped"), "2 80\n");
+    await writeFile(join(afkHome, "current"), "sessionId=abc123\ningestToken=tok-abc\n");
+
+    const { stdout, stderr, code } = await runBash(
+      'echo "$$" > "$AFK_HOME/owner.pid"; main status',
+      {
+        AFK_HOME: afkHome,
+        AFK_SPOOL_MAX_BYTES: "1000",
+      },
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toMatch(/\ndropped\s+7 frames, 280 bytes \(queue over 1000 bytes/);
+  });
 });
 
 describe("afk stop", () => {
@@ -1600,6 +2045,70 @@ describe("afk stop", () => {
     expect(code).toBe(1);
     expect(stderr).toContain("no session running");
   });
+});
+
+describe("afk stop while the sender has a request in flight", () => {
+  const created =
+    '{"sessionId":"abc123","ingestToken":"tok-abc","dashboardUrl":"http://example.test/s/abc123","maxDurationSeconds":3600}';
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  /** How long the owner may take to exit after `afk stop`; without the fix it is curl's 20 s --max-time. */
+  const STOP_DEADLINE_MS = 3_000;
+  /** For the sender's first batch to be on the wire. */
+  const IN_FLIGHT_DEADLINE_MS = 5_000;
+  /** For the killed curl to be reaped. */
+  const REAP_DEADLINE_MS = 1_000;
+
+  // Regression: the sender is a subshell that, forked under the owner's EXIT trap,
+  // only acts on TERM once its curl returns, so `afk stop` used to wait out the
+  // request's whole timeout. Runs the real collectors, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "takes effect within seconds and leaves no curl behind, although the server holds that request open",
+    { timeout: 30_000 },
+    async () => {
+      const afkHome = await makeTempDir();
+      let framesRequests = 0;
+      const server = await startServer((req) => {
+        if (req.url === "/api/sessions") {
+          return { status: 201, body: created };
+        }
+        if (req.url.endsWith("/frames")) {
+          framesRequests += 1;
+          // The batch in flight when the stop arrives is never answered; the flush's is.
+          return framesRequests === 1 ? HOLD_REQUEST : { status: 200, body: accepted };
+        }
+        return { status: 200, body: '{"status":"ended"}' };
+      });
+      const owner = spawnAfk(["start", "--no-qr"], { AFK_HOME: afkHome, AFK_SERVER: server.url });
+      await waitUntil(
+        "the first batch to be in flight",
+        () => framesRequests >= 1,
+        IN_FLIGHT_DEADLINE_MS,
+      );
+
+      const stoppedAt = Date.now();
+      const stop = await runAfk(["stop"], { AFK_HOME: afkHome });
+      const exitCode = await owner.exited;
+      const elapsedMs = Date.now() - stoppedAt;
+
+      expect(stop.code, stop.stderr).toBe(0);
+      expect(exitCode, owner.stderr()).toBe(0);
+      expect(elapsedMs).toBeLessThan(STOP_DEADLINE_MS);
+      expect(server.requests.map((req) => req.url)).toEqual([
+        "/api/sessions",
+        "/api/sessions/abc123/frames",
+        "/api/sessions/abc123/frames",
+        "/api/sessions/abc123/end",
+      ]);
+      // The held request's curl died with its sender rather than living on to its timeout.
+      await waitUntil(
+        "the held request's curl to be gone",
+        async () =>
+          (await processesMentioning(`${server.url}/api/sessions/abc123/frames`)).length === 0,
+        REAP_DEADLINE_MS,
+      );
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+    },
+  );
 });
 
 describe("afk start with a session already running", () => {
@@ -1731,7 +2240,13 @@ describe("afk with no state", () => {
 });
 
 describe("print_qr", () => {
-  const sessionEnv = { SESSION_ID: "sess123", INGEST_TOKEN: "tok-abc", AFK_VERSION: "0.2.0" };
+  /** The session as its owner set it up; SESSION_DIR is where the token file for curl goes. */
+  const sessionEnv = (afkHome: string) => ({
+    SESSION_ID: "sess123",
+    INGEST_TOKEN: "tok-abc",
+    AFK_VERSION: "0.2.0",
+    SESSION_DIR: join(afkHome, "sessions", "sess123"),
+  });
   /** What the server's text render looks like: half-block lines, then the URL. */
   const QR_TEXT = "█████████\n█▀▀▀▀▀▀▀█\n█ ▄▀▄ ▄ █\n█████████\nhttp://example.test/s/sess123\n";
   /** The test process has no tty, so a snippet that wants the terminal path says so. */
@@ -1742,7 +2257,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -1767,7 +2282,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
       LANG: "en_US.UTF-8",
@@ -1789,7 +2304,7 @@ describe("print_qr", () => {
     }));
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -1803,7 +2318,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
       AFK_NO_QR: "1",
@@ -1819,7 +2334,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, code } = await runBash("print_qr", {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -1834,7 +2349,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 500, body: '{"error":"boom"}' }));
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -1848,7 +2363,7 @@ describe("print_qr", () => {
     const afkHome = await makeTempDir();
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       // Port 1 needs root to bind and nothing listens there: the connection is refused.
       AFK_SERVER: "http://127.0.0.1:1",
@@ -2214,6 +2729,87 @@ describe("cmd_run", () => {
       expect(final?.data.exitCode).toBe(2);
       expect(final?.data.output.tail).toBeUndefined();
       expect(server.requests.some((req) => req.body.includes("secret"))).toBe(false);
+    },
+  );
+});
+
+describe("cmd_run owning a session that reaches its cap", () => {
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  /** The cap of the first session: the client chains a quarter of it (2 s) before. */
+  const CAP_SECONDS = 4;
+  /** The successor's cap, long enough that it is not chained from in turn during the test. */
+  const SUCCESSOR_CAP_SECONDS = 3600;
+  /** Long enough for the command to outlive the chain, so its last frames land in the successor. */
+  const RUN_SECONDS = 4;
+  const RUN_TIMEOUT_MS = 15_000;
+
+  /** The run frames a session received, in the order they arrived, with their sequence. */
+  function runFrames(server: TestServer, sessionId: string): RunFrame[] {
+    return server.requests
+      .filter((req) => req.url === `/api/sessions/${sessionId}/frames`)
+      .flatMap((req) => req.body.split("\n").filter((line) => line !== ""))
+      .map((line) => Frame.parse(JSON.parse(line)))
+      .filter((frame): frame is RunFrame => frame.collector === "run");
+  }
+
+  // Regression: the owning run's sampler stopped at the cap and its remaining frames
+  // stayed in the old session's queue. Runs the real collectors, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "chains to a successor before the cap and sends the rest of the run there, final frame included, with its sequences continuing",
+    { timeout: RUN_TIMEOUT_MS },
+    async () => {
+      const afkHome = await makeTempDir();
+      let creates = 0;
+      const server = await startServer((req) => {
+        if (req.url === "/api/sessions") {
+          creates += 1;
+          const id = creates === 1 ? "first" : "second";
+          const cap = creates === 1 ? CAP_SECONDS : SUCCESSOR_CAP_SECONDS;
+          return {
+            status: 201,
+            body: `{"sessionId":"${id}","ingestToken":"tok-${id}","dashboardUrl":"http://example.test/s/${id}","maxDurationSeconds":${cap}}`,
+          };
+        }
+        // The server ends the first session the moment its successor exists.
+        if (req.url.startsWith("/api/sessions/first/") && creates > 1) {
+          return { status: 410, body: '{"error":"session ended"}' };
+        }
+        return { status: 200, body: accepted };
+      });
+
+      const { code, stderr } = await runBash(
+        `cmd_run -- sleep ${RUN_SECONDS}`,
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+        RUN_TIMEOUT_MS,
+      );
+
+      expect(code, stderr).toBe(0);
+      const creations = server.requests.filter((req) => req.url === "/api/sessions");
+      expect(creations.map((req) => req.headers.authorization)).toEqual([
+        undefined,
+        "Bearer tok-first",
+      ]);
+      expect(JSON.parse(creations[1]!.body)).toMatchObject({ previousSessionId: "first" });
+      expect(stderr).toContain(
+        `session first reached its ${CAP_SECONDS}s cap; continuing in session second`,
+      );
+      // The run stream spans both sessions and keeps counting; its exit lands in the successor.
+      const inFirst = runFrames(server, "first");
+      const inSecond = runFrames(server, "second");
+      expect(inFirst.length).toBeGreaterThan(0);
+      expect(inSecond.at(-1)?.data).toMatchObject({ state: "exited", exitCode: 0 });
+      expect(new Set([...inFirst, ...inSecond].map((frame) => frame.stream)).size).toBe(1);
+      const sequences = [...inFirst, ...inSecond].map((frame) => frame.sequence);
+      expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+      expect(new Set(sequences).size).toBe(sequences.length);
+      expect(inSecond[0]!.sequence).toBeGreaterThan(inFirst.at(-1)!.sequence);
+      // The successor is the session the run ends; the first was ended by the chain.
+      const ends = server.requests.filter((req) => req.url.endsWith("/end")).map((req) => req.url);
+      expect(ends).toEqual(["/api/sessions/second/end"]);
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+      expect(await exists(join(afkHome, "sessions", "first", "done"))).toBe(true);
+      expect(await queueFiles(join(afkHome, "sessions", "first"))).toEqual([]);
+      expect(await queueFiles(join(afkHome, "sessions", "second"))).toEqual([]);
     },
   );
 });

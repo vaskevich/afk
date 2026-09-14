@@ -82,13 +82,13 @@ the way they are.
 
 Status codes on create:
 
-| code | meaning                                                                                     | client behaviour                                                            |
-| ---- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| 201  | session created                                                                             | start sampling                                                              |
-| 400  | the body failed validation (`details` is the Zod error, naming the field)                   | give up; a client bug                                                       |
-| 413  | the body is larger than the create limit                                                    | give up; a client bug                                                       |
-| 426  | this client version or `protocolVersion` is below what the server accepts (`details` above) | print the server's message and the update hint, exit 1                      |
-| 503  | at capacity (`Retry-After` in seconds)                                                      | `afk start` waits and retries; `afk run` runs the command without telemetry |
+| code | meaning                                                                                     | client behaviour                                                                                                  |
+| ---- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 201  | session created                                                                             | start sampling                                                                                                    |
+| 400  | the body failed validation (`details` is the Zod error, naming the field)                   | give up; a client bug                                                                                             |
+| 413  | the body is larger than the create limit                                                    | give up; a client bug                                                                                             |
+| 426  | this client version or `protocolVersion` is below what the server accepts (`details` above) | print the server's message and the update hint; `afk start` exits 1, `afk run` runs the command without telemetry |
+| 503  | at capacity (`Retry-After` in seconds)                                                      | `afk start` waits and retries; `afk run` runs the command without telemetry                                       |
 
 A `protocolVersion` outside `[MIN_PROTOCOL_VERSION, PROTOCOL_VERSION]` is a 426, not a
 400, so an old client sees the upgrade message rather than "invalid request".
@@ -115,7 +115,10 @@ its ingest endpoint answers 410 and its open dashboards receive the `end` stream
 with `nextSessionId` set. Anything still queued for the old session must therefore be
 sent _before_ the chain request. A previous session that has already ended can still
 be chained from (only the links are written), so a client that slept through the cap
-still gets its successor linked. Sequences are per session and start again at 1.
+still gets its successor linked. Sequences are per session and start again at 1; the
+server only needs them monotonic within a stream, so a `run:<runId>` stream that
+spans a chain (an `afk run` joined to, or owning, the old session) keeps counting
+instead.
 
 Additional status codes on a chained create:
 
@@ -127,7 +130,8 @@ Additional status codes on a chained create:
 
 A chain from a still-active session is admitted even at capacity, since it frees the
 slot it takes; a chain from a session that is already over is subject to the 503 above
-like any other create. The bash client chains from `system_sampler_loop` at
+like any other create. The bash client (`afk start`, and an `afk run` that started its
+own session) chains from `system_sampler_loop` at
 `min(30, max(2, maxDurationSeconds / 4))` seconds before the cap
 (`CHAIN_BEFORE_CAP_MAX_SECONDS` / `CHAIN_BEFORE_CAP_MIN_SECONDS` in `cli/afk`): 30 s
 for the default hour, a quarter of the cap for the short sessions the tests use.
