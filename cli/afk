@@ -28,6 +28,8 @@
 #   AFK_HOME             state directory, default ~/.afk
 #   AFK_SPOOL_MAX_BYTES  cap on queued frames on disk, default 50 MiB; oldest dropped past it
 #   AFK_NO_QR            set to 1 to never print the QR code (same as --no-qr)
+#   AFK_RUN_TAIL_LINES   how many of the last lines of stdout and stderr a failed `afk run`
+#                        reports, default 20; 0 sends no output at all (exit 0 never sends any)
 #
 # Layout of ~/.afk:
 #   current                        the active session (id, token, server) so other
@@ -72,6 +74,12 @@ PROCESSES_INTERVAL_SECONDS=5
 PROCESSES_TOP_MAX=10
 # Full executable paths are cut to this many characters (PROCESS_COMMAND_MAX_LENGTH in shared).
 PROCESS_COMMAND_MAX_LENGTH=512
+# A failed `afk run` puts the last AFK_RUN_TAIL_LINES lines of its stdout and stderr on its
+# final frame, at most RUN_TAIL_MAX_LINES (the same name in shared), each cut to
+# RUN_TAIL_MAX_LINE_CHARS bytes. 0 is the privacy switch: no output leaves the machine.
+RUN_TAIL_MAX_LINES=20
+RUN_TAIL_MAX_LINE_CHARS=200
+AFK_RUN_TAIL_LINES="${AFK_RUN_TAIL_LINES:-$RUN_TAIL_MAX_LINES}"
 SEND_INTERVAL_SECONDS=1
 SEND_MAX_BACKOFF_SECONDS=30
 SEND_MAX_FILES_PER_BATCH=200
@@ -263,8 +271,46 @@ collect_processes() {
 # Set up by cmd_run: RUN_ID, RUN_DIR (stdout, stderr, pid, seq), RUN_STARTED, RUN_COMMAND_JSON.
 # ---------------------------------------------------------------------------
 
-collect_run() { # state [exitCode]
-  local state=$1 exit_code=${2:-null} pid out err cpu rss elapsed
+# The `output.tail` object for the final frame of a failed run: the last
+# AFK_RUN_TAIL_LINES lines of the captured stdout and stderr, each cut to
+# RUN_TAIL_MAX_LINE_CHARS bytes, with `truncated` set when either stream had more lines
+# than were kept. Prints nothing for exit code 0 or when the switch is 0, so the caller
+# can pass the result straight to collect_run. Runs in a subshell under the C locale so
+# cut counts bytes and sed never chokes on bytes that are not valid UTF-8; ANSI colour
+# sequences and control characters other than tab are dropped, the latter because JSON
+# strings may not contain them.
+run_output_tail() { # exit-code
+  (
+    export LC_ALL=C
+    local lines name file count line json first truncated=false stdout_json="" stderr_json="" esc
+    esc=$(printf '\033')
+    [ "${1:-0}" -ne 0 ] 2>/dev/null || exit 0
+    case "$AFK_RUN_TAIL_LINES" in
+      ''|*[!0-9]*) lines=$RUN_TAIL_MAX_LINES ;;
+      *) lines=$AFK_RUN_TAIL_LINES ;;
+    esac
+    [ "$lines" -gt "$RUN_TAIL_MAX_LINES" ] && lines=$RUN_TAIL_MAX_LINES
+    [ "$lines" -gt 0 ] || exit 0
+    for name in stdout stderr; do
+      file="$RUN_DIR/$name"
+      # NR counts a final line without a newline too, which is what tail keeps.
+      count=$(awk 'END { print NR }' "$file" 2>/dev/null || echo 0)
+      [ "${count:-0}" -gt "$lines" ] && truncated=true
+      json=""; first=1
+      while IFS= read -r line || [ -n "$line" ]; do
+        [ "$first" = 1 ] || json="$json,"
+        first=0
+        json="$json\"$(json_string "$line")\""
+      done < <(tail -n "$lines" "$file" 2>/dev/null | sed "s/$esc\[[0-9;]*[a-zA-Z]//g" \
+        | cut -c "1-$RUN_TAIL_MAX_LINE_CHARS" | tr -d '\000-\010\013-\037\177')
+      if [ "$name" = stdout ]; then stdout_json=$json; else stderr_json=$json; fi
+    done
+    printf '{"stdout":[%s],"stderr":[%s],"truncated":%s}' "$stdout_json" "$stderr_json" "$truncated"
+  )
+}
+
+collect_run() { # state [exitCode] [output-tail-json]
+  local state=$1 exit_code=${2:-null} tail=${3:-} pid out err cpu rss elapsed
   pid=$(cat "$RUN_DIR/pid" 2>/dev/null || echo 0)
   out=$(file_size "$RUN_DIR/stdout")
   err=$(file_size "$RUN_DIR/stderr")
@@ -273,8 +319,9 @@ collect_run() { # state [exitCode]
   # shellcheck disable=SC2046 # splitting the two columns into $1 and $2 is the point
   set -- $(ps -o %cpu=,rss= -p "$pid" 2>/dev/null)
   cpu=${1:-0}; rss=${2:-0}
-  printf '{"command":"%s","pid":%d,"state":"%s","exitCode":%s,"elapsedSeconds":%d,"process":{"cpuPercent":%s,"rssBytes":%d},"output":{"flavor":"volume","stdoutBytes":%d,"stderrBytes":%d}}' \
-    "$RUN_COMMAND_JSON" "$pid" "$state" "$exit_code" "$elapsed" "$cpu" $((rss * 1024)) "$out" "$err"
+  [ -z "$tail" ] || tail=",\"tail\":$tail"
+  printf '{"command":"%s","pid":%d,"state":"%s","exitCode":%s,"elapsedSeconds":%d,"process":{"cpuPercent":%s,"rssBytes":%d},"output":{"flavor":"volume","stdoutBytes":%d,"stderrBytes":%d%s}}' \
+    "$RUN_COMMAND_JSON" "$pid" "$state" "$exit_code" "$elapsed" "$cpu" $((rss * 1024)) "$out" "$err" "$tail"
 }
 
 # Samples the run every second until killed. Keeps its sequence in a file so the
@@ -789,7 +836,8 @@ cmd_run() {
   sleep 0.3
   local seq
   seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
-  emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE")"
+  # Only a failure ships any output, and only its tail (empty for exit code 0).
+  emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE" "$(run_output_tail "$EXIT_CODE")")"
   log "command exited with status $EXIT_CODE"
 
   if [ -n "$SYSTEM_PID" ]; then

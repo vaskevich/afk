@@ -440,7 +440,8 @@ describe.skipIf(process.platform !== "darwin")(
         command: "sh -c echo out; echo err >&2; exit 3",
         state: "exited",
         exitCode: 3,
-        output: { flavor: "volume" },
+        // A failed command ships the tail of what it printed on its final frame.
+        output: { flavor: "volume", tail: { stdout: ["out"], stderr: ["err"], truncated: false } },
       });
       expect(final.frame.data.output.stdoutBytes).toBeGreaterThanOrEqual("out\n".length);
       expect(final.frame.data.output.stderrBytes).toBeGreaterThanOrEqual("err\n".length);

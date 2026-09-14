@@ -238,6 +238,38 @@ The final frame (`state: "exited"`) carries the same shape with `exitCode` set a
 what closes the row: `elapsedSeconds` is the command's total wall time and `output` is
 its final cumulative counts.
 
+When the command exited non-zero, the final frame's `output` also carries `tail`, the
+last lines it printed, so the dashboard can say why it failed:
+
+```json
+"output": {
+  "flavor": "volume",
+  "stdoutBytes": 9140,
+  "stderrBytes": 71,
+  "tail": {
+    "stdout": ["processing 299/10000 items", "processing 300/10000 items"],
+    "stderr": ["migration-hang: fatal: lost connection to database after item 300"],
+    "truncated": true
+  }
+}
+```
+
+| field       | meaning                                                                                                    |
+| ----------- | ---------------------------------------------------------------------------------------------------------- |
+| `stdout`    | the last lines of stdout, oldest first; at most `RUN_TAIL_MAX_LINES` (20)                                  |
+| `stderr`    | the same for stderr                                                                                        |
+| `truncated` | true when either stream had more lines than were kept (cut lines do not count)                             |
+| each line   | at most `RUN_TAIL_MAX_LINE_CHARS` (200) characters; the client cuts by byte, so never more, possibly fewer |
+
+`tail` is independent of `output.flavor`: every flavor carries it in the same place.
+The client sends it only on the final frame, only for a non-zero exit, and only when
+its `AFK_RUN_TAIL_LINES` variable is not `0`; that variable (default 20, capped at 20)
+is the privacy switch, since the tail is the one place command output leaves the
+machine. Output of a command that exits 0 is never sent. Lines are cut to 200 bytes,
+ANSI colour sequences and control characters other than tab are dropped, and a line's
+text goes through the same escaping as every other string. The schema rejects a tail
+over either cap, so a client must apply them before sending.
+
 ### Collector: `processes`
 
 The busiest processes, sampled every 5 s (the client's `PROCESSES_INTERVAL_SECONDS`)
@@ -355,11 +387,17 @@ belong to a stream, i.e. a timeline row.
 | `details`   | optional structured snapshot the rule captured when the event opened (`AnomalyEventDetails`, below); absent when the rule had nothing to add  |
 
 `details` is a named object so rules can add fields over time without changing the
-event envelope. Today it has one: `topProcesses`, at most 3 entries of `{ pid,
-cpuPercent, command }` (`EVENT_TOP_PROCESSES_MAX`), taken from the latest `processes`
-frame at the moment the event opened. It is a snapshot: while the event stays open the
-message and severity may be updated by later verdicts, but `details` keeps what was
-running when the condition began.
+event envelope. Today it has two fields, each optional:
+
+- `topProcesses`: at most 3 entries of `{ pid, cpuPercent, command }`
+  (`EVENT_TOP_PROCESSES_MAX`), taken from the latest `processes` frame at the moment
+  the event opened. Set by `cpu.high`.
+- `outputTail`: the `output.tail` of a run's final frame (`{ stdout, stderr,
+truncated }`, same caps as the frame field above), copied by `run.exited` when the
+  frame carries one, i.e. the command failed and the client's output switch was on.
+
+It is a snapshot: while the event stays open the message and severity may be updated
+by later verdicts, but `details` keeps what was running when the condition began.
 
 The rule catalogue today:
 
@@ -368,7 +406,7 @@ The rule catalogue today:
 | `cpu.high`        | `system`  | warning            | cpu ≥ 90% sustained 30 s; backdated to when it crossed; names the top 3 processes (see below) | spanning |
 | `memory.pressure` | `system`  | warning / critical | pressure level ≥ warn (critical if ≥ critical) sustained 5 s                                  | spanning |
 | `client.stale`    | `system`  | warning            | no frame from the stream for 60 s; opens on a tick, backdated to 60 s after the last frame    | spanning |
-| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero)                                             | instant  |
+| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero; ends with its last output line, see below)  | instant  |
 | `run.stalled`     | `run`     | warning            | still running but output volume unchanged for 60 s; backdated to when it stopped changing     | spanning |
 
 A spanning event opens with `endedAt: null` and later gets an `endedAt` once the
@@ -382,6 +420,12 @@ event (`run.exited`) is created already closed: `startedAt` equals `endedAt`. Se
 and appends them to the message by basename, e.g. "cpu above 90% for over 30s (top:
 node 1112%, WindowServer 9%, Google Chrome Helper 7%)". A session without a
 `processes` stream gets the plain message and no `details`.
+
+`run.exited` reads the final frame's `output.tail`: when it is there, the failure
+message ends with the last non-blank stderr line (stdout's if stderr is empty), e.g.
+"command failed with exit code 3 after 12s: fatal: lost connection to database", and
+the whole tail is stored in `details.outputTail`. A run whose client sent no tail
+(exit 0, or `AFK_RUN_TAIL_LINES=0`) gets the plain message and no `details`.
 
 ## GET /api/stats
 

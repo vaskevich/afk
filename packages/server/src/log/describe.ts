@@ -33,10 +33,15 @@ export function describeFrame(frame: Frame): string {
     case "run": {
       const { command, state, exitCode, elapsedSeconds, process, output } = frame.data;
       const status = state === "exited" ? `exited=${exitCode}` : "running";
+      // The tail itself stays out of the log; one line per frame is the contract here.
+      const tail =
+        output.tail === undefined
+          ? ""
+          : ` tail: ${output.tail.stdout.length + output.tail.stderr.length} lines`;
       return (
         `${frame.stream} #${frame.sequence} ${status} t=${elapsedSeconds}s ` +
         `out=${kib(output.stdoutBytes)} err=${kib(output.stderrBytes)} ` +
-        `cpu=${process.cpuPercent}% rss=${kib(process.rssBytes)} (${command})`
+        `cpu=${process.cpuPercent}% rss=${kib(process.rssBytes)} (${command})${tail}`
       );
     }
     case "processes": {

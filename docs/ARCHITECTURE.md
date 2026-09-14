@@ -328,6 +328,13 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   line with no env var. The alternative, a release pipeline and a Homebrew tap, adds
   infrastructure for a single-file bash client that was chosen for "curl the file"
   distribution in the first place (docs/CLIENT.md).
+- **2026-09-15** Command output leaves the machine only on failure, only the tail, and
+  only when the switch is on: a non-zero `afk run` puts the last 20 lines of stdout and
+  stderr (200 bytes each) on its final frame as `output.tail`, `run.exited` copies it
+  into `details.outputTail`, and `AFK_RUN_TAIL_LINES=0` turns it off entirely. Exit 0
+  never sends output. Reasoning: an exit code without a reason is a dead end, but full
+  logs would break both the frame budget and the "what is sent" story, and the
+  interesting lines of a failure are almost always the last ones.
 - **2026-09-15** All server tuning goes through environment variables parsed once in
   `config.ts` (`loadConfig`, a Zod schema keyed by variable name). No other module reads
   `process.env`; each default is owned by the module that uses it and referenced by the

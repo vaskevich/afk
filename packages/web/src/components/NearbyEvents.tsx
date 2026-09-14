@@ -1,6 +1,7 @@
 import type { AnomalyEvent } from "@afk/shared";
 import { eventEndMs } from "../events.ts";
 import { formatDuration, formatOffset } from "../format.ts";
+import { OutputTail } from "./OutputTail.tsx";
 import { TopProcesses } from "./TopProcesses.tsx";
 
 interface Props {
@@ -43,6 +44,7 @@ function EventList({ events, t0, onSelectEvent }: Pick<Props, "events" | "t0" | 
               </small>
             </span>
           </button>
+          {event.details?.outputTail && <OutputTail tail={event.details.outputTail} />}
         </li>
       ))}
     </ul>

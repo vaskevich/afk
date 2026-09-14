@@ -1,5 +1,6 @@
 import type { AnomalyEvent, SessionStatus } from "@afk/shared";
 import { isOpenEvent, pluralize, worstSeverity } from "../events.ts";
+import { OutputTail } from "./OutputTail.tsx";
 import { TopProcesses } from "./TopProcesses.tsx";
 
 interface Props {
@@ -63,6 +64,7 @@ export function StatusBanner({ status, events, onSelectEvent }: Props) {
                 )}
               </span>
             </button>
+            {event.details?.outputTail && <OutputTail tail={event.details.outputTail} />}
           </li>
         ))}
       </ul>

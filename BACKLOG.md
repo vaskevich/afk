@@ -40,6 +40,8 @@ A pre-announcement pass over security, privacy, supply chain, open-source hygien
 
 Already in the backlog but more urgent than its position suggests: "Rate limit session creation per client address" under Hardening (server) is the only thing between an anonymous `curl` loop and one address holding all 20 session slots indefinitely, and it belongs with the before-launch items above.
 
+- [x] Ship the last lines of output when a run fails (docs/PRODUCT.md item 7) -- `run_output_tail` in `cli/afk` puts `output.tail` (20 lines of stdout and stderr, 200 bytes each) on the final frame of a non-zero exit, `run.exited` ends its message with the last stderr line and keeps the tail in `details.outputTail`, the dashboard shows it as a collapsed "last output" block; `AFK_RUN_TAIL_LINES=0` is the privacy switch
+
 ## Wishlist: agents collector (claude / codex)
 
 Parked on 2026-09-15. Investigated and cheap to build (about the size of the

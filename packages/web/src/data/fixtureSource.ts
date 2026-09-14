@@ -1,9 +1,15 @@
-import { EVENT_TOP_PROCESSES_MAX, MemoryPressureLevel, PROCESSES_TOP_MAX } from "@afk/shared";
+import {
+  EVENT_TOP_PROCESSES_MAX,
+  MemoryPressureLevel,
+  PROCESSES_TOP_MAX,
+  RUN_TAIL_MAX_LINES,
+} from "@afk/shared";
 import type {
   AnomalyEvent,
   AnomalyEventDetails,
   FramesResponse,
   ProcessEntry,
+  RunOutputTail,
   StoredFrame,
   SessionSummary,
 } from "@afk/shared";
@@ -16,8 +22,10 @@ import type { SessionSource } from "./source.ts";
  * starts creeping up. Earlier there is a short burst of pressure flaps (to exercise
  * marker clustering) and later a 90 s stretch with no frames at all (a stale client).
  * A second stream, `processes`, samples the busiest processes every 5 s and shows a
- * `cpu-burn` node process dominating during the burn. The anomaly events below are
- * what the server's rules would derive from these frames.
+ * `cpu-burn` node process dominating during the burn. A third, `run:…`, is a short
+ * `afk run` of a fake migration that crashes with exit code 3; its final frame carries
+ * the last lines it printed. The anomaly events below are what the server's rules
+ * would derive from these frames.
  */
 
 const DURATION_SECONDS = 15 * 60;
@@ -41,6 +49,20 @@ const STREAM = "system";
 const PROCESSES_STREAM = "processes";
 /** The client samples processes every 5 s (PROCESSES_INTERVAL_SECONDS in cli/afk). */
 const PROCESSES_INTERVAL_SECONDS = 5;
+/** A wrapped `scenarios/migration-hang --crash 3` that runs for 15 s from 4:00 and exits 3. */
+const RUN_STREAM = "run:3f2a9c1e";
+const RUN_START = 4 * 60;
+const RUN_DURATION_SECONDS = 15;
+const RUN_END = RUN_START + RUN_DURATION_SECONDS;
+const RUN_COMMAND = "scenarios/migration-hang --crash 3 --hang-at 300 --rate 20";
+const RUN_PID = 58120;
+const RUN_EXIT_CODE = 3;
+const RUN_TOTAL_ITEMS = 10_000;
+const RUN_LINES_PER_SECOND = 20;
+/** The scenario prints this many item lines and then dies. */
+const RUN_CRASH_ITEM = 300;
+const RUN_HEADER_LINE = `migration-hang: migrating ${RUN_TOTAL_ITEMS} items at ${RUN_LINES_PER_SECOND}/s, will exit ${RUN_EXIT_CODE} after item ${RUN_CRASH_ITEM} (pid ${RUN_PID})`;
+const RUN_FATAL_LINE = `migration-hang: fatal: lost connection to database after item ${RUN_CRASH_ITEM}`;
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 
@@ -203,6 +225,63 @@ function commandBasename(command: string): string {
   return command.slice(command.lastIndexOf("/") + 1);
 }
 
+/** What the migration has printed after `elapsed` seconds: the header, then 20 items a second. */
+function migrationItemsAt(elapsed: number): number {
+  return Math.min(RUN_CRASH_ITEM, elapsed * RUN_LINES_PER_SECOND);
+}
+
+function migrationLine(item: number): string {
+  return `processing ${item}/${RUN_TOTAL_ITEMS} items`;
+}
+
+/** Cumulative stdout bytes, newlines included, as the client's byte counter would see them. */
+function migrationStdoutBytes(items: number): number {
+  let total = RUN_HEADER_LINE.length + 1;
+  for (let item = 1; item <= items; item++) {
+    total += migrationLine(item).length + 1;
+  }
+  return total;
+}
+
+/** The tail the client puts on the final frame: the last 20 item lines and the fatal line. */
+function migrationTail(): RunOutputTail {
+  const first = RUN_CRASH_ITEM - RUN_TAIL_MAX_LINES + 1;
+  return {
+    stdout: Array.from({ length: RUN_TAIL_MAX_LINES }, (_, i) => migrationLine(first + i)),
+    stderr: [RUN_FATAL_LINE],
+    // The header plus 300 item lines is far more than the 20 kept.
+    truncated: true,
+  };
+}
+
+/** One frame of the run stream at `elapsed` seconds in; the last one is the exit. */
+function runFrameData(elapsed: number): StoredFrame["frame"] {
+  const exited = elapsed >= RUN_DURATION_SECONDS;
+  const tail = migrationTail();
+  return {
+    stream: RUN_STREAM,
+    collector: "run",
+    sequence: elapsed + 1,
+    timestamp: 0, // filled in by the caller
+    data: {
+      command: RUN_COMMAND,
+      pid: RUN_PID,
+      state: exited ? "exited" : "running",
+      exitCode: exited ? RUN_EXIT_CODE : null,
+      elapsedSeconds: elapsed,
+      process: exited
+        ? { cpuPercent: 0, rssBytes: 0 }
+        : { cpuPercent: 2.5 + (elapsed % 3) * 0.4, rssBytes: 42 * MIB + elapsed * 64 * 1024 },
+      output: {
+        flavor: "volume",
+        stdoutBytes: migrationStdoutBytes(migrationItemsAt(elapsed)),
+        stderrBytes: exited ? RUN_FATAL_LINE.length + 1 : 0,
+        ...(exited ? { tail } : {}),
+      },
+    },
+  };
+}
+
 /**
  * Events in the shape the server will produce: id is `<stream>:<kind>:<startedAt>`.
  * `processesWhenCpuHighOpened` is the processes frame the rule would have consulted.
@@ -213,6 +292,7 @@ function demoEvents(
 ): AnomalyEvent[] {
   const at = (seconds: number) => startedAt + seconds * 1000;
   const event = (
+    stream: string,
     kind: string,
     severity: AnomalyEvent["severity"],
     startSeconds: number,
@@ -220,8 +300,8 @@ function demoEvents(
     message: string,
     details?: AnomalyEventDetails,
   ): AnomalyEvent => ({
-    id: `${STREAM}:${kind}:${at(startSeconds)}`,
-    stream: STREAM,
+    id: `${stream}:${kind}:${at(startSeconds)}`,
+    stream,
     kind,
     severity,
     message,
@@ -231,16 +311,36 @@ function demoEvents(
   });
 
   const flaps = PRESSURE_FLAPS.map(([start, end]) =>
-    event("memory.pressure", "warning", start, end, `memory pressure at warn for ${end - start}s`),
+    event(
+      STREAM,
+      "memory.pressure",
+      "warning",
+      start,
+      end,
+      `memory pressure at warn for ${end - start}s`,
+    ),
   );
   const cpuHighStart = BURN_START + CPU_HIGH_DELAY_SECONDS;
   const details = topProcessesDetails(processesWhenCpuHighOpened);
   const topSummary = (details.topProcesses ?? [])
     .map((p) => `${commandBasename(p.command)} ${p.cpuPercent.toFixed(0)}%`)
     .join(", ");
+  const outputTail = migrationTail();
   const events = [
     ...flaps,
+    // An instant event: the run.exited rule ends the message with the last stderr line
+    // and keeps the whole tail in details.
     event(
+      RUN_STREAM,
+      "run.exited",
+      "critical",
+      RUN_END,
+      RUN_END,
+      `command failed with exit code ${RUN_EXIT_CODE} after ${RUN_DURATION_SECONDS}s: ${RUN_FATAL_LINE}`,
+      { outputTail },
+    ),
+    event(
+      STREAM,
       "cpu.high",
       "warning",
       cpuHighStart,
@@ -249,6 +349,7 @@ function demoEvents(
       details,
     ),
     event(
+      STREAM,
       "memory.pressure",
       "warning",
       PRESSURE_WARN_START,
@@ -256,6 +357,7 @@ function demoEvents(
       `memory pressure at warn for ${describeSeconds(PRESSURE_WARN_END - PRESSURE_WARN_START)}`,
     ),
     event(
+      STREAM,
       "client.stale",
       "info",
       STALE_START,
@@ -290,7 +392,7 @@ export function generateDemoSession(sessionId: string): FramesResponse {
     startedAt,
     endedAt: startedAt + DURATION_SECONDS * 1000,
     maxDurationSeconds: 60 * 60,
-    streamCount: 2,
+    streamCount: 3,
     maxStreams: 10,
   };
 
@@ -395,6 +497,14 @@ export function generateDemoSession(sessionId: string): FramesResponse {
             top,
           },
         },
+      });
+    }
+
+    if (i >= RUN_START && i <= RUN_END) {
+      frames.push({
+        index: frames.length + 1,
+        receivedAt: timestamp * 1000 + 80 + Math.round(rand() * 120),
+        frame: { ...runFrameData(i - RUN_START), timestamp },
       });
     }
   }

@@ -1,6 +1,7 @@
 import type { RowView, CollectorUi, FrameOf } from "../registry.ts";
 import { frameTimeMs } from "../model.ts";
 import { formatDuration, formatPercent } from "../../format.ts";
+import { OutputTail } from "../../components/OutputTail.tsx";
 
 type RunFrame = FrameOf<"run">;
 
@@ -101,28 +102,32 @@ function RunDetails({ frame }: { frame: RunFrame }) {
   const exitLabel =
     state === "exited" ? (exitCode === 0 ? "exited 0" : `exited ${exitCode ?? "?"}`) : "running";
   return (
-    <dl className="kv">
-      <dt>command</dt>
-      <dd className="mono" title={command}>
-        {command}
-      </dd>
-      <dt>state</dt>
-      <dd
-        className={state === "exited" ? (exitCode === 0 ? "level-normal" : "level-critical") : ""}
-      >
-        {exitLabel}
-      </dd>
-      <dt>elapsed</dt>
-      <dd>{formatDuration(elapsedSeconds * 1000)}</dd>
-      <dt>stdout / stderr</dt>
-      <dd>
-        {formatBytes(output.stdoutBytes)} / {formatBytes(output.stderrBytes)}
-      </dd>
-      <dt>process</dt>
-      <dd>
-        pid {pid}, cpu {formatPercent(process.cpuPercent)}, rss {formatBytes(process.rssBytes)}
-      </dd>
-    </dl>
+    <>
+      <dl className="kv">
+        <dt>command</dt>
+        <dd className="mono" title={command}>
+          {command}
+        </dd>
+        <dt>state</dt>
+        <dd
+          className={state === "exited" ? (exitCode === 0 ? "level-normal" : "level-critical") : ""}
+        >
+          {exitLabel}
+        </dd>
+        <dt>elapsed</dt>
+        <dd>{formatDuration(elapsedSeconds * 1000)}</dd>
+        <dt>stdout / stderr</dt>
+        <dd>
+          {formatBytes(output.stdoutBytes)} / {formatBytes(output.stderrBytes)}
+        </dd>
+        <dt>process</dt>
+        <dd>
+          pid {pid}, cpu {formatPercent(process.cpuPercent)}, rss {formatBytes(process.rssBytes)}
+        </dd>
+      </dl>
+      {/* Only the final frame of a failed run carries a tail; earlier frames show none. */}
+      {output.tail && <OutputTail tail={output.tail} />}
+    </>
   );
 }
 

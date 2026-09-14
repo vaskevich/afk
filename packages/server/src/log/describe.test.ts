@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { MemoryPressureLevel } from "@afk/shared";
-import { makeProcessesFrame, makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
+import {
+  makeProcessesFrame,
+  makeRunFrame,
+  makeRunTail,
+  makeSystemFrame,
+} from "@afk/shared/testing";
 import { describeFrame } from "./describe.ts";
 
 describe("describeFrame", () => {
@@ -57,6 +62,17 @@ describe("describeFrame", () => {
       const frame = makeRunFrame(1, { state: "exited", exitCode: 3, elapsedSeconds: 1 });
 
       expect(describeFrame(frame)).toContain("exited=3");
+    });
+
+    it("counts the tail lines of a failed command on one line without printing them", () => {
+      const tail = makeRunTail({ stdout: ["a", "b"], stderr: ["fatal: boom"] });
+      const frame = makeRunFrame(1, { state: "exited", exitCode: 3, tail });
+
+      const description = describeFrame(frame);
+
+      expect(description).toContain("tail: 3 lines");
+      expect(description).not.toContain("fatal: boom");
+      expect(description).not.toContain("\n");
     });
   });
 

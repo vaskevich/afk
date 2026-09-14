@@ -1,4 +1,4 @@
-import type { AnomalyEvent, EventSeverity } from "@afk/shared";
+import type { AnomalyEvent, EventSeverity, RunOutputTail } from "@afk/shared";
 
 /** Higher is worse. */
 const SEVERITY_RANK: Record<EventSeverity, number> = {
@@ -29,4 +29,10 @@ export function worstSeverity(events: readonly AnomalyEvent[]): EventSeverity | 
 
 export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+/** Label of a collapsed output tail: "last output (5 lines)", noting when lines were cut. */
+export function outputTailSummary(tail: RunOutputTail): string {
+  const lines = pluralize(tail.stdout.length + tail.stderr.length, "line");
+  return `last output (${lines}${tail.truncated ? ", truncated" : ""})`;
 }

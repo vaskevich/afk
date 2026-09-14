@@ -111,7 +111,8 @@ changing the rest of the frame or bumping the protocol version. Today there is o
 flavor, `"volume"` (cumulative stdout/stderr byte counts). A richer flavor — parsing
 progress lines, counting structured log records — is a new member of that union:
 
-1. **Shared schema**: add a `RunOutput<Name>` Zod object with
+1. **Shared schema**: add a `RunOutput<Name>` Zod object extending `RunOutputBase`
+   (which carries the flavor-independent `tail` of a failed run) with
    `flavor: z.literal("<name>")` and whatever fields it needs, and add it to the
    `RunOutput` discriminated union.
 2. **Client** (`cli/afk`): `collect_run` builds the `output` object; branch on however

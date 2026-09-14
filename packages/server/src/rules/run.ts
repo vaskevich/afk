@@ -1,4 +1,4 @@
-import type { RunCollectorData } from "@afk/shared";
+import type { RunCollectorData, RunOutputTail } from "@afk/shared";
 import { INACTIVE, Sustain, type Rule } from "./types.ts";
 
 /** A wrapped command that has written nothing for this long is probably hung. */
@@ -9,25 +9,49 @@ function totalBytes(data: RunCollectorData): number {
   return data.output.stdoutBytes + data.output.stderrBytes;
 }
 
-/** The command ended. Info when it succeeded, critical when it did not. A point event. */
+function lastNonBlankLine(lines: readonly string[]): string | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (line.trim() !== "") {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+/** The line most likely to say why a command failed: stderr's last, or stdout's if stderr is empty. */
+function failureReason(tail: RunOutputTail): string | undefined {
+  return lastNonBlankLine(tail.stderr) ?? lastNonBlankLine(tail.stdout);
+}
+
+/**
+ * The command ended. Info when it succeeded, critical when it did not. A point event.
+ * When the final frame carries the output tail of a failure, the message ends with
+ * the last line printed and the whole tail goes into `details.outputTail`.
+ */
 export const runExited: Rule<"run"> = {
   kind: "run.exited",
   collector: "run",
   create() {
     return {
       onFrame(frame) {
-        const { state, exitCode, elapsedSeconds } = frame.data;
+        const { state, exitCode, elapsedSeconds, output } = frame.data;
         if (state !== "exited") {
           return INACTIVE;
         }
         const failed = exitCode !== 0;
+        const reason = output.tail === undefined ? undefined : failureReason(output.tail);
+        const failure = `command failed with exit code ${exitCode ?? "unknown"} after ${elapsedSeconds}s`;
         return {
           active: true,
           instant: true,
           severity: failed ? "critical" : "info",
           message: failed
-            ? `command failed with exit code ${exitCode ?? "unknown"} after ${elapsedSeconds}s`
+            ? reason === undefined
+              ? failure
+              : `${failure}: ${reason}`
             : `command finished successfully after ${elapsedSeconds}s`,
+          ...(output.tail === undefined ? {} : { details: { outputTail: output.tail } }),
         };
       },
     };
