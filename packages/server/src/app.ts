@@ -26,6 +26,8 @@ import { securityHeaders } from "./middleware/security-headers.ts";
 /** Wires route modules together. Handlers live in ./routes, shared request plumbing in ./middleware. */
 export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
+  // The installer routes go before the dashboard, whose catch-all would otherwise
+  // answer /install with index.html.
   return new Hono()
     .use("*", securityHeaders())
     .route("/api/health", healthRoutes)
@@ -33,7 +35,6 @@ export function createApp(config: AppConfig, store: SessionStore) {
     .route("/api/sessions", sessionRoutes(deps))
     .route("/api/sessions", frameRoutes(deps))
     .route("/api/sessions", streamRoutes(deps))
-    // Before the dashboard, whose catch-all would otherwise answer /install with index.html.
     .route("/", installRoutes(deps))
     .route("/", webRoutes(config.webDistDir));
 }
