@@ -44,12 +44,20 @@
 #                                  after their last change if it is missing)
 #   sessions/<id>/runs/<runId>/    an `afk run`: captured stdout/stderr, pid, and (when it
 #                                  joined an existing session) its own queue
+# The directory and everything in it are readable by the user alone (mode 700 and 600).
 #
 # The client is deliberately dumb: it ships raw measurements and lets the server
 # decide what is normal. That way the server can improve without anyone re-downloading
 # this script.
 
 set -u
+
+# Everything this script writes is private to the user: `current` holds the ingest
+# token, and the spool and run captures hold what the machine and its commands were
+# doing. The command `afk run` wraps gets the caller's umask back (see cmd_run) so its
+# own files are created the way they would be unwrapped.
+ORIGINAL_UMASK=$(umask)
+umask 077
 
 # Client version (semver, bumped on every release) and the protocol version it speaks
 # (bumped only for an incompatible wire change). See docs/VERSIONING.md.
@@ -158,6 +166,9 @@ check_platform() {
   command -v curl >/dev/null || die "curl is required"
   detect_curl_features
   mkdir -p "$AFK_HOME"
+  # The umask above covers what this version creates; older versions created the
+  # directory with the default umask, so it is tightened on every start.
+  chmod 700 "$AFK_HOME" 2>/dev/null || log "warning: could not make $AFK_HOME private (chmod 700 failed)"
 }
 
 # --fail-with-body (curl 7.76+, so every macOS 8.x) makes a 4xx/5xx response exit 22
@@ -768,6 +779,14 @@ cmd_start() {
   finish
 }
 
+# Replaces this process with the command, with the caller's umask rather than this
+# script's private one, for the cases where `afk run` cannot get a session.
+run_without_telemetry() { # command args...
+  log "running without telemetry"
+  umask "$ORIGINAL_UMASK"
+  exec "$@"
+}
+
 cmd_run() {
   if [ "${1:-}" = "--no-qr" ]; then
     AFK_NO_QR=1
@@ -787,13 +806,10 @@ cmd_run() {
       owner=1
       gather_host_info
       if ! create_session; then
-        log "running without telemetry"
-        exec "$@"
+        run_without_telemetry "$@"
       fi
       log "no session running here; started $SESSION_ID with machine telemetry for the length of this command" ;;
-    *)
-      log "running without telemetry"
-      exec "$@" ;;
+    *) run_without_telemetry "$@" ;;
   esac
 
   RUN_ID=$(random_id)
@@ -824,10 +840,11 @@ cmd_run() {
 
   # The command runs in the foreground so Ctrl-C and stdin behave as usual. Bash
   # would normally exit when a foreground child dies of SIGINT; trapping it lets us
-  # still report the exit. The sh wrapper records the pid the sampler should watch.
+  # still report the exit. The sh wrapper records the pid the sampler should watch,
+  # then gives the command the caller's umask back (this script's own is private).
   # TODO(run): tee adds a little latency to the final byte counts; a short pause covers it.
   trap ':' INT TERM
-  sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$RUN_DIR/pid" "$@" \
+  sh -c 'echo $$ > "$1"; umask "$2"; shift 2; exec "$@"' sh "$RUN_DIR/pid" "$ORIGINAL_UMASK" "$@" \
     > >(tee -a "$RUN_DIR/stdout") 2> >(tee -a "$RUN_DIR/stderr" >&2)
   EXIT_CODE=$?
   trap - INT TERM

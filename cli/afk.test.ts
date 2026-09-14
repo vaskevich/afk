@@ -754,6 +754,25 @@ describe("create_session", () => {
     expect(queueStat.isDirectory()).toBe(true);
   });
 
+  // The owner removes `current` on exit, so its mode is read from inside the script.
+  it.skipIf(process.platform !== "darwin")(
+    "writes current, which holds the ingest token, readable by the user alone",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startServer(() => ({
+        status: 201,
+        body: '{"sessionId":"abc123","ingestToken":"tok-abc","dashboardUrl":"http://example.test/s/abc123","maxDurationSeconds":3600}',
+      }));
+
+      const { stdout, stderr } = await runBash(
+        'create_session; printf "MODE=%s\\n" "$(stat -f %Lp "$AFK_HOME/current")"',
+        { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
+      );
+
+      expect(parseKeyValueLines(stdout), stderr).toEqual({ MODE: "600" });
+    },
+  );
+
   it("exits 1 with the upgrade hint on a 426 response, without the capacity retry loop", async () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({
@@ -778,6 +797,22 @@ describe("create_session", () => {
     expect(stderr).toContain("curl -fsSL");
     expect(await exists(join(afkHome, "current"))).toBe(false);
   });
+});
+
+describe("check_platform", () => {
+  // Dies off macOS before it reaches the directory.
+  it.skipIf(process.platform !== "darwin")(
+    "makes AFK_HOME private even when an older version created it with wider permissions",
+    async () => {
+      const afkHome = join(await makeTempDir(), ".afk");
+      await mkdir(afkHome, { mode: 0o755 });
+
+      const { code, stderr } = await runBash("check_platform", { AFK_HOME: afkHome });
+
+      expect(code, stderr).toBe(0);
+      expect((await stat(afkHome)).mode & 0o777).toBe(0o700);
+    },
+  );
 });
 
 describe("create_session failures", () => {
@@ -1498,6 +1533,24 @@ describe("cmd_run", () => {
         exitCode: 3,
         output: { tail: { stdout: ["out"], stderr: ["err"], truncated: false } },
       });
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "runs the command with the caller's umask, not the client's private one",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+      const { stdout: callerUmask } = await execFileAsync("/bin/bash", ["-c", "umask"]);
+
+      const { code, stdout, stderr } = await runBash("cmd_run -- sh -c umask", {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+      });
+
+      expect(code, stderr).toBe(0);
+      expect(stdout).toContain(callerUmask.trim());
+      expect(stdout).not.toContain("0077");
     },
   );
 
