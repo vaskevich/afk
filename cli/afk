@@ -13,18 +13,26 @@
 #                        started by `afk start` if one is running on this machine,
 #                        otherwise starts one (with machine telemetry) for the
 #                        lifetime of the command
+#   afk status           show the session running on this machine and its queue
+#   afk stop             end that session (asks the `afk start` process to finish)
 #   afk version
 #
 # Environment:
-#   AFK_SERVER   server origin, default https://afk.osv.im (self-hosting is the plan)
-#   AFK_HOME     state directory, default ~/.afk
+#   AFK_SERVER           server origin, default https://afk.osv.im (self-hosting is the plan)
+#   AFK_HOME             state directory, default ~/.afk
+#   AFK_SPOOL_MAX_BYTES  cap on queued frames on disk, default 50 MiB; oldest dropped past it
 #
 # Layout of ~/.afk:
 #   current                        the active session (id, token, server) so other
 #                                  afk processes can join it
+#   owner.pid                      pid of the process that created it; a dead owner
+#                                  marks `current` stale without asking the server
 #   sessions/<id>/queue/<seq>-<stream>.ndjson
 #                                  one sampled frame per file, waiting to be sent; a
 #                                  batch is the oldest files concatenated, deleted on 2xx
+#   sessions/<id>/done             written when the session ended; `afk start` removes
+#                                  session directories a day after this (two days
+#                                  after their last change if it is missing)
 #   sessions/<id>/runs/<runId>/    an `afk run`: captured stdout/stderr, pid, and (when it
 #                                  joined an existing session) its own queue
 #
@@ -62,6 +70,11 @@ SPOOL_DROP_LOG_INTERVAL_SECONDS=60
 CAPACITY_RETRY_SECONDS=30
 CAPACITY_MAX_WAIT_SECONDS=600
 
+# `afk start` removes old session directories on startup: ended ones (a `done` marker)
+# after a day, ones that never ended (a crash) two days after they last changed.
+SESSION_DONE_RETENTION_SECONDS=86400
+SESSION_ORPHAN_RETENTION_SECONDS=172800
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -87,6 +100,15 @@ now_seconds() { date +%s; }
 random_id() { head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
 file_size() { stat -f %z "$1" 2>/dev/null || echo 0; }
+
+file_age_seconds() { echo $(( $(now_seconds) - $(stat -f %m "$1" 2>/dev/null || now_seconds) )); }
+
+pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+# The pid that created ~/.afk/current, empty when unknown.
+owner_pid() { cat "$AFK_HOME/owner.pid" 2>/dev/null; }
+
+remove_current_session_files() { rm -f "$AFK_HOME/current" "$AFK_HOME/owner.pid"; }
 
 # The queue holds one frame per file (see emit_frame); these size it up for the
 # sender's log, `afk status`, and the disk cap.
@@ -248,9 +270,10 @@ create_session() {
 
   SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
   mkdir -p "$SESSION_DIR/queue"
-  # Lets a later `afk run` join this session.
+  # Lets a later `afk run` join this session, and `afk status`/`afk stop` find its owner.
   printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
     "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$AFK_HOME/current"
+  echo "$$" > "$AFK_HOME/owner.pid"
 }
 
 # For `afk start`: a machine you are about to leave should get a session eventually,
@@ -274,25 +297,39 @@ create_session_or_wait() {
   done
 }
 
-# Reads ~/.afk/current, written by the process that owns the session. Returns 1 if
-# there is none or the server says it is over (a crashed owner can leave one behind),
-# and 2 if the session is live but already has as many streams as the server allows.
-load_current_session() {
-  local file="$AFK_HOME/current" summary status stream_count max_streams
+# Reads ~/.afk/current, written by the process that owns the session, without
+# asking anyone whether it is still valid. Returns 1 if there is none.
+read_current_file() {
+  local file="$AFK_HOME/current"
   [ -f "$file" ] || return 1
   SESSION_ID=$(sed -n 's/^sessionId=//p' "$file")
   INGEST_TOKEN=$(sed -n 's/^ingestToken=//p' "$file")
   AFK_SERVER=$(sed -n 's/^server=//p' "$file")
   DASHBOARD_URL=$(sed -n 's/^dashboardUrl=//p' "$file")
   [ -n "$SESSION_ID" ] && [ -n "$INGEST_TOKEN" ] || return 1
+  SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
+}
+
+# Loads the session in ~/.afk/current for a joiner. Returns 1 if there is none, its
+# owner is gone (a crashed owner leaves the file behind; its pid says so without a
+# round trip), or the server says it is over, and 2 if the session is live but already
+# has as many streams as the server allows.
+load_current_session() {
+  local summary status stream_count max_streams pid
+  read_current_file || return 1
+  pid=$(owner_pid)
+  if [ -n "$pid" ] && ! pid_alive "$pid"; then
+    log "ignoring stale session file (its owner, pid $pid, is gone)"
+    remove_current_session_files
+    return 1
+  fi
   summary=$(curl -sS --connect-timeout 5 --max-time 10 "$AFK_SERVER/api/sessions/$SESSION_ID" 2>/dev/null) || return 1
   status=$(json_get_string "$summary" status)
   if [ "$status" != "active" ]; then
     log "ignoring stale session file (session is ${status:-unknown})"
-    rm -f "$file"
+    remove_current_session_files
     return 1
   fi
-  SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
   MAX_DURATION_SECONDS=$(json_get_number "$summary" maxDurationSeconds)
   : "${MAX_DURATION_SECONDS:=3600}"
   stream_count=$(json_get_number "$summary" streamCount)
@@ -307,7 +344,26 @@ end_session() {
   curl -sS -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
     -H "Authorization: Bearer $INGEST_TOKEN" -H "X-Afk-Client: bash/$AFK_VERSION" \
     "$AFK_SERVER/api/sessions/$SESSION_ID/end" 2>/dev/null || true
-  rm -f "$AFK_HOME/current" "$SESSION_DIR/response.json" "$SESSION_DIR/batch.ndjson"
+  remove_current_session_files
+  rm -f "$SESSION_DIR/response.json" "$SESSION_DIR/batch.ndjson"
+  # Tells the startup cleanup this directory is finished with.
+  touch "$SESSION_DIR/done"
+}
+
+# Removes session directories that ended (a `done` marker from end_session) more than
+# a day ago, and ones that never ended, which a crash leaves behind, two days after
+# the directory itself last changed (the sender touches it on every send).
+cleanup_old_sessions() {
+  local dir
+  for dir in "$AFK_HOME"/sessions/*; do
+    [ -d "$dir" ] || continue
+    if [ -e "$dir/done" ]; then
+      [ "$(file_age_seconds "$dir/done")" -gt "$SESSION_DONE_RETENTION_SECONDS" ] && rm -rf "$dir"
+    else
+      [ "$(file_age_seconds "$dir")" -gt "$SESSION_ORPHAN_RETENTION_SECONDS" ] && rm -rf "$dir"
+    fi
+  done
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -487,6 +543,7 @@ system_sampler_loop() {
 
 cmd_start() {
   check_platform
+  cleanup_old_sessions
   gather_host_info
   create_session_or_wait
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
@@ -585,6 +642,48 @@ cmd_run() {
   exit "$EXIT_CODE"
 }
 
+# Reports on the session in ~/.afk/current from local state only: no network, so it
+# answers instantly even when the server is unreachable. The queue counted is the
+# owner's; an `afk run` that joined keeps its own under runs/<runId>/.
+cmd_status() {
+  local pid owner
+  if ! read_current_file; then
+    printf 'no session running on this machine\n'
+    exit 1
+  fi
+  pid=$(owner_pid)
+  if [ -z "$pid" ]; then
+    owner="unknown (no owner.pid)"
+  elif pid_alive "$pid"; then
+    owner="pid $pid, running"
+  else
+    owner="pid $pid, not running (stale; afk stop clears it)"
+  fi
+  printf 'session    %s\ndashboard  %s\nowner      %s\nqueue      %s frames, %s bytes\n' \
+    "$SESSION_ID" "$DASHBOARD_URL" "$owner" "$(queue_count)" "$(queue_bytes)"
+}
+
+# Ends the session by asking its owner (the `afk start` or owning `afk run` process)
+# to finish, the same as a Ctrl-C there: it flushes what it can and tells the server.
+# Bash runs a trap after the command in flight, so the owner may take up to one
+# request's timeout to react.
+cmd_stop() {
+  local pid
+  if ! read_current_file; then
+    log "no session running on this machine"
+    exit 1
+  fi
+  pid=$(owner_pid)
+  if pid_alive "$pid"; then
+    kill -TERM "$pid" || die "could not signal pid $pid"
+    log "asked pid $pid to end session $SESSION_ID"
+  else
+    log "session $SESSION_ID has no running owner${pid:+ (pid $pid is gone)}; clearing its stale state"
+    remove_current_session_files
+    exit 1
+  fi
+}
+
 usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
 }
@@ -593,6 +692,8 @@ main() {
   case "${1:-}" in
     start)   cmd_start ;;
     run)     shift; cmd_run "$@" ;;
+    status)  cmd_status ;;
+    stop)    cmd_stop ;;
     version) printf 'afk %s\n' "$AFK_VERSION" ;;
     -h|--help|help|"") usage ;;
     *)       die "unknown command: $1 (try 'afk help')" ;;

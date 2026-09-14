@@ -626,6 +626,7 @@ describe("create_session", () => {
         'printf "DASHBOARD_URL=%s\\n" "$DASHBOARD_URL"',
         'printf "MAX_DURATION_SECONDS=%s\\n" "$MAX_DURATION_SECONDS"',
         'printf "SESSION_DIR=%s\\n" "$SESSION_DIR"',
+        'printf "PID=%s\\n" "$$"',
       ].join("\n"),
       { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
     );
@@ -637,7 +638,10 @@ describe("create_session", () => {
       DASHBOARD_URL: "http://example.test/s/D3FzMqK8qOLVva9LoHF9uc",
       MAX_DURATION_SECONDS: "3600",
       SESSION_DIR: `${afkHome}/sessions/D3FzMqK8qOLVva9LoHF9uc`,
+      PID: expect.stringMatching(/^[0-9]+$/),
     });
+    // The creating process is the owner; afk status/stop and joiners check it is alive.
+    expect(await readFile(join(afkHome, "owner.pid"), "utf8")).toBe(`${values.PID}\n`);
 
     const current = await readFile(join(afkHome, "current"), "utf8");
     expect(current).toBe(
@@ -710,5 +714,206 @@ describe("load_current_session", () => {
     });
 
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "1" });
+  });
+
+  it("fails and removes the files without asking the server when the owner pid is dead", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: '{"status":"active"}' }));
+    await writeFile(
+      join(afkHome, "current"),
+      "sessionId=abc123\ningestToken=tok-abc\n" +
+        `server=${server.url}\n` +
+        "dashboardUrl=http://example.test/s/abc123\n",
+    );
+
+    // A subshell that has already exited: its pid is certainly not alive.
+    const { stdout, stderr } = await runBash(
+      [
+        '(exit 0) & wait "$!"; echo "$!" > "$AFK_HOME/owner.pid"',
+        'load_current_session; printf "RC=%d" "$?"',
+      ].join("\n"),
+      { AFK_HOME: afkHome, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "1" });
+    expect(server.requests).toHaveLength(0);
+    expect(await exists(join(afkHome, "current"))).toBe(false);
+    expect(await exists(join(afkHome, "owner.pid"))).toBe(false);
+  });
+
+  it("asks the server when the owner pid is alive", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: '{"status":"active"}' }));
+    await writeFile(
+      join(afkHome, "current"),
+      "sessionId=abc123\ningestToken=tok-abc\n" +
+        `server=${server.url}\n` +
+        "dashboardUrl=http://example.test/s/abc123\n",
+    );
+
+    const { stdout, stderr } = await runBash(
+      ['echo "$$" > "$AFK_HOME/owner.pid"', 'load_current_session; printf "RC=%d" "$?"'].join("\n"),
+      { AFK_HOME: afkHome, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
+    expect(server.requests.map((request) => request.url)).toEqual(["/api/sessions/abc123"]);
+    expect(await exists(join(afkHome, "current"))).toBe(true);
+  });
+});
+
+describe("end_session", () => {
+  it("tells the server, removes current and owner.pid, and leaves a done marker", async () => {
+    const afkHome = await makeTempDir();
+    const sessionDir = join(afkHome, "sessions", "abc123");
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(afkHome, "current"), "sessionId=abc123\ningestToken=tok-abc\n");
+    await writeFile(join(afkHome, "owner.pid"), "12345\n");
+    const server = await startServer(() => ({ status: 200, body: '{"status":"ended"}' }));
+
+    const { code, stderr } = await runBash("end_session", {
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      SESSION_ID: "abc123",
+      INGEST_TOKEN: "tok-abc",
+      SESSION_DIR: sessionDir,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toMatchObject([{ method: "POST", url: "/api/sessions/abc123/end" }]);
+    expect(await exists(join(afkHome, "current"))).toBe(false);
+    expect(await exists(join(afkHome, "owner.pid"))).toBe(false);
+    expect(await exists(join(sessionDir, "done"))).toBe(true);
+  });
+});
+
+describe("cleanup_old_sessions", () => {
+  /** Session directories aged with touch -t: two that ended, two that never did. */
+  async function makeAgedSessions(afkHome: string): Promise<void> {
+    for (const id of ["ended-old", "ended-fresh", "orphan-old", "orphan-fresh"]) {
+      await mkdir(join(afkHome, "sessions", id, "queue"), { recursive: true });
+    }
+    await writeFile(join(afkHome, "sessions", "ended-old", "done"), "");
+    await writeFile(join(afkHome, "sessions", "ended-fresh", "done"), "");
+    await runBash(
+      [
+        'touch -t "$(date -v-25H +%Y%m%d%H%M.%S)" "$AFK_HOME/sessions/ended-old/done"',
+        'touch -t "$(date -v-23H +%Y%m%d%H%M.%S)" "$AFK_HOME/sessions/ended-fresh/done"',
+        'touch -t "$(date -v-49H +%Y%m%d%H%M.%S)" "$AFK_HOME/sessions/orphan-old"',
+        'touch -t "$(date -v-47H +%Y%m%d%H%M.%S)" "$AFK_HOME/sessions/orphan-fresh"',
+      ].join("\n"),
+      { AFK_HOME: afkHome },
+    );
+  }
+
+  it("removes sessions that ended over a day ago and orphans untouched for over two days", async () => {
+    const afkHome = await makeTempDir();
+    await makeAgedSessions(afkHome);
+
+    const { code, stderr } = await runBash("cleanup_old_sessions", { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect((await readdir(join(afkHome, "sessions"))).sort()).toEqual([
+      "ended-fresh",
+      "orphan-fresh",
+    ]);
+  });
+
+  it("does nothing when there is no sessions directory yet", async () => {
+    const afkHome = await makeTempDir();
+
+    const { code, stderr } = await runBash("cleanup_old_sessions", { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+  });
+});
+
+describe("afk status", () => {
+  it("reports no session and exits 1 when there is no current file", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stdout, code } = await runBash("main status", { AFK_HOME: afkHome });
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("no session running on this machine\n");
+  });
+
+  it("prints the session, dashboard, a live owner, and the queue size", async () => {
+    const afkHome = await makeTempDir();
+    const queue = join(afkHome, "sessions", "abc123", "queue");
+    await mkdir(queue, { recursive: true });
+    await writeFile(join(queue, "0000000001-system.ndjson"), "x".repeat(10));
+    await writeFile(join(queue, "0000000002-system.ndjson"), "x".repeat(30));
+    await writeFile(
+      join(afkHome, "current"),
+      "sessionId=abc123\ningestToken=tok-abc\nserver=http://example.test\ndashboardUrl=http://example.test/s/abc123\n",
+    );
+
+    const { stdout, stderr, code } = await runBash(
+      'echo "$$" > "$AFK_HOME/owner.pid"; main status',
+      { AFK_HOME: afkHome },
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toMatch(/^session\s+abc123\n/);
+    expect(stdout).toMatch(/\ndashboard\s+http:\/\/example.test\/s\/abc123\n/);
+    expect(stdout).toMatch(/\nowner\s+pid [0-9]+, running\n/);
+    expect(stdout).toMatch(/\nqueue\s+2 frames, 40 bytes\n$/);
+  });
+
+  it("says when the owner is no longer running", async () => {
+    const afkHome = await makeTempDir();
+    await mkdir(join(afkHome, "sessions", "abc123", "queue"), { recursive: true });
+    await writeFile(join(afkHome, "current"), "sessionId=abc123\ningestToken=tok-abc\n");
+
+    const { stdout, stderr, code } = await runBash(
+      '(exit 0) & wait "$!"; echo "$!" > "$AFK_HOME/owner.pid"; main status',
+      { AFK_HOME: afkHome },
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toMatch(/\nowner\s+pid [0-9]+, not running/);
+  });
+});
+
+describe("afk stop", () => {
+  it("sends SIGTERM to the owner pid", async () => {
+    const afkHome = await makeTempDir();
+    await writeFile(join(afkHome, "current"), "sessionId=abc123\ningestToken=tok-abc\n");
+
+    // A sleeping background job stands in for the owner; wait reports the signal that ended it.
+    const { stdout, stderr } = await runBash(
+      [
+        'sleep 30 & echo "$!" > "$AFK_HOME/owner.pid"',
+        'main stop; printf "STOP_RC=%d\\n" "$?"',
+        'wait "$!"; printf "OWNER_RC=%d\\n" "$?"',
+      ].join("\n"),
+      { AFK_HOME: afkHome },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ STOP_RC: "0", OWNER_RC: "143" });
+  });
+
+  it("clears the stale files and exits 1 when the owner is already gone", async () => {
+    const afkHome = await makeTempDir();
+    await writeFile(join(afkHome, "current"), "sessionId=abc123\ningestToken=tok-abc\n");
+
+    const { code } = await runBash(
+      '(exit 0) & wait "$!"; echo "$!" > "$AFK_HOME/owner.pid"; main stop',
+      { AFK_HOME: afkHome },
+    );
+
+    expect(code).toBe(1);
+    expect(await exists(join(afkHome, "current"))).toBe(false);
+    expect(await exists(join(afkHome, "owner.pid"))).toBe(false);
+  });
+
+  it("exits 1 when there is no session", async () => {
+    const afkHome = await makeTempDir();
+
+    const { code, stderr } = await runBash("main stop", { AFK_HOME: afkHome });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("no session running");
   });
 });
