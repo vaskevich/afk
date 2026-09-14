@@ -120,9 +120,10 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   `middleware/ingest-auth.ts` resolves the session, checks the bearer ingest token,
   rejects non-active sessions with 410. `middleware/client-version.ts` checks the
   `X-Afk-Client` header on the client-facing routes (426 below the minimum),
-  `middleware/body-limit.ts` caps request bodies (413), and
+  `middleware/body-limit.ts` caps request bodies (413),
   `middleware/security-headers.ts` sets the CSP and the rest of the security headers
-  on every response. See "Hardening" below.
+  on every response, and `middleware/request-timing.ts`, mounted first, logs how long
+  each response took to produce. See "Hardening" below.
 - `store/sessions.ts` is the in-memory working set: active sessions, per-stream
   sequence bookkeeping, SSE listeners. It writes through to `store/storage.ts`, the
   `SessionStorage` interface, and lazily loads sessions it does not have in memory.
@@ -254,8 +255,11 @@ Two process-level ones:
 
 - **Logging** (`log/logger.ts`). One line per event, `<ISO timestamp> <level> <message>
 key=value ...`, threshold from `AFK_LOG_LEVEL` (default `info`). `info` is one line
-  per accepted batch, session lifecycle step, anomaly event, and sweeper run; `debug`
-  adds one line per frame. Session ids appear at `info` on purpose: an operator needs
+  per accepted batch, session lifecycle step, anomaly event, sweeper run, session loaded
+  from storage (`frames=`, `storageMs=`, `ms=`), and slow request (`SLOW_REQUEST_MS`, one
+  second, in `middleware/request-timing.ts`: `method=`, `path=`, `status=`, `ms=`, the
+  time to produce the response, which for the SSE route is its headers); `debug` adds
+  one line per request and per frame. Session ids appear at `info` on purpose: an operator needs
   one to find a session, and the alternative (hashing or omitting them) would make the
   logs useless for exactly the cases they exist for. The consequence is that the logs
   identify sessions for as long as they are kept, and that retention is Lightsail's
@@ -345,7 +349,10 @@ For UI work the Vite dev server proxies `/api` to the server.
 is append-only, one stored frame per line, in index order. Per-stream sequence state
 is rebuilt from the frames on load rather than persisted. The bucket layout
 (`store/s3-storage.ts`) is the same except that each ingested batch becomes its own
-object under `sessions/<id>/frames/`, since object stores cannot append. Retention is
+object under `sessions/<id>/frames/`, since object stores cannot append; a session is
+therefore thousands of small objects, and `readFrames` fetches them `READ_CONCURRENCY`
+(16) at a time, since the round trips, not the bytes, are what a cold load costs (see
+the 2026-09-14 entry in the decision log). Retention is
 `store/sweeper.ts`: every `AFK_SWEEP_INTERVAL_SECONDS` (one hour) it lists the stored
 sessions and deletes those that ended more than `AFK_RETENTION_DAYS` (7) ago, counting
 a session that never received an explicit end as ended when it hit its cap. It runs on
@@ -381,6 +388,22 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** A cold dashboard load costs round trips, not bytes. The first visit to
+  `/s/DbTEUHkKfXpo7biKEmk7XC` after the cache had let the session go took 40 s on the
+  hosted instance, every reload after it milliseconds: the session was 4,320 frames in
+  2,798 bucket objects (one per ingested batch, one batch a second), and `readFrames`
+  fetched them one after another at ~14 ms each. The container log had nothing (read
+  routes logged nothing) and the only trace was a CPU and memory bump in the Lightsail
+  metrics. Fixed within the layout: `readFrames` fetches `READ_CONCURRENCY` (16) objects
+  at a time (the same session loads in about 3 s in a reproduction against a fake bucket
+  with 14 ms per request), the bucket client has request and connection timeouts and two
+  attempts, and both a load from storage and any request over a second are logged.
+  Deliberately not done here: changing the layout. Compacting a session's `frames/`
+  objects into one `frames.ndjson` when it ends would make a cold load a single GET, but
+  it is a new storage write from `SessionStore.end` and the sweeper, needs the read path
+  to handle both layouts and a half-finished compaction, and touches the single-writer
+  assumptions in the SRE review's data item, so it is a backlog item under "Storage &
+  retention" rather than part of the fix.
 - **2026-09-14** The image runs compiled JavaScript; `tsx` is dev-only. `pnpm build`
   compiles `@afk/shared` and `@afk/server` with `tsc` (`rewriteRelativeImportExtensions`
   turns the `.ts` imports into `.js`), and the runtime stage carries no TypeScript

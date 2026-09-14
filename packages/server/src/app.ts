@@ -10,6 +10,7 @@ import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
 import { installRoutes } from "./routes/install.ts";
 import { webRoutes } from "./routes/web.ts";
+import { requestTiming } from "./middleware/request-timing.ts";
 import { securityHeaders } from "./middleware/security-headers.ts";
 import { sessionIdParam } from "./middleware/session-id.ts";
 
@@ -29,12 +30,14 @@ import { sessionIdParam } from "./middleware/session-id.ts";
 /** Wires route modules together. Handlers live in ./routes, shared request plumbing in ./middleware. */
 export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
-  // The session id check sits in front of every route with a :sessionId (the `/*`
-  // also matches the bare path) so no route module can forget it. The installer
-  // routes go before the dashboard, whose catch-all would otherwise answer /install
-  // with index.html.
+  // Request timing goes first so everything below is inside the measurement. The
+  // session id check sits in front of every route with a :sessionId (the `/*` also
+  // matches the bare path) so no route module can forget it. The installer routes go
+  // before the dashboard, whose catch-all would otherwise answer /install with
+  // index.html.
   return (
     new Hono()
+      .use("*", requestTiming())
       .use("*", securityHeaders())
       // gzip/deflate for JSON and the dashboard bundle: a one-hour session's /frames
       // document is roughly 15 MB of very repetitive JSON, about a tenth of that
