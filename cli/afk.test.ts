@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -67,6 +68,8 @@ async function queuedFrames(sessionDir: string): Promise<Frame[]> {
 
 const execFileAsync = promisify(execFile);
 const AFK_SCRIPT = fileURLToPath(new URL("./afk", import.meta.url));
+/** The version line of the script under test; the script's own assignment beats the environment. */
+const SCRIPT_VERSION = /^AFK_VERSION="([^"]+)"$/m.exec(readFileSync(AFK_SCRIPT, "utf8"))![1]!;
 
 interface BashResult {
   stdout: string;
@@ -2532,7 +2535,7 @@ describe("print_dashboard_url", () => {
   const sessionEnv = (afkHome: string) => ({
     SESSION_ID: "sess123",
     INGEST_TOKEN: "tok-abc",
-    AFK_VERSION: "0.2.0",
+    AFK_VERSION: SCRIPT_VERSION,
     DASHBOARD_URL: "http://example.test/s/sess123",
     SESSION_DIR: join(afkHome, "sessions", "sess123"),
   });
@@ -2561,7 +2564,7 @@ describe("print_dashboard_url", () => {
       url: "/api/sessions/sess123/qr",
       headers: expect.objectContaining({
         authorization: "Bearer tok-abc",
-        "x-afk-client": "bash/0.2.0",
+        "x-afk-client": `bash/${SCRIPT_VERSION}`,
       }),
     });
   });
@@ -3140,7 +3143,8 @@ describe("cmd_run when the session is deleted on the server mid-command", () => 
   const DELETED_LINE = "afk: session abc123 was deleted on the server; telemetry stopped";
   /** Long enough for the deletion to land in the middle: a batch a second, deleted after the first. */
   const RUN_SECONDS = 4;
-  const RUN_TIMEOUT_MS = 15_000;
+  /** Intrinsically ~6 s (cap plus run); the file runs many bash-driven tests at once, so leave room. */
+  const RUN_TIMEOUT_MS = 30_000;
 
   /** Accepts the session and its first batch, then has forgotten the session for good. */
   async function deletingServer(): Promise<TestServer> {
@@ -3416,7 +3420,8 @@ describe("cmd_run owning a session that reaches its cap", () => {
   const SUCCESSOR_CAP_SECONDS = 3600;
   /** Long enough for the command to outlive the chain, so its last frames land in the successor. */
   const RUN_SECONDS = 4;
-  const RUN_TIMEOUT_MS = 15_000;
+  /** Intrinsically ~6 s (cap plus run); the file runs many bash-driven tests at once, so leave room. */
+  const RUN_TIMEOUT_MS = 30_000;
 
   /** The run frames a session received, in the order they arrived, with their sequence. */
   function runFrames(server: TestServer, sessionId: string): RunFrame[] {
@@ -3564,7 +3569,7 @@ describe("json_get_object", () => {
 
 /** The version the tests give the running copy, so the cases do not move with each release. */
 const THIS_VERSION = "0.2.0";
-const NEWER_VERSION = "0.3.0";
+const NEWER_VERSION = "0.4.0";
 
 /** A create response carrying (or not) the version of the client the server serves. */
 function createdWithLatest(latestClientVersion?: string): string {
