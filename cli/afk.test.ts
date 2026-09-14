@@ -652,6 +652,95 @@ describe("send_oldest_batch", () => {
   });
 });
 
+describe("the ingest token", () => {
+  const TOKEN = "tok-secret-abc";
+  const hostEnv = {
+    HOST_NAME: "test-host",
+    HOST_PLATFORM: "darwin",
+    HOST_OS_VERSION: "26.0",
+    HOST_CPU_COUNT: "8",
+    HOST_MEMORY_BYTES: "17179869184",
+  };
+  const successor =
+    '{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/newSession","maxDurationSeconds":3600}';
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  const QR_TEXT = "█████████\nhttp://example.test/s/sess123\n";
+
+  /** The argument lists of every process mentioning `text`: what `ps` shows any user. */
+  async function processArgumentsMentioning(text: string): Promise<string[]> {
+    const pids = await processesMentioning(text);
+    if (pids.length === 0) {
+      return [];
+    }
+    const { stdout } = await execFileAsync("ps", ["-o", "args=", "-p", pids.join(",")]);
+    return stdout.split("\n").filter((line) => line !== "");
+  }
+
+  // Regression: the token used to be a `-H` argument, visible to every user of a shared
+  // Mac through `ps`. Reads the file mode with BSD stat -f, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "is not in curl's arguments while frames, qr, end, and a chained create are in flight, yet reaches the server as the bearer",
+    async () => {
+      const afkHome = await makeTempDir();
+      const sessionDir = join(afkHome, "sessions", "sess123");
+      await mkdir(join(sessionDir, "queue"), { recursive: true });
+      await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "AAA\n");
+      const inFlight: string[][] = [];
+      const server = await startServer(async (req) => {
+        // Taken while curl is waiting for the answer.
+        inFlight.push(await processArgumentsMentioning(`http://${req.headers.host}`));
+        if (req.url === "/api/sessions") {
+          return { status: 201, body: successor };
+        }
+        if (req.url.endsWith("/qr")) {
+          return { status: 200, body: QR_TEXT };
+        }
+        return { status: 200, body: accepted };
+      });
+
+      const { stdout, stderr } = await runBash(
+        [
+          'send_oldest_batch; printf "SEND=%s\\n" "$?"',
+          'fetch_qr > /dev/null; printf "QR=%s\\n" "$?"',
+          'end_session; printf "END=%s\\n" "$?"',
+          'create_session sess123 "$INGEST_TOKEN"; printf "CREATE=%s\\n" "$?"',
+          'printf "MODE=%s\\n" "$(stat -f %Lp "$AFK_HOME/sessions/sess123/auth")"',
+        ].join("\n"),
+        {
+          ...hostEnv,
+          AFK_HOME: afkHome,
+          AFK_SERVER: server.url,
+          SESSION_ID: "sess123",
+          INGEST_TOKEN: TOKEN,
+          SESSION_DIR: sessionDir,
+        },
+      );
+
+      expect(inFlight).toHaveLength(4);
+      for (const processes of inFlight) {
+        expect(processes.some((args) => args.includes("curl"))).toBe(true);
+        expect(processes.join("\n")).not.toContain(TOKEN);
+      }
+      expect(server.requests.map((req) => [req.url, req.headers.authorization])).toEqual([
+        ["/api/sessions/sess123/frames", `Bearer ${TOKEN}`],
+        ["/api/sessions/sess123/qr", `Bearer ${TOKEN}`],
+        ["/api/sessions/sess123/end", `Bearer ${TOKEN}`],
+        ["/api/sessions", `Bearer ${TOKEN}`],
+      ]);
+      for (const req of server.requests) {
+        expect(req.headers["x-afk-client"]).toMatch(/^bash\/\d+\.\d+\.\d+$/);
+      }
+      expect(parseKeyValueLines(stdout), stderr).toEqual({
+        SEND: "0",
+        QR: "0",
+        END: "0",
+        CREATE: "0",
+        MODE: "600",
+      });
+    },
+  );
+});
+
 describe("enforce_spool_cap", () => {
   /** Five 40-byte frames named in emission order. */
   async function makeOverfullQueue(): Promise<string> {
@@ -1890,7 +1979,13 @@ describe("afk with no state", () => {
 });
 
 describe("print_qr", () => {
-  const sessionEnv = { SESSION_ID: "sess123", INGEST_TOKEN: "tok-abc", AFK_VERSION: "0.2.0" };
+  /** The session as its owner set it up; SESSION_DIR is where the token file for curl goes. */
+  const sessionEnv = (afkHome: string) => ({
+    SESSION_ID: "sess123",
+    INGEST_TOKEN: "tok-abc",
+    AFK_VERSION: "0.2.0",
+    SESSION_DIR: join(afkHome, "sessions", "sess123"),
+  });
   /** What the server's text render looks like: half-block lines, then the URL. */
   const QR_TEXT = "█████████\n█▀▀▀▀▀▀▀█\n█ ▄▀▄ ▄ █\n█████████\nhttp://example.test/s/sess123\n";
   /** The test process has no tty, so a snippet that wants the terminal path says so. */
@@ -1901,7 +1996,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -1926,7 +2021,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
       LANG: "en_US.UTF-8",
@@ -1948,7 +2043,7 @@ describe("print_qr", () => {
     }));
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -1962,7 +2057,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
       AFK_NO_QR: "1",
@@ -1978,7 +2073,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
     const { stdout, code } = await runBash("print_qr", {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -1993,7 +2088,7 @@ describe("print_qr", () => {
     const server = await startServer(() => ({ status: 500, body: '{"error":"boom"}' }));
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
@@ -2007,7 +2102,7 @@ describe("print_qr", () => {
     const afkHome = await makeTempDir();
 
     const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
-      ...sessionEnv,
+      ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       // Port 1 needs root to bind and nothing listens there: the connection is refused.
       AFK_SERVER: "http://127.0.0.1:1",

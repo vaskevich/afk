@@ -51,6 +51,8 @@
 #                                  afk processes can join it
 #   owner.pid                      pid of the process that created it; a dead owner
 #                                  marks `current` stale without asking the server
+#   sessions/<id>/auth             the ingest token as a curl config file (`header = ...`),
+#                                  so curl reads it with -K instead of showing it in `ps`
 #   sessions/<id>/queue/<seq>-<stream>.ndjson
 #                                  one sampled frame per file, waiting to be sent; a
 #                                  batch is the oldest files concatenated, deleted on 2xx
@@ -284,6 +286,32 @@ detect_curl_features() {
   if curl --help all 2>/dev/null | grep -q -- --fail-with-body; then
     CURL_FAIL_FLAG="--fail-with-body"
   fi
+}
+
+# The bearer header for curl's config file syntax (-K). macOS shows every user's
+# process arguments, so the ingest token must never be a curl argument; it goes
+# through a file readable by the user alone instead. Backslashes and quotes are
+# escaped the way curl's config parser reads them (the server never sends either).
+auth_config_line() { # token
+  printf 'header = "Authorization: Bearer %s"' \
+    "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+# The config file holding the session's bearer header, written under the session
+# directory (mode 600 under the umask) the first time it is needed and rewritten when
+# the token changes, as when a joiner follows its owner to a successor session. Prints
+# the path, for `-K "$(auth_config_file)"`. Given a token and a directory it does the
+# same for another session (a chain sends the previous session's token).
+AUTH_CONFIG_NAME=auth
+auth_config_file() { # [token dir]
+  local token=${1:-$INGEST_TOKEN} dir=${2:-$SESSION_DIR} file line
+  file="$dir/$AUTH_CONFIG_NAME"
+  line=$(auth_config_line "$token")
+  if [ "$(cat "$file" 2>/dev/null)" != "$line" ]; then
+    mkdir -p "$dir"
+    printf '%s\n' "$line" > "$file"
+  fi
+  printf '%s' "$file"
 }
 
 # Every request goes through here. curl's own retries are off so they never double
@@ -545,7 +573,8 @@ create_session() { # [previous-session-id previous-ingest-token]
 
   if [ -n "$previous_id" ]; then
     http_request -o "$response_file" --connect-timeout 5 --max-time 15 \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $previous_token" \
+      -H 'Content-Type: application/json' \
+      -K "$(auth_config_file "$previous_token" "$AFK_HOME/sessions/$previous_id")" \
       --data "$body" "$AFK_SERVER/api/sessions"
   else
     http_request -o "$response_file" --connect-timeout 5 --max-time 15 \
@@ -742,7 +771,7 @@ reattach_to_current_session() {
 
 end_session() {
   http_request -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
-    -H "Authorization: Bearer $INGEST_TOKEN" \
+    -K "$(auth_config_file)" \
     "$AFK_SERVER/api/sessions/$SESSION_ID/end" >/dev/null \
     || log "could not tell the server the session ended ($HTTP_ERROR); it will expire on its own"
   remove_current_session_files
@@ -830,7 +859,7 @@ send_oldest_batch() {
   cat $files > "$batch"
   http_request -o "$SESSION_DIR/response.json" \
     --connect-timeout 5 --max-time 20 \
-    -H "Authorization: Bearer $INGEST_TOKEN" -H 'Content-Type: application/x-ndjson' \
+    -K "$(auth_config_file)" -H 'Content-Type: application/x-ndjson' \
     --data-binary "@$batch" "$AFK_SERVER/api/sessions/$SESSION_ID/frames"
   status=$HTTP_STATUS
 
@@ -995,7 +1024,7 @@ stdout_is_terminal() { [ -t 1 ]; }
 fetch_qr() {
   local file="$AFK_HOME/qr-$$.txt" status
   status=$(curl -sS -o "$file" -w '%{http_code}' --connect-timeout 3 --max-time 5 \
-    -H "Authorization: Bearer $INGEST_TOKEN" -H "X-Afk-Client: bash/$AFK_VERSION" \
+    -K "$(auth_config_file)" -H "X-Afk-Client: bash/$AFK_VERSION" \
     "$AFK_SERVER/api/sessions/$SESSION_ID/qr" 2>/dev/null) || status=000
   # Only print what looks like a QR code: an older server answers unknown /api paths
   # with the dashboard's HTML and a 200, and that must never be dumped on the terminal.
