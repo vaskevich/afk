@@ -107,8 +107,13 @@ repo; a copy installed with `curl -fsSL <origin>/install | sh` defaults to the `
 it was installed from, so a self-hosted server's users set nothing. Everything else the
 client needs, such as the session cap, comes from the server's create response. The
 remaining client knobs are documented in the script's own header: `AFK_SPOOL_MAX_BYTES`,
-`AFK_NO_QR`, `AFK_RUN_TAIL_LINES`, and `AFK_RUN_CAPTURE_MAX_BYTES` (the chunk size, 64 MiB
-by default, of the wrapped command's output `afk run` keeps on disk while it runs).
+`AFK_NO_QR`, `AFK_NO_UPDATE_PROMPT` (set to `1` and `afk start` never asks whether to
+install the newer client the server serves; the one-line notice still prints),
+`AFK_INSTALL_DIR` (where `afk update` and that prompt install the new copy, and where
+the installer itself installs: the running copy's own directory for the first two,
+`~/.local/bin` for a fresh `curl | sh`), `AFK_RUN_TAIL_LINES`, and
+`AFK_RUN_CAPTURE_MAX_BYTES` (the chunk size, 64 MiB by default, of the wrapped
+command's output `afk run` keeps on disk while it runs).
 
 The installer itself reads `AFK_INSTALL_DIR` (where to put `afk`, default `~/.local/bin`).
 

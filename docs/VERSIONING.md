@@ -97,6 +97,37 @@ Both minimums are configurable per deployment: `AFK_MIN_CLIENT_VERSION` and
 `AFK_MIN_PROTOCOL_VERSION` in the server environment, with the shared constants as
 defaults. A self-hosted server that only ever talks to one machine can leave them alone.
 
+## The latest client
+
+The minimum is a floor; the **latest** is what a server ships. Every server serves a
+client at `GET /cli/afk` (the `cli/afk` file at `AFK_CLIENT_SCRIPT`, installed by
+`GET /install`), and "latest" means exactly that file's `AFK_VERSION` line: the copy a
+`curl -fsSL <origin>/install | sh` against this server would install, nothing more
+global. The server reads the line once at startup and reports it in two places:
+
+- `GET /versionz` and `GET /api/version`, as `client.version` (null when the server has
+  no client script), which `afk version --check` prints next to the running copy's own;
+- the session create response, as `latestClientVersion` (omitted without a client
+  script), so a client learns it is behind on the request it makes anyway.
+
+The client compares that to its own `AFK_VERSION` (numerically, part by part;
+`version_lt` in `cli/afk`) and, when it is behind, prints
+`afk 0.3.0 is available (this is 0.2.0). Update with: curl -fsSL <server>/install | sh`
+on stderr. `afk start` on a terminal (stdin and stderr both ttys, and
+`AFK_NO_UPDATE_PROMPT` not `1`) also asks `update now? [y/N]`, waits ten seconds, and
+on `y` runs that installer over the running copy's own directory (or
+`AFK_INSTALL_DIR`). The session it just created is never disturbed: the process keeps
+running the code it loaded and the new copy is picked up by the next `afk start`, a
+declined, timed-out, or failed update is one log line, and neither a pipe nor an
+`afk run` (whose command is about to get stdin) is ever asked. `afk update` runs the
+same installer on demand. None of this is enforcement: a client that is behind keeps
+working until it is below the minimum, which is the 426 above and nothing else.
+
+The release side is unchanged by this: bumping `AFK_VERSION` in `cli/afk` and deploying
+the server _is_ publishing a new latest, since the server serves the file from its own
+checkout or image. A deployment whose `AFK_CLIENT_SCRIPT` points elsewhere publishes
+whatever that file says. There is no separate registry of versions to update.
+
 ## What a bump requires
 
 | change                                         | protocol | client | also                                                                                     |
@@ -114,6 +145,9 @@ defaults. A self-hosted server that only ever talks to one machine can leave the
 
 Every client release: bump `AFK_VERSION`, add a changelog line (the commit message is
 the changelog until there is a `CHANGELOG.md`), and make sure `afk version` prints it.
+Deploying the server then makes that version the latest every older client is told
+about (see "The latest client" above), so a bump that is not meant to reach users yet
+should not be merged to main.
 
 Every protocol change, incompatible or not: update [PROTOCOL.md](PROTOCOL.md) in the
 same commit as `packages/shared/src/protocol.ts`, and add or update a schema test.

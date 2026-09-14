@@ -381,6 +381,16 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** "A newer client exists" is advice on the create response, kept apart
+  from the 426 floor. The server reads the `AFK_VERSION` line of the client it serves
+  once at startup and sends it as `latestClientVersion` when a session is created (and
+  as `client.version` on `/versionz`); the client compares and prints a notice, and
+  `afk start` on a terminal offers to run the server's own installer. The floor
+  (`MIN_CLIENT_VERSION`, 426) stays the only thing that stops a client, so a deployment
+  never has to choose between nagging and rejecting, and a self-hosted server's clients
+  are told about that server's copy, not about a release elsewhere. Rides on the create
+  response rather than a separate request so an old client's cost is one ignored
+  field. The running process never re-execs into the new copy (docs/CLIENT.md).
 - **2026-09-14** The image runs compiled JavaScript; `tsx` is dev-only. `pnpm build`
   compiles `@afk/shared` and `@afk/server` with `tsc` (`rewriteRelativeImportExtensions`
   turns the `.ts` imports into `.js`), and the runtime stage carries no TypeScript
