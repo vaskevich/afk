@@ -1,9 +1,11 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
@@ -91,6 +93,82 @@ async function runAfk(args: string[], env: NodeJS.ProcessEnv = {}): Promise<Bash
   }
 }
 
+interface AfkProcess {
+  child: ChildProcess;
+  stdout: () => string;
+  stderr: () => string;
+  /** The exit code once the process has exited and its output has been drained. */
+  exited: Promise<number | null>;
+}
+
+const spawned: AfkProcess[] = [];
+
+/**
+ * Starts cli/afk as a long-running child (an `afk start` to be stopped from outside),
+ * in its own process group so a failing test can still kill its background jobs.
+ */
+function spawnAfk(args: string[], env: NodeJS.ProcessEnv = {}): AfkProcess {
+  const child = spawn("/bin/bash", [AFK_SCRIPT, ...args], {
+    env: { ...process.env, AFK_SOURCED: "0", ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  const exited = new Promise<number | null>((resolve) => {
+    child.on("close", (code) => resolve(code));
+  });
+  const proc: AfkProcess = { child, stdout: () => stdout, stderr: () => stderr, exited };
+  spawned.push(proc);
+  return proc;
+}
+
+afterEach(() => {
+  for (const { child } of spawned.splice(0)) {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+});
+
+const POLL_INTERVAL_MS = 50;
+
+/** Polls `condition` until it holds, or fails with `description` once the deadline passes. */
+async function waitUntil(
+  description: string,
+  condition: () => boolean | Promise<boolean>,
+  deadlineMs: number,
+): Promise<void> {
+  const deadline = Date.now() + deadlineMs;
+  while (!(await condition())) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out after ${deadlineMs} ms waiting for ${description}`);
+    }
+    await delay(POLL_INTERVAL_MS);
+  }
+}
+
+/** The pids of every process whose arguments mention `text`, e.g. a curl talking to a test server. */
+async function processesMentioning(text: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", text]);
+    return stdout.split("\n").filter((line) => line !== "");
+  } catch {
+    // pgrep exits 1 when nothing matches.
+    return [];
+  }
+}
+
 /** Parses the `key=value` lines a test snippet prints back out of a bash function's variables. */
 function parseKeyValueLines(stdout: string): Record<string, string> {
   const result: Record<string, string> = {};
@@ -132,9 +210,23 @@ interface TestServer {
 
 const servers: TestServer[] = [];
 
-/** A local HTTP server that records every request and answers each with `respond`'s result. */
+interface TestResponse {
+  status: number;
+  body?: string;
+}
+
+/** A response that never comes: the server holds the request open until it closes. */
+const HOLD_REQUEST = new Promise<TestResponse>(() => {
+  // Never resolves.
+});
+
+/**
+ * A local HTTP server that records every request and answers each with `respond`'s
+ * result, once it resolves (HOLD_REQUEST keeps a request in flight until the server
+ * closes, which drops every open connection).
+ */
 async function startServer(
-  respond: (req: RecordedRequest) => { status: number; body?: string },
+  respond: (req: RecordedRequest) => TestResponse | Promise<TestResponse>,
 ): Promise<TestServer> {
   const requests: RecordedRequest[] = [];
   const server = createServer((req, res) => {
@@ -150,9 +242,11 @@ async function startServer(
         body: Buffer.concat(chunks).toString("utf8"),
       };
       requests.push(recorded);
-      const { status, body } = respond(recorded);
-      res.writeHead(status, { "Content-Type": "application/json" });
-      res.end(body ?? "{}");
+      void (async () => {
+        const { status, body } = await respond(recorded);
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(body ?? "{}");
+      })();
     });
   });
 
@@ -167,6 +261,7 @@ async function startServer(
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
+        server.closeAllConnections();
       }),
   };
   servers.push(testServer);
@@ -1600,6 +1695,70 @@ describe("afk stop", () => {
     expect(code).toBe(1);
     expect(stderr).toContain("no session running");
   });
+});
+
+describe("afk stop while the sender has a request in flight", () => {
+  const created =
+    '{"sessionId":"abc123","ingestToken":"tok-abc","dashboardUrl":"http://example.test/s/abc123","maxDurationSeconds":3600}';
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  /** How long the owner may take to exit after `afk stop`; without the fix it is curl's 20 s --max-time. */
+  const STOP_DEADLINE_MS = 3_000;
+  /** For the sender's first batch to be on the wire. */
+  const IN_FLIGHT_DEADLINE_MS = 5_000;
+  /** For the killed curl to be reaped. */
+  const REAP_DEADLINE_MS = 1_000;
+
+  // Regression: the sender is a subshell that, forked under the owner's EXIT trap,
+  // only acts on TERM once its curl returns, so `afk stop` used to wait out the
+  // request's whole timeout. Runs the real collectors, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "takes effect within seconds and leaves no curl behind, although the server holds that request open",
+    { timeout: 30_000 },
+    async () => {
+      const afkHome = await makeTempDir();
+      let framesRequests = 0;
+      const server = await startServer((req) => {
+        if (req.url === "/api/sessions") {
+          return { status: 201, body: created };
+        }
+        if (req.url.endsWith("/frames")) {
+          framesRequests += 1;
+          // The batch in flight when the stop arrives is never answered; the flush's is.
+          return framesRequests === 1 ? HOLD_REQUEST : { status: 200, body: accepted };
+        }
+        return { status: 200, body: '{"status":"ended"}' };
+      });
+      const owner = spawnAfk(["start", "--no-qr"], { AFK_HOME: afkHome, AFK_SERVER: server.url });
+      await waitUntil(
+        "the first batch to be in flight",
+        () => framesRequests >= 1,
+        IN_FLIGHT_DEADLINE_MS,
+      );
+
+      const stoppedAt = Date.now();
+      const stop = await runAfk(["stop"], { AFK_HOME: afkHome });
+      const exitCode = await owner.exited;
+      const elapsedMs = Date.now() - stoppedAt;
+
+      expect(stop.code, stop.stderr).toBe(0);
+      expect(exitCode, owner.stderr()).toBe(0);
+      expect(elapsedMs).toBeLessThan(STOP_DEADLINE_MS);
+      expect(server.requests.map((req) => req.url)).toEqual([
+        "/api/sessions",
+        "/api/sessions/abc123/frames",
+        "/api/sessions/abc123/frames",
+        "/api/sessions/abc123/end",
+      ]);
+      // The held request's curl died with its sender rather than living on to its timeout.
+      await waitUntil(
+        "the held request's curl to be gone",
+        async () =>
+          (await processesMentioning(`${server.url}/api/sessions/abc123/frames`)).length === 0,
+        REAP_DEADLINE_MS,
+      );
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+    },
+  );
 });
 
 describe("afk start with a session already running", () => {
