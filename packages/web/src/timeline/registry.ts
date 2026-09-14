@@ -6,6 +6,7 @@ import { systemCollector } from "./collectors/system.tsx";
 export interface RowView {
   width: number;
   height: number;
+  /** Visible window, unix ms; `x(t0)` is 0 and `x(t1)` is `width`. Frames may fall outside it. */
   t0: number;
   t1: number;
   /** Maps a unix-ms time to an x coordinate in CSS pixels. */

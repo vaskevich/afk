@@ -7,6 +7,7 @@ import { useSession } from "../data/useSession.ts";
 import { useNow } from "../useNow.ts";
 import { buildModel } from "../timeline/model.ts";
 import { Timeline } from "../timeline/Timeline.tsx";
+import { resolveWindow, type TimeWindow } from "../timeline/viewport.ts";
 
 const route = getRouteApi("/s/$sessionId");
 
@@ -16,6 +17,8 @@ export function SessionPage() {
   // null means "follow the latest frame", which is the default while a session is live;
   // a number is an explicit position the user picked by scrubbing.
   const [cursor, setCursor] = useState<number | null>(null);
+  // null means "the whole session"; otherwise the slice the viewer zoomed to.
+  const [zoom, setZoom] = useState<TimeWindow | null>(null);
 
   const active = query.data?.session.status === "active";
   const now = useNow(active);
@@ -32,7 +35,9 @@ export function SessionPage() {
     );
   }
 
+  const following = cursor === null;
   const effectiveCursor = cursor ?? model.latest;
+  const view = resolveWindow(model, zoom, following);
 
   return (
     <main className="page">
@@ -42,9 +47,19 @@ export function SessionPage() {
         events={query.data.events}
         onSelectEvent={(event) => setCursor(event.startedAt)}
       />
-      <Timeline model={model} cursor={effectiveCursor} onCursorChange={setCursor} />
+      <Timeline
+        model={model}
+        cursor={effectiveCursor}
+        following={following}
+        onCursorChange={setCursor}
+        view={view}
+        onZoomChange={setZoom}
+      />
       <DetailsPanel model={model} cursor={effectiveCursor} />
-      <p className="hint">Click or drag the timeline to scrub. Arrow keys nudge by a second.</p>
+      <p className="hint">
+        Click or drag the timeline to scrub; arrow keys nudge by a second. Pinch or ctrl + wheel to
+        zoom, scroll sideways to pan, and use +, −, and 0 on the keyboard.
+      </p>
     </main>
   );
 }

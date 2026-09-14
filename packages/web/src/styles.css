@@ -324,8 +324,9 @@ button:focus-visible {
 
 .timeline-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elevated);
@@ -343,9 +344,42 @@ button:focus-visible {
   flex: 1;
 }
 
+.timeline-toolbar .window-span {
+  color: var(--fg-faint);
+}
+
 .timeline-toolbar button {
   padding: 2px 8px;
   font-size: 12px;
+}
+
+.timeline-toolbar button:disabled {
+  color: var(--fg-faint);
+  cursor: default;
+}
+.timeline-toolbar button:disabled:hover {
+  border-color: var(--border-strong);
+}
+
+.button-group {
+  display: inline-flex;
+}
+.button-group button {
+  border-radius: 0;
+  margin-left: -1px;
+  min-width: 28px;
+}
+.button-group button:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+  margin-left: 0;
+}
+.button-group button:last-child {
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.button-group button:hover,
+.button-group button:focus-visible {
+  position: relative;
+  z-index: 1;
 }
 
 .timeline-body {
