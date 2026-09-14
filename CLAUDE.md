@@ -32,8 +32,8 @@ with natural extension points, not completeness.
 
 ```bash
 pnpm install
-pnpm build            # dashboard into packages/web/dist, served by the server
-pnpm dev:server       # http://localhost:4141
+pnpm build            # dashboard into packages/web/dist (served by the server), server + shared into dist/
+pnpm dev:server       # http://localhost:4141, TypeScript source under tsx watch
 pnpm dev:web          # Vite on :5173, proxies /api to :4141
 pnpm test             # Vitest, once; see docs/TESTING.md
 pnpm typecheck && pnpm lint && pnpm format:check

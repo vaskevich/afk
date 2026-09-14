@@ -338,9 +338,18 @@ the server so it works on every backend (Lightsail buckets have no lifecycle rul
 ## Deployment
 
 Hosted at `afk.osv.im` on a Lightsail container service with a Lightsail bucket for
-storage; the server is one Docker image that builds the dashboard and runs Node
-directly as PID 1, as the unprivileged `node` user, so a deploy's SIGTERM reaches the
-shutdown handler. The image carries its build identity (`--build-arg GIT_SHA`, exposed
+storage; the server is one Docker image. Its build stage runs `pnpm build`, which
+compiles `packages/shared` and `packages/server` to plain JavaScript with `tsc`
+(`tsconfig.build.json` in each) and builds the dashboard; its runtime stage holds only
+the three `dist` directories, the pruned production `node_modules`, `cli/afk`, and the
+two package manifests, and runs `node --conditions=afk-compiled
+packages/server/dist/index.js` directly as PID 1, as the unprivileged `node` user, so a
+deploy's SIGTERM reaches the shutdown handler. `tsx` is a devDependency for
+`pnpm dev:server` only and is not in the image; the `afk-compiled` condition is what
+points the compiled server's `import "@afk/shared"` at `packages/shared/dist`, while
+every dev tool takes the `default` condition and keeps resolving the TypeScript source
+(`packages/server/src/paths.ts` explains how the same default paths hold in both
+layouts). The image carries its build identity (`--build-arg GIT_SHA`, exposed
 as `AFK_BUILD_SHA`, plus the dashboard's `dist/version.json`) and reports it at
 `GET /versionz`; `infra/deploy.sh` waits for the Lightsail deployment to become
 `ACTIVE` and then checks that endpoint for the commit it built, so a rollout that
@@ -356,6 +365,20 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** The image runs compiled JavaScript; `tsx` is dev-only. `pnpm build`
+  compiles `@afk/shared` and `@afk/server` with `tsc` (`rewriteRelativeImportExtensions`
+  turns the `.ts` imports into `.js`), and the runtime stage carries no TypeScript
+  source or transformer. The one wrinkle is that the server imports `@afk/shared` by
+  name, which Node resolves through `packages/shared/package.json` to the `.ts` source
+  whatever the server itself is compiled to, so shared's `exports` gained an
+  `afk-compiled` condition pointing at its own `dist`; only the compiled server asks for
+  it (`customConditions` in its `tsconfig.build.json`, `node --conditions=afk-compiled`
+  in the image's CMD and `pnpm --filter @afk/server start`). Chosen over flipping the
+  default to `dist` because that would have made every dev tool (tsc, eslint, vitest,
+  Vite, tsx) need either a build of shared first or its own custom-condition setting;
+  this way dev needs no build and no configuration at all, and forgetting the flag fails
+  loudly at startup (which CI's smoke step checks). Same paths in both layouts because
+  `src/paths.ts` and `dist/paths.js` sit at the same depth below the repo root.
 - **2026-09-15** Session ids are validated at the route layer (`middleware/session-id.ts`,
   the pattern next to `randomId` in `utils/ids.ts`) and unknown ids are remembered by
   `SessionStore.get` for a minute, instead of each storage backend defending itself:

@@ -133,7 +133,12 @@ aws-vault exec osv_im_admin -- infra/deploy.sh
    `afk:latest`) from the repo root's `Dockerfile`, passing
    `--build-arg GIT_SHA=$(git rev-parse --short HEAD)` and `BUILD_TIME` so the
    image reports what it was built from at `GET /versionz`
-   ([docs/PROTOCOL.md](../docs/PROTOCOL.md)).
+   ([docs/PROTOCOL.md](../docs/PROTOCOL.md)). The image's build stage runs
+   `pnpm build` (the server and shared packages compiled to JavaScript with
+   `tsc`, the dashboard with Vite); its runtime stage carries only the compiled
+   output, the pruned production `node_modules`, and `cli/afk`, and runs
+   `node --conditions=afk-compiled packages/server/dist/index.js` -- no
+   TypeScript source and no `tsx`, which is a devDependency for `pnpm dev:server`.
 2. Pushes it to the service's private registry with
    `aws lightsail push-container-image` and captures the registered image name
    (e.g. `:afk.server.3`) from its output. This needs the `lightsailctl` plugin
@@ -175,9 +180,10 @@ GitHub Actions runs two workflows (`.github/workflows/`):
 
 - **`ci.yml`** -- on every pull request and push to main: `pnpm audit --prod
 --audit-level=high`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:sh`,
-  `pnpm format:check`, `pnpm test`, `pnpm build` in one job, and
-  `tofu fmt -check` + `tofu validate` for `infra/` (no credentials, no state) in
-  another.
+  `pnpm format:check`, `pnpm test`, `pnpm build`, and a smoke test that starts
+  the compiled server with the Dockerfile's exact CMD and curls `/api/health`,
+  in one job, and `tofu fmt -check` + `tofu validate` for `infra/` (no
+  credentials, no state) in another.
 - **`deploy.yml`** -- on `workflow_dispatch` or a push to main, after `ci.yml`'s
   jobs pass (it calls `ci.yml` as a reusable workflow and `needs` it). The
   `deploy` job authenticates to AWS via GitHub's OIDC provider -- no long-lived
