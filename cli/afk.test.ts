@@ -457,6 +457,31 @@ describe("emit_frame", () => {
   });
 });
 
+describe("flush_queue", () => {
+  const baseEnv = { INGEST_TOKEN: "test-token", SESSION_ID: "sess123", AFK_VERSION: "0.1.0" };
+
+  // Regression: SIGTERM landing between emit_frame's write and its rename left a
+  // whole frame behind as `.0000000003-system.ndjson.tmp`, which the sender never
+  // picked up and the contract test found still in the queue after the session ended.
+  it("queues and sends a frame whose rename a trap interrupted, leaving no temp file", async () => {
+    const sessionDir = await makeTempDir();
+    await mkdir(join(sessionDir, "queue"));
+    await writeFile(join(sessionDir, "queue", "0000000002-system.ndjson"), "BBB\n");
+    await writeFile(join(sessionDir, "queue", ".0000000003-system.ndjson.tmp"), "CCC\n");
+    const server = await startServer(() => ({ status: 200, body: '{"accepted":2}' }));
+
+    const { stdout, stderr } = await runBash('flush_queue; printf "RC=%d" "$?"', {
+      ...baseEnv,
+      SESSION_DIR: sessionDir,
+      AFK_SERVER: server.url,
+    });
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
+    expect(server.requests.map((request) => request.body).join("")).toBe("BBB\nCCC\n");
+    expect(await readdir(join(sessionDir, "queue"))).toEqual([]);
+  });
+});
+
 describe("send_oldest_batch", () => {
   async function makeQueue(): Promise<string> {
     const sessionDir = await makeTempDir();

@@ -1137,7 +1137,23 @@ sender_loop() {
 }
 
 # Final attempt to drain the queue when the session ends. Best effort, short timeout.
+# Bash runs a trap between two commands, so `afk stop` or Ctrl-C can land after
+# emit_frame has written a frame's temp file and before the rename that queues it.
+# The write has finished by then, so the frame is whole: finish the rename instead
+# of leaving a `.tmp` behind that no sender would ever pick up.
+adopt_interrupted_frames() {
+  local temp name
+  for temp in "$SESSION_DIR"/queue/.*.ndjson.tmp; do
+    if [ -e "$temp" ]; then
+      name=$(basename "$temp")
+      name=${name#.}
+      mv "$temp" "$SESSION_DIR/queue/${name%.tmp}"
+    fi
+  done
+}
+
 flush_queue() {
+  adopt_interrupted_frames
   while [ "$(queue_count)" -gt 0 ]; do
     send_oldest_batch || break
   done
