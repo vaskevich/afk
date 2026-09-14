@@ -13,6 +13,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 SSH_USER="${DEPLOY_SSH_USER:-ubuntu}"
+# The key pair tofu installs on the instance lives in infra/.ssh (gitignored).
+SSH_KEY="${DEPLOY_SSH_KEY:-${SCRIPT_DIR}/.ssh/afk_ed25519}"
+SSH_CMD="ssh -i ${SSH_KEY} -o IdentitiesOnly=yes"
 SERVICE_USER="${DEPLOY_SERVICE_USER:-afk}"
 APP_DIR="${DEPLOY_APP_DIR:-/opt/afk/app}"
 
@@ -28,8 +31,9 @@ echo "==> Deploying ${REPO_ROOT} to ${TARGET}:${APP_DIR}"
 # Sync the checkout, skipping VCS/build/dev-only cruft and the local infra
 # state. node_modules is excluded: pnpm install runs on the box so native
 # deps and lockfile resolution match the server's own OS/arch.
-rsync -az --delete \
+rsync -az --delete -e "${SSH_CMD}" \
   --exclude='.git/' \
+  --exclude='infra/.ssh/' \
   --exclude='node_modules/' \
   --exclude='**/node_modules/' \
   --exclude='infra/.terraform/' \
@@ -41,7 +45,7 @@ rsync -az --delete \
 
 # Move into place as the service user, install deps, restart the service.
 # shellcheck disable=SC2087
-ssh "${TARGET}" bash -s -- "${APP_DIR}" "${SERVICE_USER}" <<'REMOTE'
+${SSH_CMD} "${TARGET}" bash -s -- "${APP_DIR}" "${SERVICE_USER}" <<'REMOTE'
 set -euo pipefail
 APP_DIR="$1"
 SERVICE_USER="$2"

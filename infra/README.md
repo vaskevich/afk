@@ -153,10 +153,17 @@ dependencies on the box as the `afk` service user, and restarts `afk.service`.
 
 First-time setup:
 
-1. `cp infra/terraform.tfvars.example infra/terraform.tfvars` and set
-   `ssh_public_key` to the contents of a public key you hold the private half of
-   (e.g. `~/.ssh/id_ed25519.pub`). Narrow `ssh_allowed_cidrs` to your own IP if it's
-   stable.
+1. Generate a dedicated deploy key pair and point the config at its public half.
+   Both `infra/.ssh/` and `terraform.tfvars` are gitignored; `deploy.sh` uses the
+   private key automatically (override with `DEPLOY_SSH_KEY`):
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C afk-deploy -f infra/.ssh/afk_ed25519
+   cp infra/terraform.tfvars.example infra/terraform.tfvars   # then paste infra/.ssh/afk_ed25519.pub into ssh_public_key
+   ```
+
+   Narrow `ssh_allowed_cidrs` to your own IP if it's stable.
+
 2. `aws-vault exec osv_im_admin -- tofu -chdir=infra init`
 3. `aws-vault exec osv_im_admin -- tofu -chdir=infra apply`
 4. `infra/deploy.sh`

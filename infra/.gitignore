@@ -10,3 +10,6 @@ crash.*.log
 # should be committed.
 *.tfvars
 *.tfvars.json
+
+# Deploy SSH key pair generated locally (see README). Never committed.
+.ssh/
