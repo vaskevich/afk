@@ -9,7 +9,7 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "lint:sh": "if command -v shellcheck >/dev/null 2>&1; then shellcheck cli/afk; else echo 'shellcheck not installed (brew install shellcheck); skipping lint:sh'; fi",
+    "lint:sh": "if command -v shellcheck >/dev/null 2>&1; then opts=''; if shellcheck --list-optional 2>/dev/null | grep -q useless-use-of-cat; then opts='-o useless-use-of-cat'; fi; shellcheck $opts cli/afk; else echo 'shellcheck not installed (brew install shellcheck); skipping lint:sh'; fi",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build": "pnpm -r build",
