@@ -321,9 +321,9 @@ span comes within a radius of the current cursor, falling back to the full list 
 nothing is nearby. Neither interprets raw measurements — they only render what the
 server's `AnomalyEvent`s already say.
 
-The session header's Delete control (`components/DeleteSession.tsx`, next to Share
-and the same size) asks once more on the button itself ("Really delete?"; Escape or a
-press elsewhere backs out) and then calls `DELETE /api/sessions/:id` through the
+The session header's Delete control (`components/DeleteSession.tsx`, a trash icon
+after Share and the theme toggle, the same size as both) asks once more on the button
+itself ("Really delete?" in red; Escape or a press elsewhere backs out) and then calls `DELETE /api/sessions/:id` through the
 `SessionSource` with no token, since the dashboard never has one and the link is
 enough. On success it navigates to the landing page with `?deleted=<id>`, which says so
 once; a refusal is shown under the button. It is hidden for the demo session, whose
