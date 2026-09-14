@@ -37,7 +37,11 @@ export function SessionPage() {
   return (
     <main className="page">
       <SessionHeader session={query.data.session} connection={active ? connection : null} />
-      <StatusBanner />
+      <StatusBanner
+        status={query.data.session.status}
+        events={query.data.events}
+        onSelectEvent={(event) => setCursor(event.startedAt)}
+      />
       <Timeline model={model} cursor={effectiveCursor} onCursorChange={setCursor} />
       <DetailsPanel model={model} cursor={effectiveCursor} />
       <p className="hint">Click or drag the timeline to scrub. Arrow keys nudge by a second.</p>
