@@ -449,4 +449,8 @@ main() {
   esac
 }
 
-main "$@"
+# Sourcing the script with AFK_SOURCED=1 loads the functions without running anything,
+# which is how the tests exercise them.
+if [ "${AFK_SOURCED:-0}" != 1 ]; then
+  main "$@"
+fi

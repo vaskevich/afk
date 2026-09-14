@@ -119,12 +119,14 @@ export const SystemFrame = FrameBase.extend({
   collector: z.literal("system"),
   data: SystemCollectorData,
 });
+export type SystemFrame = z.infer<typeof SystemFrame>;
 
 /** Stream id is `run:<runId>` so every wrapped command gets its own row. */
 export const RunFrame = FrameBase.extend({
   collector: z.literal("run"),
   data: RunCollectorData,
 });
+export type RunFrame = z.infer<typeof RunFrame>;
 
 /** Every frame the server accepts. Add new collectors to this union. */
 export const Frame = z.discriminatedUnion("collector", [SystemFrame, RunFrame]);

@@ -10,5 +10,9 @@
   },
   "dependencies": {
     "zod": "^3.23.8"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
   }
 }
