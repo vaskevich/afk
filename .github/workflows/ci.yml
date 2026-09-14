@@ -47,6 +47,14 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # The bash client is not covered by ESLint. `pnpm lint:sh` skips when shellcheck
+      # is missing, so it is installed first to make sure the check actually runs here.
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Shellcheck the client
+        run: pnpm lint:sh
+
       - name: Check formatting
         run: pnpm format:check
 

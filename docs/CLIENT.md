@@ -7,10 +7,19 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
 ## What the client must do
 
 - Sample the machine once a second (cpu, memory pressure, processes) with stock tools.
-- Spool to disk, retry forever with backoff, never lose or duplicate a frame.
+- Spool to disk, retry forever with backoff, never lose or duplicate a frame. Without
+  `flock` on macOS the only safe handoff between a sampler and a sender is one file
+  per frame and an atomic rename; a shared append-only file races.
+- Bound its own disk use during an outage (the queue is capped, oldest frames go).
+- Keep the sampling rate honest without a sub-second clock: schedule ticks against
+  deadlines rather than sleeping a fixed interval after the collectors.
+- Know whether the process that owns the session is alive without a network round
+  trip (a pid file), leave no state behind on any exit path, and sweep old state on
+  startup.
 - Wrap a foreground command, pass signals and stdin through, count its output, report
   its exit code.
-- Print readable errors for capacity, version, and network problems.
+- Print readable errors for capacity, version, and network problems, including curl's
+  own reason when the server cannot be reached.
 - Be something a stranger can inspect before running.
 - Today: macOS only. Wanted: Linux.
 

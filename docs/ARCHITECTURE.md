@@ -42,24 +42,38 @@ dependencies, so it can be downloaded, read, and run. Two loops:
   `queue/`, ships the oldest queued batches in one request, deletes them on a 2xx,
   and backs off up to 30 s on anything else. Nothing sent is kept; nothing unsent is
   dropped. A 410 from the server ends the session; a 4xx moves the batch to
+- **Sampler**: runs each collector on its interval, scheduling ticks against a
+  deadline so collector runtime does not drift the rate, and writes each frame as its
+  own file, `~/.afk/sessions/<id>/queue/<sequence>-<stream>.ndjson`, through a temp
+  file and an atomic rename (macOS has no `flock`, so a shared spool file would race).
+- **Sender** (background subshell): concatenates the oldest queued files into one
+  request, deletes them on a 2xx, and backs off up to 30 s on anything else. Nothing
+  sent is kept; nothing unsent is dropped until the queue passes 50 MiB
+  (`AFK_SPOOL_MAX_BYTES`), when the oldest frames go so an overnight outage cannot fill
+  the disk. A 410 from the server ends the session; a 4xx moves the batch to
   `rejected/` so it cannot stall the queue.
 
 Collectors are shell functions that print one JSON object. That is also the
 intended plugin protocol: any executable that prints JSON can become a collector.
 See [EXTENDING.md](EXTENDING.md).
 
-`afk start` writes `~/.afk/current` so later processes (`afk run`, more collectors)
-can join the same session. A session is machine-wide; the first process that created
-it owns the long-running system collectors.
+`afk start` writes `~/.afk/current` (and `owner.pid`) so later processes (`afk run`,
+more collectors) can join the same session. A session is machine-wide; the first
+process that created it owns the long-running system collectors, removes both files
+on any exit, and answers `afk stop` (SIGTERM) by flushing and ending the session.
+`afk status` reads the same files, so it works offline; a joiner that finds the owner
+pid dead treats `current` as stale without asking the server. Session directories are
+swept on the next `afk start`: a day after the `done` marker `end_session` leaves, or
+two days after their last change when there is none.
 
 #### `afk run`
 
 `afk run -- <cmd>` wraps one command and reports its progress as its own `run:<runId>`
 stream. It reads `~/.afk/current`; whoever finds no session there becomes the
 **owner** and creates one (with machine telemetry, for the lifetime of the command),
-everyone else **joins** the session already running. A joiner keeps its own spool and
-queue under `sessions/<id>/runs/<runId>/` so it never races the owner's sender for
-`current.ndjson`.
+everyone else **joins** the session already running. A joiner keeps its own queue
+under `sessions/<id>/runs/<runId>/` so its sender and the owner's never contend for
+the same files.
 
 The wrapped command runs in the foreground (not backgrounded) so Ctrl-C, stdin, and
 exit status behave the way they would unwrapped; `tee` mirrors stdout/stderr to the
@@ -304,6 +318,13 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   limits (1 MiB ingest, 4 KiB create, 413), and Hono's `secureHeaders` with a strict
   CSP (`style-src 'self'`, no `'unsafe-inline'`, since Vite extracts CSS and React uses
   the CSSOM). Verified in the browser against the built dashboard.
+- **2026-09-14** The client spools one file per frame (`queue/<sequence>-<stream>.ndjson`,
+  written via temp file and atomic rename) instead of appending to a shared
+  `current.ndjson` that the sender rotated. macOS has no `flock`, so the shared file
+  could lose a frame written between the sender's read and delete; separate files
+  make the handoff a rename. Name order is sequence order within a stream, which is
+  all the server's per-stream de-duplication needs. The queue is capped at 50 MiB
+  (oldest frames dropped) so an offline night cannot fill the disk.
 - **2026-09-14** Tests are Vitest, one config at the repo root, co-located with the
   code they cover (`foo.test.ts` next to `foo.ts`), builders (`makeSystemFrame`,
   `makeEvent`, …) over literals, real implementations (`MemorySessionStorage`,
