@@ -28,3 +28,8 @@ output "bucket_secret_access_key" {
   value       = aws_lightsail_bucket_access_key.sessions.secret_access_key
   sensitive   = true
 }
+
+output "github_deploy_role_arn" {
+  description = "Role ARN for the GitHub repository variable AWS_DEPLOY_ROLE_ARN, used by .github/workflows/deploy.yml via aws-actions/configure-aws-credentials."
+  value       = aws_iam_role.github_deploy.arn
+}
