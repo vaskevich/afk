@@ -10,11 +10,12 @@
 //
 // Plain Node 20, no dependencies, no build step.
 
-"use strict";
+import os from "node:os";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { Worker, isMainThread, workerData, parentPort } from "node:worker_threads";
 
-const os = require("node:os");
-const crypto = require("node:crypto");
-const { Worker, isMainThread, workerData, parentPort } = require("node:worker_threads");
+const scriptPath = fileURLToPath(import.meta.url);
 
 const DEFAULTS = {
   duration: 120, // seconds
@@ -136,7 +137,7 @@ function main() {
   const workers = [];
 
   for (let n = 0; n < opts.workers; n++) {
-    const w = new Worker(__filename, { workerData: { deadline } });
+    const w = new Worker(scriptPath, { workerData: { deadline } });
     w.on("message", (m) => {
       totalIterations += m.iterations;
     });

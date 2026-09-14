@@ -1,7 +1,7 @@
 # Scenarios
 
 Small, reproducible workloads for exercising afk. Each one is a single executable
-file (Node 20, no dependencies, no `pnpm install`, no build) that runs with sensible
+file (Node 20+, ES modules, no dependencies, no `pnpm install`, no build) that runs with sensible
 defaults and documents its flags under `--help`. Start the client first, then launch
 a scenario and watch the dashboard react.
 

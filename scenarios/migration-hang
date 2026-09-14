@@ -10,8 +10,6 @@
 //
 // Plain Node 20, no dependencies, no build step.
 
-"use strict";
-
 const DEFAULTS = {
   total: 10000, // items the "migration" claims it will process
   rate: 20, // lines per second

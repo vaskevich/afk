@@ -72,7 +72,7 @@ export default tseslint.config(
     extends: [js.configs.recommended],
     plugins: { promise },
     languageOptions: {
-      sourceType: "commonjs",
+      sourceType: "module",
       globals: globals.node,
     },
     rules: {
