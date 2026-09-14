@@ -5,7 +5,13 @@
 # "Deployment"). Until then, tsx has to ship in the runtime image, which is why
 # it's a "dependency" of @afk/server rather than a "devDependency" -- see below.
 
-FROM node:22-alpine AS base
+# The tag is kept for readability; the digest is what is actually pulled. It is the
+# multi-arch manifest list (OCI image index) for node:22-alpine, not one platform's
+# image manifest, so the same line resolves on an amd64 runner and an arm64 laptop.
+# Dependabot (.github/dependabot.yml) bumps it; to do it by hand, take `digest` from
+# https://hub.docker.com/v2/repositories/library/node/tags/22-alpine or run
+# `docker buildx imagetools inspect node:22-alpine`, and change both FROM lines.
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS base
 WORKDIR /app
 # Pin pnpm to the version the repo's packageManager field declares, so this stays
 # in sync with the monorepo instead of drifting from a hardcoded version here.
@@ -51,7 +57,7 @@ RUN pnpm install --frozen-lockfile --prod --filter "@afk/server..."
 # the built dashboard from `build`. No vite/react/eslint/typescript anywhere in
 # this image.
 # -----------------------------------------------------------------------------
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
