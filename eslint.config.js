@@ -10,6 +10,10 @@ export default tseslint.config(
   {
     ignores: ["**/node_modules/**", "**/dist/**", "pnpm-lock.yaml"],
   },
+  // Applied before the per-file blocks below (rather than after, its more common spot)
+  // because it turns `curly` off defensively, and each block turns it back on: bracing
+  // has no bearing on Prettier's own formatting decisions, so we want our "on" to win.
+  eslintConfigPrettier,
   {
     // TypeScript sources: packages/*/src. Type-aware rules use each package's own
     // tsconfig via projectService.
@@ -28,6 +32,8 @@ export default tseslint.config(
       // `.then()`/`.catch()`/`.finally()` calls that are themselves awaited
       // (e.g. `await x.catch(() => null)`), which should be a try/catch instead.
       "promise/prefer-await-to-then": ["error", { strict: true }],
+      // Always brace control statement bodies, even single-line ones.
+      curly: ["error", "all"],
     },
   },
   {
@@ -51,6 +57,8 @@ export default tseslint.config(
       // `.then()`/`.catch()`/`.finally()` calls that are themselves awaited
       // (e.g. `await x.catch(() => null)`), which should be a try/catch instead.
       "promise/prefer-await-to-then": ["error", { strict: true }],
+      // Always brace control statement bodies, even single-line ones.
+      curly: ["error", "all"],
     },
   },
   {
@@ -72,7 +80,8 @@ export default tseslint.config(
       // `.then()`/`.catch()`/`.finally()` calls that are themselves awaited
       // (e.g. `await x.catch(() => null)`), which should be a try/catch instead.
       "promise/prefer-await-to-then": ["error", { strict: true }],
+      // Always brace control statement bodies, even single-line ones.
+      curly: ["error", "all"],
     },
   },
-  eslintConfigPrettier,
 );

@@ -13,7 +13,9 @@ function css(name: string): string {
 
 export function chooseTickStep(spanSeconds: number, widthPx: number): number {
   for (const step of TICK_STEPS_SECONDS) {
-    if ((step / spanSeconds) * widthPx >= MIN_TICK_SPACING_PX) return step;
+    if ((step / spanSeconds) * widthPx >= MIN_TICK_SPACING_PX) {
+      return step;
+    }
   }
   return TICK_STEPS_SECONDS[TICK_STEPS_SECONDS.length - 1]!;
 }

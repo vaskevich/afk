@@ -57,7 +57,9 @@ export class SessionStore {
 
   async get(sessionId: string): Promise<Session | undefined> {
     const cached = this.sessions.get(sessionId);
-    if (cached) return cached;
+    if (cached) {
+      return cached;
+    }
     // Coalesce concurrent loads of the same session so it is only read once.
     let pending = this.loading.get(sessionId);
     if (!pending) {
@@ -77,7 +79,9 @@ export class SessionStore {
 
   private async load(sessionId: string): Promise<Session | undefined> {
     const record = await this.storage.getSession(sessionId);
-    if (!record) return undefined;
+    if (!record) {
+      return undefined;
+    }
     const frames = await this.storage.readFrames(sessionId);
     const session = this.hydrate(record, frames);
     this.sessions.set(sessionId, session);
@@ -88,7 +92,9 @@ export class SessionStore {
     const latestSequence = new Map<string, number>();
     for (const { frame } of frames) {
       const latest = latestSequence.get(frame.stream) ?? 0;
-      if (frame.sequence > latest) latestSequence.set(frame.stream, frame.sequence);
+      if (frame.sequence > latest) {
+        latestSequence.set(frame.stream, frame.sequence);
+      }
     }
     return {
       ...record,
@@ -106,8 +112,12 @@ export class SessionStore {
   }
 
   status(session: Session, now = Date.now()): SessionStatus {
-    if (session.endedAt !== null) return "ended";
-    if (now - session.startedAt > session.maxDurationSeconds * 1000) return "expired";
+    if (session.endedAt !== null) {
+      return "ended";
+    }
+    if (now - session.startedAt > session.maxDurationSeconds * 1000) {
+      return "expired";
+    }
     return "active";
   }
 
@@ -124,7 +134,9 @@ export class SessionStore {
   }
 
   async end(session: Session): Promise<void> {
-    if (session.endedAt !== null) return;
+    if (session.endedAt !== null) {
+      return;
+    }
     session.endedAt = Date.now();
     await this.storage.putSession(this.record(session));
     this.emit(session, { type: "ended", summary: this.summary(session) });
@@ -142,7 +154,9 @@ export class SessionStore {
   }
 
   private emit(session: Session, event: SessionEvent): void {
-    for (const listener of session.listeners) listener(event);
+    for (const listener of session.listeners) {
+      listener(event);
+    }
   }
 
   /**
@@ -168,7 +182,9 @@ export class SessionStore {
       nextSequence.set(frame.stream, frame.sequence);
       accepted.push({ index: nextIndex++, receivedAt, frame });
     }
-    if (accepted.length === 0) return { accepted, duplicates };
+    if (accepted.length === 0) {
+      return { accepted, duplicates };
+    }
 
     await session.writeQueue.run(() => this.storage.appendFrames(session.sessionId, accepted));
 

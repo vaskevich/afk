@@ -32,7 +32,9 @@ export function useSession(sessionId: string) {
   const loadedLastIndex = query.data ? (query.data.frames.at(-1)?.index ?? 0) : null;
 
   useEffect(() => {
-    if (status !== "active" || loadedLastIndex === null) return;
+    if (status !== "active" || loadedLastIndex === null) {
+      return;
+    }
     const key = queryKey(sessionId);
     const update = (fn: (old: FramesResponse) => FramesResponse) =>
       queryClient.setQueryData<FramesResponse>(key, (old) => (old ? fn(old) : old));

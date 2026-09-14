@@ -59,18 +59,25 @@ export function buildModel(data: FramesResponse, now: number): TimelineModel {
 
 /** Index of the frame whose timestamp is closest to `timeMs`, or -1 when empty. */
 export function nearestFrameIndex(frames: readonly Frame[], timeMs: number): number {
-  if (frames.length === 0) return -1;
+  if (frames.length === 0) {
+    return -1;
+  }
   let lo = 0;
   let hi = frames.length - 1;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (frameTimeMs(frames[mid]!) < timeMs) lo = mid + 1;
-    else hi = mid;
+    if (frameTimeMs(frames[mid]!) < timeMs) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
   }
   if (lo > 0) {
     const prev = frames[lo - 1]!;
     const cur = frames[lo]!;
-    if (timeMs - frameTimeMs(prev) <= frameTimeMs(cur) - timeMs) return lo - 1;
+    if (timeMs - frameTimeMs(prev) <= frameTimeMs(cur) - timeMs) {
+      return lo - 1;
+    }
   }
   return lo;
 }

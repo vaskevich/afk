@@ -13,14 +13,22 @@ export function useCanvas(
 ) {
   useLayoutEffect(() => {
     const canvas = ref.current;
-    if (!canvas || width <= 0 || height <= 0) return;
+    if (!canvas || width <= 0 || height <= 0) {
+      return;
+    }
     const dpr = window.devicePixelRatio || 1;
     const w = Math.round(width * dpr);
     const h = Math.round(height * dpr);
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
+    if (canvas.width !== w) {
+      canvas.width = w;
+    }
+    if (canvas.height !== h) {
+      canvas.height = h;
+    }
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) {
+      return;
+    }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
     draw(ctx);

@@ -22,7 +22,9 @@ export class DiskSessionStorage implements SessionStorage {
   }
 
   private dir(sessionId: string): string {
-    if (!SAFE_ID.test(sessionId)) throw new Error(`invalid session id: ${sessionId}`);
+    if (!SAFE_ID.test(sessionId)) {
+      throw new Error(`invalid session id: ${sessionId}`);
+    }
     return path.join(this.sessionsDir, sessionId);
   }
 
@@ -36,18 +38,24 @@ export class DiskSessionStorage implements SessionStorage {
   }
 
   async getSession(sessionId: string) {
-    if (!SAFE_ID.test(sessionId)) return null;
+    if (!SAFE_ID.test(sessionId)) {
+      return null;
+    }
     try {
       const text = await readFile(path.join(this.dir(sessionId), SESSION_FILE), "utf8");
       return SessionRecord.parse(JSON.parse(text));
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return null;
+      }
       throw err;
     }
   }
 
   async appendFrames(sessionId: string, frames: StoredFrame[]) {
-    if (frames.length === 0) return;
+    if (frames.length === 0) {
+      return;
+    }
     const lines = frames.map((f) => JSON.stringify(f)).join("\n") + "\n";
     await appendFile(path.join(this.dir(sessionId), FRAMES_FILE), lines);
   }
@@ -57,15 +65,22 @@ export class DiskSessionStorage implements SessionStorage {
     try {
       text = await readFile(path.join(this.dir(sessionId), FRAMES_FILE), "utf8");
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
       throw err;
     }
     const frames: StoredFrame[] = [];
     for (const line of text.split("\n")) {
-      if (line === "") continue;
+      if (line === "") {
+        continue;
+      }
       const parsed = StoredFrame.safeParse(JSON.parse(line));
-      if (parsed.success) frames.push(parsed.data);
-      else console.warn(`[storage] skipping unreadable frame in session ${sessionId}`);
+      if (parsed.success) {
+        frames.push(parsed.data);
+      } else {
+        console.warn(`[storage] skipping unreadable frame in session ${sessionId}`);
+      }
     }
     return frames;
   }
@@ -75,7 +90,9 @@ export class DiskSessionStorage implements SessionStorage {
       const entries = await readdir(this.sessionsDir, { withFileTypes: true });
       return entries.filter((e) => e.isDirectory() && SAFE_ID.test(e.name)).map((e) => e.name);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
       throw err;
     }
   }

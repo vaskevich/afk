@@ -22,8 +22,9 @@ export function sessionRoutes(deps: AppDeps) {
   return new Hono<AppEnv>()
     .post("/", async (c) => {
       const parsed = CreateSessionRequest.safeParse(await readJsonBody(c));
-      if (!parsed.success)
+      if (!parsed.success) {
         return errorResponse(c, 400, "invalid session request", parsed.error.flatten());
+      }
 
       const session = await store.create({
         host: parsed.data.host,
@@ -46,7 +47,9 @@ export function sessionRoutes(deps: AppDeps) {
     })
     .get("/:sessionId", async (c) => {
       const session = await store.get(c.req.param("sessionId"));
-      if (!session) return errorResponse(c, 404, "unknown session");
+      if (!session) {
+        return errorResponse(c, 404, "unknown session");
+      }
       return c.json(store.summary(session));
     })
     .post("/:sessionId/end", ingestAuth(deps), async (c) => {

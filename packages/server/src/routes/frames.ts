@@ -15,7 +15,9 @@ export function frameRoutes(deps: AppDeps) {
 
     // TODO(hardening): cap body size before reading it.
     const parsed = parseFrames(await c.req.text());
-    if (!parsed.ok) return errorResponse(c, 400, parsed.message, parsed.details);
+    if (!parsed.ok) {
+      return errorResponse(c, 400, parsed.message, parsed.details);
+    }
 
     const result = await store.ingest(session, parsed.frames);
     for (const stored of result.accepted) {

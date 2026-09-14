@@ -111,7 +111,9 @@ function burn({ deadline }) {
       buf = crypto.createHash("sha256").update(buf).digest();
       iterations++;
     }
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= deadline) {
+      break;
+    }
   }
   parentPort.postMessage({ iterations });
 }
@@ -144,7 +146,9 @@ function main() {
     });
     w.on("exit", () => {
       remaining--;
-      if (remaining === 0) finish();
+      if (remaining === 0) {
+        finish();
+      }
     });
     workers.push(w);
   }
@@ -184,5 +188,8 @@ function main() {
   }
 }
 
-if (isMainThread) main();
-else burn(workerData);
+if (isMainThread) {
+  main();
+} else {
+  burn(workerData);
+}

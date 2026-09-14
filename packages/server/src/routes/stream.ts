@@ -28,7 +28,9 @@ export function streamRoutes(deps: AppDeps) {
   return new Hono<AppEnv>()
     .get("/:sessionId/frames", async (c) => {
       const session = await store.get(c.req.param("sessionId"));
-      if (!session) return errorResponse(c, 404, "unknown session");
+      if (!session) {
+        return errorResponse(c, 404, "unknown session");
+      }
       const after = resumeIndex(undefined, c.req.query("after"));
       const body: FramesResponse = {
         session: store.summary(session),
@@ -38,7 +40,9 @@ export function streamRoutes(deps: AppDeps) {
     })
     .get("/:sessionId/stream", async (c) => {
       const session = await store.get(c.req.param("sessionId"));
-      if (!session) return errorResponse(c, 404, "unknown session");
+      if (!session) {
+        return errorResponse(c, 404, "unknown session");
+      }
       const after = resumeIndex(c.req.header("last-event-id"), c.req.query("after"));
       return streamSSE(c, (stream) => serveSession(stream, session, after));
     });
@@ -71,7 +75,9 @@ export function streamRoutes(deps: AppDeps) {
           await queue.run(async () => {
             if (event.type === "frames") {
               for (const f of event.frames) {
-                if (f.index <= sent) continue;
+                if (f.index <= sent) {
+                  continue;
+                }
                 await writeFrame(f);
                 sent = f.index;
               }
@@ -87,8 +93,11 @@ export function streamRoutes(deps: AppDeps) {
     };
 
     const unsubscribe = store.subscribe(session, (event) => {
-      if (replaying) buffered.push(event);
-      else handle(event);
+      if (replaying) {
+        buffered.push(event);
+      } else {
+        handle(event);
+      }
     });
     const keepalive = setInterval(
       () => void stream.write(": keepalive\n\n"),
@@ -102,7 +111,9 @@ export function streamRoutes(deps: AppDeps) {
         sent = f.index;
       }
       replaying = false;
-      for (const event of buffered) handle(event);
+      for (const event of buffered) {
+        handle(event);
+      }
 
       if (store.status(session) !== "active") {
         // TODO(sessions): a session that hits the max duration without an explicit end never

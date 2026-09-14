@@ -53,7 +53,9 @@ function drawRow(ctx: CanvasRenderingContext2D, frames: readonly SystemFrame[], 
     ctx.stroke();
   }
 
-  if (frames.length === 0) return;
+  if (frames.length === 0) {
+    return;
+  }
 
   // cpu percent: filled area under a line.
   ctx.beginPath();
@@ -73,8 +75,11 @@ function drawRow(ctx: CanvasRenderingContext2D, frames: readonly SystemFrame[], 
     const f = frames[i]!;
     const x = view.x(frameTimeMs(f));
     const y = yForPercent(f.data.cpu.percent);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
   }
   ctx.strokeStyle = colors.accent;
   ctx.lineWidth = 1.25;

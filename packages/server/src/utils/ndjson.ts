@@ -9,7 +9,9 @@ export function parseFrames(text: string): ParseFramesResult {
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trim();
-    if (line === "") continue;
+    if (line === "") {
+      continue;
+    }
     let json: unknown;
     try {
       json = JSON.parse(line);

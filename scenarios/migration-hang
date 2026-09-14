@@ -76,8 +76,12 @@ function parseArgs(argv) {
     const value = () => (inlineValue !== undefined ? inlineValue : argv[++i]);
     // --crash takes an optional code: consume the next arg only if it looks like a number.
     const optionalValue = () => {
-      if (inlineValue !== undefined) return inlineValue;
-      if (argv[i + 1] !== undefined && /^\d+$/.test(argv[i + 1])) return argv[++i];
+      if (inlineValue !== undefined) {
+        return inlineValue;
+      }
+      if (argv[i + 1] !== undefined && /^\d+$/.test(argv[i + 1])) {
+        return argv[++i];
+      }
       return DEFAULTS.exitCode;
     };
     switch (flag) {
@@ -154,11 +158,15 @@ function main() {
       process.stdout.write(`migration-hang: migrated ${opts.total} items in ${elapsed()}s\n`);
       process.exit(0);
     }
-    if (opts.never) return;
+    if (opts.never) {
+      return;
+    }
 
     const byItem = item >= stallAt;
     const byTime = Date.now() - startedAt >= stallAfterMs;
-    if (!byItem && !byTime) return;
+    if (!byItem && !byTime) {
+      return;
+    }
 
     clearInterval(timer);
     const reason = byItem ? `item ${item}` : `${opts.hangAfter}s`;

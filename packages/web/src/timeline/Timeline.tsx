@@ -31,7 +31,9 @@ export function Timeline({ model, cursor, onCursorChange }: Props) {
   // The axis cell defines the plot column; every row shares its width and offset.
   useEffect(() => {
     const el = axisRef.current;
-    if (!el) return;
+    if (!el) {
+      return;
+    }
     const measure = () => setPlot({ left: el.offsetLeft, width: el.clientWidth });
     measure();
     const observer = new ResizeObserver(measure);
@@ -52,7 +54,9 @@ export function Timeline({ model, cursor, onCursorChange }: Props) {
   const timeAtPointer = useCallback(
     (e: PointerEvent) => {
       const el = axisRef.current;
-      if (!el || plot.width === 0) return null;
+      if (!el || plot.width === 0) {
+        return null;
+      }
       const rect = el.getBoundingClientRect();
       const fraction = clamp((e.clientX - rect.left) / rect.width, 0, 1);
       return snapToSecond(t0 + fraction * (t1 - t0));
@@ -61,16 +65,24 @@ export function Timeline({ model, cursor, onCursorChange }: Props) {
   );
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0) {
+      return;
+    }
     dragging.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
     const t = timeAtPointer(e);
-    if (t !== null) onCursorChange(t);
+    if (t !== null) {
+      onCursorChange(t);
+    }
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (!dragging.current) return;
+    if (!dragging.current) {
+      return;
+    }
     const t = timeAtPointer(e);
-    if (t !== null) onCursorChange(t);
+    if (t !== null) {
+      onCursorChange(t);
+    }
   };
   const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
     dragging.current = false;

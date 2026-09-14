@@ -26,7 +26,9 @@ export const apiSource: SessionSource = {
 
     const flush = () => {
       flushTimer = null;
-      if (pending.length === 0) return;
+      if (pending.length === 0) {
+        return;
+      }
       const batch = pending;
       pending = [];
       handlers.onFrames(batch);
@@ -36,12 +38,17 @@ export const apiSource: SessionSource = {
     source.onopen = () => handlers.onConnection("live");
     // EventSource reconnects on its own and resends Last-Event-ID; we only report it.
     source.onerror = () => {
-      if (closed) return;
+      if (closed) {
+        return;
+      }
       handlers.onConnection(source.readyState === EventSource.CLOSED ? "closed" : "reconnecting");
     };
     source.addEventListener(StreamEventName.Frame, (e: MessageEvent<string>) => {
       const parsed = StoredFrame.safeParse(JSON.parse(e.data));
-      if (!parsed.success) return; // TODO(hardening): surface schema drift between server and dashboard
+      if (!parsed.success) {
+        // TODO(hardening): surface schema drift between server and dashboard
+        return;
+      }
       pending.push(parsed.data);
       flushTimer ??= window.setTimeout(flush, FLUSH_INTERVAL_MS);
     });
@@ -59,7 +66,9 @@ export const apiSource: SessionSource = {
 
     return () => {
       closed = true;
-      if (flushTimer !== null) window.clearTimeout(flushTimer);
+      if (flushTimer !== null) {
+        window.clearTimeout(flushTimer);
+      }
       source.close();
     };
   },
