@@ -9,6 +9,7 @@ disagree, the schemas win. Protocol version: 1.
 POST /api/sessions                      client → server   create
 POST /api/sessions/:id/frames           client → server   ingest, repeated (bearer token)
 POST /api/sessions/:id/end              client → server   end (bearer token)
+GET  /api/sessions/:id/qr               client → server   dashboard URL as a QR code (bearer token)
 GET  /api/sessions/:id                  anyone            summary
 GET  /api/sessions/:id/frames?after=N   dashboard         history
 GET  /api/sessions/:id/stream           dashboard         SSE, live + replay
@@ -21,9 +22,9 @@ auth: the session id is the unguessable share link (22 chars of base62, ~131 bit
 The ingest token never appears in the dashboard URL, so sharing a trace never shares
 write access.
 
-Every client request (create, ingest, end) carries `X-Afk-Client: <name>/<semver>`,
+Every client request (create, ingest, end, qr) carries `X-Afk-Client: <name>/<semver>`,
 `bash/0.2.0` today. The server refuses clients below its minimum version, and requests
-on those three endpoints with a missing or malformed header, with `426 Upgrade
+on those four endpoints with a missing or malformed header, with `426 Upgrade
 Required`; the body is an `ErrorResponse` whose `details` is `UpgradeRequiredDetails`
 (`minimumClientVersion`, `minimumProtocolVersion`, `yourVersion`). Read endpoints are
 never version-checked. See [VERSIONING.md](VERSIONING.md).
@@ -121,6 +122,26 @@ queue on disk and stops, like a 410, so nothing sampled is lost.
 
 Marks the session ended and returns the session summary. Sessions that never receive
 an end become `expired` once past `maxDurationSeconds`.
+
+### QR code
+
+`GET /api/sessions/:id/qr` renders the session's `dashboardUrl` as a QR code so the
+client can put it on the terminal for a phone to scan; the bash client has no QR
+library of its own. It takes the bearer ingest token like the other client endpoints:
+the URL is the share link, so only the session's owner gets it drawn (the dashboard
+renders its own copy in the browser). Like ingest, it answers `410` once the session is
+over.
+
+The default response is `text/plain; charset=utf-8`: the code drawn with Unicode
+half-block characters (`█`, `▀`, `▄`, and space), two module rows per line, with a
+one-module quiet zone on every side, followed by the URL on its own line. Light modules
+are the block characters and dark modules are spaces, so the code has the right polarity
+on a dark terminal (a light terminal shows it inverted, which phone cameras also read).
+Error correction level M, smallest version that fits the URL; the hosted URL with its
+22-character session id gives a 33 × 33 code, 35 columns by 18 lines with the quiet zone.
+
+`?format=svg` returns the same code as `image/svg+xml`, scalable (no fixed size), black
+modules on white with a four-module quiet zone. Any other `format` is a `400`.
 
 ## Frames
 

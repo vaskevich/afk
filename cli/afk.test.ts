@@ -1161,3 +1161,131 @@ describe("afk with no state", () => {
     expect(stderr).toContain("unknown command: bogus");
   });
 });
+
+describe("print_qr", () => {
+  const sessionEnv = { SESSION_ID: "sess123", INGEST_TOKEN: "tok-abc", AFK_VERSION: "0.2.0" };
+  /** What the server's text render looks like: half-block lines, then the URL. */
+  const QR_TEXT = "█████████\n█▀▀▀▀▀▀▀█\n█ ▄▀▄ ▄ █\n█████████\nhttp://example.test/s/sess123\n";
+  /** The test process has no tty, so a snippet that wants the terminal path says so. */
+  const ON_A_TERMINAL = "stdout_is_terminal() { return 0; }";
+
+  it("prints the QR the server returns, fetched with the bearer token and the client header", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
+
+    const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+      ...sessionEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toBe(QR_TEXT);
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0]).toMatchObject({
+      method: "GET",
+      url: "/api/sessions/sess123/qr",
+      headers: expect.objectContaining({
+        authorization: "Bearer tok-abc",
+        "x-afk-client": "bash/0.2.0",
+      }),
+    });
+  });
+
+  it("prints nothing and asks the server for nothing with AFK_NO_QR=1", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
+
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+      ...sessionEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      AFK_NO_QR: "1",
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toBe("");
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("prints nothing when stdout is not a terminal", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
+
+    const { stdout, code } = await runBash("print_qr", {
+      ...sessionEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toBe("");
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("prints nothing and still succeeds when the server answers with an error", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 500, body: '{"error":"boom"}' }));
+
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+      ...sessionEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toBe("");
+    expect(stdout).not.toMatch(/[█▀▄]/);
+  });
+
+  it("prints nothing and still succeeds when the server cannot be reached", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+      ...sessionEnv,
+      AFK_HOME: afkHome,
+      // Port 1 needs root to bind and nothing listens there: the connection is refused.
+      AFK_SERVER: "http://127.0.0.1:1",
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toBe("");
+  });
+});
+
+describe("cmd_qr", () => {
+  const QR_TEXT = "█████████\n█ ▄▀▄ ▄ █\n█████████\nhttp://example.test/s/abc123\n";
+
+  it("prints the current session's QR code whether or not stdout is a terminal", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer((req) =>
+      req.url.endsWith("/qr")
+        ? { status: 200, body: QR_TEXT }
+        : { status: 200, body: '{"status":"active","maxDurationSeconds":3600}' },
+    );
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=abc123\ningestToken=tok-abc\nserver=${server.url}\n` +
+        "dashboardUrl=http://example.test/s/abc123\n",
+    );
+
+    const { stdout, stderr, code } = await runBash("cmd_qr", { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toBe(QR_TEXT);
+    expect(server.requests.map((req) => req.url)).toEqual([
+      "/api/sessions/abc123",
+      "/api/sessions/abc123/qr",
+    ]);
+  });
+
+  it("fails with a clear message when there is no active session", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stdout, stderr, code } = await runBash("cmd_qr", { AFK_HOME: afkHome });
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("no active session");
+  });
+});

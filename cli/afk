@@ -8,19 +8,25 @@
 # (what macOS ships), curl, and stock macOS tools only. No jq, no python.
 #
 # Usage:
-#   afk start            start a session in the foreground (Ctrl-C to end it)
-#   afk run -- <cmd>     run a command and report its progress; joins the session
+#   afk start [--no-qr]  start a session in the foreground (Ctrl-C to end it)
+#   afk run [--no-qr] -- <cmd>
+#                        run a command and report its progress; joins the session
 #                        started by `afk start` if one is running on this machine,
 #                        otherwise starts one (with machine telemetry) for the
 #                        lifetime of the command
 #   afk status           show the session running on this machine and its queue
 #   afk stop             end that session (asks the `afk start` process to finish)
+#   afk qr               print the current session's dashboard URL as a QR code again
 #   afk version
+#
+# The dashboard URL is printed with a QR code under it when stdout is a terminal, so
+# you can point a phone at the screen instead of typing it; --no-qr skips that.
 #
 # Environment:
 #   AFK_SERVER           server origin, default https://afk.osv.im (self-hosting is the plan)
 #   AFK_HOME             state directory, default ~/.afk
 #   AFK_SPOOL_MAX_BYTES  cap on queued frames on disk, default 50 MiB; oldest dropped past it
+#   AFK_NO_QR            set to 1 to never print the QR code (same as --no-qr)
 #
 # Layout of ~/.afk:
 #   current                        the active session (id, token, server) so other
@@ -623,13 +629,66 @@ system_sampler_loop() {
   done
 }
 
+# ---------------------------------------------------------------------------
+# qr code: the dashboard URL, drawn for a phone camera. Rendered by the server
+# (bash has no QR library; see docs/PROTOCOL.md) and printed under the URL.
+# ---------------------------------------------------------------------------
+
+# Whether stdout is a terminal; the tests override this after sourcing the script.
+stdout_is_terminal() { [ -t 1 ]; }
+
+# Fetches the current session's QR code and prints it, block plus URL line, exactly as
+# the server sent it. Prints nothing and returns 1 unless the server answered 200.
+fetch_qr() {
+  local file="$AFK_HOME/qr-$$.txt" status
+  status=$(curl -sS -o "$file" -w '%{http_code}' --connect-timeout 3 --max-time 5 \
+    -H "Authorization: Bearer $INGEST_TOKEN" -H "X-Afk-Client: bash/$AFK_VERSION" \
+    "$AFK_SERVER/api/sessions/$SESSION_ID/qr" 2>/dev/null) || status=000
+  if [ "$status" = 200 ]; then
+    cat "$file"
+    rm -f "$file"
+    return 0
+  fi
+  rm -f "$file"
+  return 1
+}
+
+# Prints the QR code after a session's URL, when it would be seen: only on a terminal
+# (a pipe or a log file gets the URL alone) and not when --no-qr or AFK_NO_QR=1 turned
+# it off. A failed fetch prints nothing; the session never depends on it.
+print_qr() {
+  if [ "${AFK_NO_QR:-0}" = 1 ]; then
+    return 0
+  fi
+  stdout_is_terminal || return 0
+  fetch_qr || true
+}
+
+cmd_qr() {
+  local rc
+  load_current_session; rc=$?
+  # 2 means the session is live but full of streams, which is no reason not to show its URL.
+  if [ "$rc" = 1 ]; then
+    die "no active session on this machine (start one with 'afk start')"
+  fi
+  fetch_qr || die "could not fetch the QR code from $AFK_SERVER; the dashboard is at $DASHBOARD_URL"
+}
+
 cmd_start() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --no-qr) AFK_NO_QR=1 ;;
+      *) die "unknown option: $arg (try 'afk help')" ;;
+    esac
+  done
   check_platform
   cleanup_old_sessions
   gather_host_info
   create_session_or_wait
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
   printf '\n  %s\n\n' "$DASHBOARD_URL"
+  print_qr
 
   sender_loop &
   SENDER_PID=$!
@@ -659,6 +718,10 @@ cmd_start() {
 }
 
 cmd_run() {
+  if [ "${1:-}" = "--no-qr" ]; then
+    AFK_NO_QR=1
+    shift
+  fi
   [ "${1:-}" = "--" ] && shift
   [ $# -gt 0 ] || die "usage: afk run -- <command> [args...]"
   check_platform
@@ -693,6 +756,10 @@ cmd_run() {
     mkdir -p "$SESSION_DIR/queue"
   fi
   printf '\n  %s\n\n' "$DASHBOARD_URL"
+  # A joiner's URL was already printed, QR and all, by the `afk start` that owns it.
+  if [ "$owner" = 1 ]; then
+    print_qr
+  fi
 
   sender_loop &
   SENDER_PID=$!
@@ -781,10 +848,11 @@ usage() {
 
 main() {
   case "${1:-}" in
-    start)   cmd_start ;;
+    start)   shift; cmd_start "$@" ;;
     run)     shift; cmd_run "$@" ;;
     status)  cmd_status ;;
     stop)    cmd_stop ;;
+    qr)      cmd_qr ;;
     version) printf 'afk %s\n' "$AFK_VERSION" ;;
     -h|--help|help|"") usage ;;
     *)       die "unknown command: $1 (try 'afk help')" ;;
