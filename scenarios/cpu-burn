@@ -172,10 +172,14 @@ function main() {
     ["SIGINT", 130],
     ["SIGTERM", 143],
   ]) {
-    process.on(sig, () => {
+    process.on(sig, async () => {
       clearInterval(ticker);
       process.stdout.write(`cpu-burn: caught ${sig}, stopping\n`);
-      Promise.all(workers.map((w) => w.terminate())).finally(() => process.exit(code));
+      try {
+        await Promise.all(workers.map((w) => w.terminate()));
+      } finally {
+        process.exit(code);
+      }
     });
   }
 }

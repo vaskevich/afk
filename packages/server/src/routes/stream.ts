@@ -6,6 +6,7 @@ import type { FramesResponse, StoredFrame } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
 import { errorResponse } from "../http/errors.ts";
 import type { Session, SessionEvent } from "../store/sessions.ts";
+import { SerialQueue } from "../utils/serial-queue.ts";
 
 /** How often to send an SSE comment so proxies and browsers keep the connection open. */
 const KEEPALIVE_INTERVAL_MS = 15_000;
@@ -60,25 +61,29 @@ export function streamRoutes(deps: AppDeps) {
     let sent = after;
     let replaying = true;
     const buffered: SessionEvent[] = [];
-    let queue = Promise.resolve();
+    const queue = new SerialQueue();
     let finish!: () => void;
     const done = new Promise<void>((resolve) => (finish = resolve));
 
     const handle = (event: SessionEvent) => {
-      queue = queue
-        .then(async () => {
-          if (event.type === "frames") {
-            for (const f of event.frames) {
-              if (f.index <= sent) continue;
-              await writeFrame(f);
-              sent = f.index;
+      void (async () => {
+        try {
+          await queue.run(async () => {
+            if (event.type === "frames") {
+              for (const f of event.frames) {
+                if (f.index <= sent) continue;
+                await writeFrame(f);
+                sent = f.index;
+              }
+            } else {
+              await writeSummary(StreamEventName.End);
+              finish();
             }
-          } else {
-            await writeSummary(StreamEventName.End);
-            finish();
-          }
-        })
-        .catch(finish); // a write failure means the client went away
+          });
+        } catch {
+          finish(); // a write failure means the client went away
+        }
+      })();
     };
 
     const unsubscribe = store.subscribe(session, (event) => {
@@ -102,7 +107,7 @@ export function streamRoutes(deps: AppDeps) {
       if (store.status(session) !== "active") {
         // TODO(sessions): a session that hits the max duration without an explicit end never
         // emits "ended"; the stream stays open until the client disconnects.
-        await queue;
+        await queue.drain();
         await writeSummary(StreamEventName.End);
         return;
       }

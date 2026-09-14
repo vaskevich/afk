@@ -1,9 +1,19 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { CreateSessionRequest } from "@afk/shared";
 import type { CreateSessionResponse } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
 import { errorResponse } from "../http/errors.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
+
+/** Parses the request body as JSON, or null if it isn't valid JSON. */
+async function readJsonBody(c: Context<AppEnv>): Promise<unknown> {
+  try {
+    return await c.req.json();
+  } catch {
+    return null;
+  }
+}
 
 /** Session lifecycle: create, inspect, end. Mounted at /api/sessions. */
 export function sessionRoutes(deps: AppDeps) {
@@ -11,7 +21,7 @@ export function sessionRoutes(deps: AppDeps) {
 
   return new Hono<AppEnv>()
     .post("/", async (c) => {
-      const parsed = CreateSessionRequest.safeParse(await c.req.json().catch(() => null));
+      const parsed = CreateSessionRequest.safeParse(await readJsonBody(c));
       if (!parsed.success)
         return errorResponse(c, 400, "invalid session request", parsed.error.flatten());
 

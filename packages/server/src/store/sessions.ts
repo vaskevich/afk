@@ -1,6 +1,7 @@
 import type { Frame, HostInfo, SessionSummary, SessionStatus, StoredFrame } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import { randomId, randomToken } from "../utils/ids.ts";
+import { SerialQueue } from "../utils/serial-queue.ts";
 import type { SessionRecord, SessionStorage } from "./storage.ts";
 
 export type { StoredFrame };
@@ -18,7 +19,7 @@ export interface Session extends SessionRecord {
   frames: StoredFrame[];
   listeners: Set<SessionListener>;
   /** Serializes storage appends so frames land on disk in index order. */
-  writeChain: Promise<void>;
+  writeQueue: SerialQueue;
 }
 
 export interface IngestResult {
@@ -60,10 +61,18 @@ export class SessionStore {
     // Coalesce concurrent loads of the same session so it is only read once.
     let pending = this.loading.get(sessionId);
     if (!pending) {
-      pending = this.load(sessionId).finally(() => this.loading.delete(sessionId));
+      pending = this.loadAndUntrack(sessionId);
       this.loading.set(sessionId, pending);
     }
     return pending;
+  }
+
+  private async loadAndUntrack(sessionId: string): Promise<Session | undefined> {
+    try {
+      return await this.load(sessionId);
+    } finally {
+      this.loading.delete(sessionId);
+    }
   }
 
   private async load(sessionId: string): Promise<Session | undefined> {
@@ -86,7 +95,7 @@ export class SessionStore {
       latestSequence,
       frames,
       listeners: new Set(),
-      writeChain: Promise.resolve(),
+      writeQueue: new SerialQueue(),
     };
   }
 
@@ -161,11 +170,7 @@ export class SessionStore {
     }
     if (accepted.length === 0) return { accepted, duplicates };
 
-    const write = session.writeChain.then(() =>
-      this.storage.appendFrames(session.sessionId, accepted),
-    );
-    session.writeChain = write.catch(() => undefined);
-    await write;
+    await session.writeQueue.run(() => this.storage.appendFrames(session.sessionId, accepted));
 
     session.latestSequence = nextSequence;
     session.frames.push(...accepted);
