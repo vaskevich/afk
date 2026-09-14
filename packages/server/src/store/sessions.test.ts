@@ -59,9 +59,48 @@ class FlakyAppendStorage implements SessionStorage {
   }
 }
 
+/**
+ * A storage that can flush and compact, the way the bucket backend can. Each compaction
+ * waits until the test releases it, so the test can prove `end` does not wait on it.
+ */
+class CompactingStorage extends MemorySessionStorage {
+  readonly compactCalls: { sessionId: string; frames: readonly StoredFrame[] }[] = [];
+  flushCalls = 0;
+  private release: (() => void) | undefined;
+  failCompaction = false;
+
+  /** Lets the pending compaction finish. */
+  releaseCompaction(): void {
+    this.release?.();
+    this.release = undefined;
+  }
+
+  async flush(): Promise<void> {
+    this.flushCalls++;
+  }
+
+  async compactSession(sessionId: string, frames: readonly StoredFrame[] = []): Promise<boolean> {
+    this.compactCalls.push({ sessionId, frames: frames.slice() });
+    await new Promise<void>((resolve) => {
+      this.release = resolve;
+    });
+    if (this.failCompaction) {
+      throw new Error("simulated compaction failure");
+    }
+    return true;
+  }
+}
+
 /** A run of system frames, one per second, with the given cpu percent at each offset. */
 function highCpuFrames(count: number) {
   return Array.from({ length: count }, (_, i) => makeSystemFrame(i, { cpuPercent: 95 }));
+}
+
+/** Lets detached work (the compaction `end` starts) get as far as its next wait. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 afterEach(() => {
@@ -446,6 +485,23 @@ describe("SessionStore", () => {
     });
   });
 
+  describe("flushStorage", () => {
+    it("flushes a storage that buffers", async () => {
+      const storage = new CompactingStorage();
+      const store = new SessionStore(storage);
+
+      await store.flushStorage();
+
+      expect(storage.flushCalls).toBe(1);
+    });
+
+    it("is a no-op for a storage that writes through", async () => {
+      const store = new SessionStore(new MemorySessionStorage());
+
+      await expect(store.flushStorage()).resolves.toBeUndefined();
+    });
+  });
+
   describe("drainWrites", () => {
     it("resolves only once every pending append on every session has settled", async () => {
       const storage = new MemorySessionStorage();
@@ -526,6 +582,73 @@ describe("SessionStore", () => {
       await store.end(session);
 
       expect(session.endedAt).toBe(endedAtFirst);
+    });
+
+    it("hands every frame to the storage's compaction after the end is recorded, without waiting for it", async () => {
+      const storage = new CompactingStorage();
+      const store = new SessionStore(storage);
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1)]);
+
+      await store.end(session);
+      await settle();
+
+      // Ended and persisted while the compaction is still pending.
+      expect(session.endedAt).not.toBeNull();
+      await expect(storage.getSession(session.sessionId)).resolves.toMatchObject({
+        endedAt: session.endedAt,
+      });
+      expect(storage.compactCalls).toEqual([
+        { sessionId: session.sessionId, frames: session.frames },
+      ]);
+      storage.releaseCompaction();
+    });
+
+    it("compacts after an append that was still queued has settled", async () => {
+      const storage = new CompactingStorage();
+      const store = new SessionStore(storage);
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      let releaseAppend!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseAppend = resolve;
+      });
+      const append = storage.appendFrames.bind(storage);
+      vi.spyOn(storage, "appendFrames").mockImplementation(async (sessionId, frames) => {
+        await gate;
+        await append(sessionId, frames);
+      });
+      const ingest = store.ingest(session, [makeSystemFrame(0)]);
+
+      await store.end(session);
+      await settle();
+      expect(storage.compactCalls).toEqual([]);
+      releaseAppend();
+      await ingest;
+      await settle();
+
+      expect(storage.compactCalls).toEqual([
+        { sessionId: session.sessionId, frames: [expect.objectContaining({ index: 1 })] },
+      ]);
+      storage.releaseCompaction();
+    });
+
+    it("still ends the session when the compaction fails, with a warning", async () => {
+      const storage = new CompactingStorage();
+      storage.failCompaction = true;
+      const store = new SessionStore(storage);
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+      await store.end(session);
+      await settle();
+      storage.releaseCompaction();
+      await settle();
+
+      expect(store.status(session)).toBe("ended");
+      expect(warn).toHaveBeenCalledExactlyOnceWith("could not compact ended session", {
+        session: session.sessionId,
+        error: "simulated compaction failure",
+      });
     });
 
     it("ends at the given moment when one is passed, closing events there too", async () => {
