@@ -363,22 +363,13 @@ describe.skipIf(process.platform !== "darwin")(
 
       expect(exitCode).toBe(0);
       expect(session).toMatchObject({ sessionId, status: "active", host: await thisHost() });
-      // readFrames already validated every frame against the shared Frame schema.
-      expect(
-        frames.map((f) => ({
-          index: f.index,
-          stream: f.frame.stream,
-          collector: f.frame.collector,
-          sequence: f.frame.sequence,
-        })),
-      ).toEqual(
-        range(1, frames.length).map((n) => ({
-          index: n,
-          stream: "system",
-          collector: "system",
-          sequence: n,
-        })),
-      );
+      // readFrames already validated every frame against the shared Frame schema. The
+      // client also runs other machine collectors (processes, ...) on their own
+      // intervals, so pin only the contract: session-wide indexes are contiguous and
+      // the system stream's sequences are contiguous from 1.
+      expect(frames.map((f) => f.index)).toEqual(range(1, frames.length));
+      expect(systemSequences(frames)).toEqual(range(1, systemSequences(frames).length));
+      expect(new Set(frames.map((f) => f.frame.stream))).toContain("system");
       expect(await readSummary(sessionId)).toMatchObject({ sessionId, status: "ended" });
       expect(await readdir(join(afkHome, "sessions", sessionId, "queue"))).toEqual([]);
     });
@@ -424,7 +415,9 @@ describe.skipIf(process.platform !== "darwin")(
         const response = await readFrames(sessionId);
         return finalRunFrame(response.frames) ? response : undefined;
       });
-      expect(session).toMatchObject({ sessionId, status: "active", streamCount: 2 });
+      // One run stream on top of however many machine streams the owner collects.
+      expect(session).toMatchObject({ sessionId, status: "active" });
+      expect(session.streamCount).toBe(new Set(frames.map((f) => f.frame.stream)).size);
       const final = finalRunFrame(frames)!;
       expect(final.frame.stream).toMatch(RUN_STREAM_PATTERN);
       // `pid` is deliberately not pinned: PROTOCOL.md says it is 0 once the process is
@@ -450,7 +443,8 @@ describe.skipIf(process.platform !== "darwin")(
 
       expect(exitCode).toBe(0);
       const { session, frames } = await readFrames(sessionId);
-      expect(session).toMatchObject({ sessionId, status: "ended", streamCount: 2 });
+      expect(session).toMatchObject({ sessionId, status: "ended" });
+      expect(session.streamCount).toBe(new Set(frames.map((f) => f.frame.stream)).size);
       expect(systemSequences(frames).length).toBeGreaterThanOrEqual(1);
       expect(finalRunFrame(frames)?.frame.data).toMatchObject({
         command: `sleep ${OWNED_RUN_SECONDS}`,

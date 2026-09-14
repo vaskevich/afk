@@ -85,7 +85,7 @@ and every child process is killed in `afterEach` so a failing test never leaves 
 running. The collectors are macOS-only, so the file is skipped elsewhere (including CI).
 
 ```bash
-pnpm test:contract   # just this file, about 20 s; also part of pnpm test on macOS
+pnpm test:contract   # just this file, about 20 s; not part of pnpm test
 ```
 
 ## What not to do

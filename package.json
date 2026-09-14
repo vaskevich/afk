@@ -13,7 +13,7 @@
     "format:check": "prettier --check .",
     "build": "pnpm -r build",
     "test": "vitest run",
-    "test:contract": "vitest run cli/contract.test.ts",
+    "test:contract": "vitest run --config vitest.contract.config.ts",
     "test:watch": "vitest"
   },
   "devDependencies": {
