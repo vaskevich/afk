@@ -7,6 +7,7 @@ import { handleSignals } from "./shutdown.ts";
 import { createStorage } from "./store/create-storage.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { MS_PER_DAY, startSweeper } from "./store/sweeper.ts";
+import { readWebBuildInfo } from "./utils/web-version.ts";
 
 const MS_PER_SECOND = 1000;
 
@@ -48,6 +49,8 @@ const appConfig: AppConfig = {
   limits: config.limits,
   sseKeepaliveMs: config.sseKeepaliveSeconds * MS_PER_SECOND,
   minimumVersions: config.minimumVersions,
+  build: config.build,
+  webBuild: await readWebBuildInfo(config.webDistDir),
 };
 const app = createApp(appConfig, store);
 

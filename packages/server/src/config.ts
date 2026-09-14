@@ -12,11 +12,17 @@
  * cannot drift apart. That table documents every variable; keep it in step with the
  * schema.
  */
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { MinimumVersions } from "./env.ts";
-import { MIN_CLIENT_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION } from "@afk/shared";
+import {
+  MIN_CLIENT_VERSION,
+  MIN_PROTOCOL_VERSION,
+  PROTOCOL_VERSION,
+  type ServerBuildInfo,
+} from "@afk/shared";
 import { parseSemver } from "./utils/semver.ts";
 import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS, type AdmissionLimits } from "./env.ts";
 import { DEFAULT_LOG_LEVEL, LOG_LEVELS, type LogLevel } from "./log/logger.ts";
@@ -38,6 +44,41 @@ export const DEFAULT_PATHS = {
   clientScriptPath: path.resolve(here, "../../../cli/afk"),
   dataDir: path.resolve(here, "../data"),
 };
+
+/** The server's own manifest, whose `version` is what /versionz and /api/stats report. */
+export const SERVER_PACKAGE_JSON = path.resolve(here, "../package.json");
+
+/** What `loadConfig` falls back to when the environment does not say: the paths, and the version. */
+export interface ConfigDefaults {
+  webDistDir: string;
+  clientScriptPath: string;
+  dataDir: string;
+  serverVersion: string;
+}
+
+/** The `version` field of a package.json. Throws `ConfigError` naming the file when it has none. */
+export function readPackageVersion(packageJsonPath: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new ConfigError([`${packageJsonPath}: cannot read package version: ${reason}`]);
+  }
+  const version =
+    typeof parsed === "object" && parsed !== null && "version" in parsed
+      ? parsed.version
+      : undefined;
+  if (typeof version !== "string" || version === "") {
+    throw new ConfigError([`${packageJsonPath}: package.json has no "version" string`]);
+  }
+  return version;
+}
+
+/** The defaults the running server uses: the repo layout and its own package version. */
+function productionDefaults(): ConfigDefaults {
+  return { ...DEFAULT_PATHS, serverVersion: readPackageVersion(SERVER_PACKAGE_JSON) };
+}
 
 /** Defaults for every numeric variable, in the units the variable itself uses. */
 export const CONFIG_DEFAULTS = {
@@ -92,6 +133,8 @@ export interface ServerConfig {
   minimumVersions: MinimumVersions;
   /** Threshold for `log/logger.ts`; lines below it are dropped. */
   logLevel: LogLevel;
+  /** What this server was built from: its package version plus `AFK_BUILD_SHA` / `AFK_BUILD_TIME`. */
+  build: ServerBuildInfo;
 }
 
 /** Thrown by `loadConfig` with one line per problem, each naming the variable. */
@@ -202,6 +245,12 @@ const EnvSchema = z
     AFK_MIN_PROTOCOL_VERSION: integer(MIN_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
 
     AFK_LOG_LEVEL: oneOf(LOG_LEVELS, DEFAULT_LOG_LEVEL),
+
+    // Build identity, stamped into the image by the Dockerfile (ARG GIT_SHA / BUILD_TIME
+    // from infra/deploy.sh). Free-form on purpose: a deploy compares the commit as a
+    // string, and a local run simply leaves both unset.
+    AFK_BUILD_SHA: optionalString,
+    AFK_BUILD_TIME: optionalString,
   })
   .superRefine((env, ctx) => {
     if (env.AFK_STORAGE !== "s3") {
@@ -237,11 +286,12 @@ function storageConfig(env: ParsedEnv, defaultDataDir: string): StorageConfig {
 
 /**
  * Parses and validates the `AFK_*` variables. Throws `ConfigError` naming every variable
- * that is wrong. `defaultPaths` exists so tests can pass a temp directory.
+ * that is wrong. `defaults` exists so tests can pass a temp directory and a fixed version
+ * instead of the repo layout and the real package.json.
  */
 export function loadConfig(
   env: NodeJS.ProcessEnv,
-  defaultPaths: typeof DEFAULT_PATHS = DEFAULT_PATHS,
+  defaults: ConfigDefaults = productionDefaults(),
 ): ServerConfig {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -254,9 +304,9 @@ export function loadConfig(
   return {
     port: value.AFK_PORT,
     publicBaseUrl: value.AFK_PUBLIC_BASE_URL ?? `http://localhost:${value.AFK_PORT}`,
-    webDistDir: value.AFK_WEB_DIST ?? defaultPaths.webDistDir,
-    clientScriptPath: value.AFK_CLIENT_SCRIPT ?? defaultPaths.clientScriptPath,
-    storage: storageConfig(value, defaultPaths.dataDir),
+    webDistDir: value.AFK_WEB_DIST ?? defaults.webDistDir,
+    clientScriptPath: value.AFK_CLIENT_SCRIPT ?? defaults.clientScriptPath,
+    storage: storageConfig(value, defaults.dataDir),
     limits: {
       maxActiveSessions: value.AFK_MAX_ACTIVE_SESSIONS,
       maxStreamsPerSession: value.AFK_MAX_STREAMS_PER_SESSION,
@@ -273,6 +323,11 @@ export function loadConfig(
       protocolVersion: value.AFK_MIN_PROTOCOL_VERSION,
     },
     logLevel: value.AFK_LOG_LEVEL,
+    build: {
+      version: defaults.serverVersion,
+      commit: value.AFK_BUILD_SHA ?? null,
+      builtAt: value.AFK_BUILD_TIME ?? null,
+    },
   };
 }
 
@@ -288,6 +343,8 @@ function describeStorage(storage: StorageConfig): string {
 /** One line for the startup log with every effective setting and no secrets. */
 export function describeConfig(config: ServerConfig): string {
   return [
+    `version ${config.build.version}`,
+    `commit ${config.build.commit ?? "unknown"}`,
     `port ${config.port}`,
     `public base ${config.publicBaseUrl}`,
     `web dist ${config.webDistDir}`,

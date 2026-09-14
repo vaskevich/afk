@@ -275,9 +275,44 @@ export const ServiceStats = z.object({
   sessionsInMemory: z.number().int().nonnegative(),
   framesInMemory: z.number().int().nonnegative(),
   uptimeSeconds: z.number().int().nonnegative(),
+  /** packages/server's package.json version. */
   serverVersion: z.string(),
+  /** Short git commit the served dashboard was built from; null when no dashboard build is present. */
+  webCommit: z.string().nullable(),
 });
 export type ServiceStats = z.infer<typeof ServiceStats>;
+
+/** What the running server was built from; the `server` half of GET /versionz. */
+export const ServerBuildInfo = z.object({
+  /** packages/server's package.json version. */
+  version: z.string(),
+  /** Short git commit the image was built from (`AFK_BUILD_SHA`), or null when not set. */
+  commit: z.string().nullable(),
+  /** When the image was built (`AFK_BUILD_TIME`, ISO 8601), or null when not set. */
+  builtAt: z.string().nullable(),
+});
+export type ServerBuildInfo = z.infer<typeof ServerBuildInfo>;
+
+/** What the served dashboard was built from: `packages/web/dist/version.json`, written by Vite. */
+export const WebBuildInfo = z.object({
+  /** packages/web's package.json version. */
+  version: z.string(),
+  /** Short git commit of the checkout the dashboard was built in, or "unknown" outside one. */
+  commit: z.string(),
+});
+export type WebBuildInfo = z.infer<typeof WebBuildInfo>;
+
+/**
+ * GET /versionz and GET /api/version: what is running, for a deploy to verify the
+ * rollout and for a bug report to say which build it is about. Unauthenticated, cheap.
+ */
+export const VersionResponse = z.object({
+  server: ServerBuildInfo,
+  /** null when the server has no dashboard build to serve. */
+  web: WebBuildInfo.nullable(),
+  protocolVersion: z.number().int().positive(),
+});
+export type VersionResponse = z.infer<typeof VersionResponse>;
 
 export const ErrorResponse = z.object({
   error: z.string(),

@@ -1,4 +1,5 @@
 import { MIN_CLIENT_VERSION, MIN_PROTOCOL_VERSION } from "@afk/shared";
+import type { ServerBuildInfo, WebBuildInfo } from "@afk/shared";
 import type { Session, SessionStore } from "./store/sessions.ts";
 
 /**
@@ -16,6 +17,10 @@ export interface AppConfig {
   /** How often an SSE stream sends a comment so proxies and browsers keep it open. */
   sseKeepaliveMs: number;
   minimumVersions: MinimumVersions;
+  /** What this server was built from, reported by /versionz and /api/stats. */
+  build: ServerBuildInfo;
+  /** What the served dashboard was built from (`dist/version.json`), or null without a build. */
+  webBuild: WebBuildInfo | null;
 }
 
 export const DEFAULT_SSE_KEEPALIVE_MS = 15_000;

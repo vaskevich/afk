@@ -1,16 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_MAX_SESSION_DURATION_SECONDS,
   MIN_CLIENT_VERSION,
   MIN_PROTOCOL_VERSION,
 } from "@afk/shared";
-import { ConfigError, describeConfig, loadConfig, type ServerConfig } from "./config.ts";
+import {
+  ConfigError,
+  SERVER_PACKAGE_JSON,
+  describeConfig,
+  loadConfig,
+  readPackageVersion,
+  type ConfigDefaults,
+  type ServerConfig,
+} from "./config.ts";
 
 /** Fixed fallbacks so the expected values do not depend on where the tests run. */
-const PATHS = {
+const PATHS: ConfigDefaults = {
   webDistDir: "/opt/afk/web/dist",
   clientScriptPath: "/opt/afk/cli/afk",
   dataDir: "/var/lib/afk",
+  serverVersion: "0.0.0-test",
 };
 
 const S3_ENV = {
@@ -43,6 +55,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   sseKeepaliveSeconds: 15,
   minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
   logLevel: "info",
+  build: { version: "0.0.0-test", commit: null, builtAt: null },
 };
 
 describe("loadConfig", () => {
@@ -80,6 +93,8 @@ describe("loadConfig", () => {
         AFK_EVICT_ENDED_AFTER_SECONDS: "0",
         AFK_SSE_KEEPALIVE_SECONDS: "30",
         AFK_LOG_LEVEL: "debug",
+        AFK_BUILD_SHA: "abc1234",
+        AFK_BUILD_TIME: "2026-09-15T10:00:00Z",
       },
       PATHS,
     );
@@ -99,7 +114,14 @@ describe("loadConfig", () => {
       sseKeepaliveSeconds: 30,
       minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
       logLevel: "debug",
+      build: { version: "0.0.0-test", commit: "abc1234", builtAt: "2026-09-15T10:00:00Z" },
     });
+  });
+
+  it("treats an empty AFK_BUILD_SHA, as an image built without the arg has, as unset", () => {
+    const config = loadConfig({ AFK_BUILD_SHA: "", AFK_BUILD_TIME: "" }, PATHS);
+
+    expect(config.build).toEqual({ version: "0.0.0-test", commit: null, builtAt: null });
   });
 
   it("rejects an unknown log level, listing the valid ones", () => {
@@ -171,11 +193,52 @@ describe("loadConfig", () => {
   });
 });
 
+describe("readPackageVersion", () => {
+  const tempDirs: string[] = [];
+
+  async function packageJsonWith(contents: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "afk-config-test-"));
+    tempDirs.push(dir);
+    const file = join(dir, "package.json");
+    await writeFile(file, contents);
+    return file;
+  }
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it("reads the version field", async () => {
+    const file = await packageJsonWith(JSON.stringify({ name: "x", version: "1.2.3" }));
+
+    expect(readPackageVersion(file)).toBe("1.2.3");
+  });
+
+  it("reads the server's own package.json as a semver", () => {
+    expect(readPackageVersion(SERVER_PACKAGE_JSON)).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it("throws a ConfigError naming the file when the version is missing", async () => {
+    const file = await packageJsonWith(JSON.stringify({ name: "x" }));
+
+    expect(() => readPackageVersion(file)).toThrow(ConfigError);
+    expect(() => readPackageVersion(file)).toThrow(file);
+  });
+
+  it("throws a ConfigError naming the file when it cannot be read", () => {
+    expect(() => readPackageVersion("/nonexistent/afk/package.json")).toThrow(
+      /\/nonexistent\/afk\/package.json: cannot read package version/,
+    );
+  });
+});
+
 describe("describeConfig", () => {
   it("summarizes disk storage with its data dir on one line", () => {
     const line = describeConfig(loadConfig({}, PATHS));
 
     expect(line).not.toContain("\n");
+    expect(line).toContain("version 0.0.0-test");
+    expect(line).toContain("commit unknown");
     expect(line).toContain("storage disk (/var/lib/afk)");
     expect(line).toContain("limits 20 sessions x 10 streams");
     expect(line).toContain("retention 7d (sweep every 3600s)");

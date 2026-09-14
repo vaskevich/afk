@@ -20,6 +20,12 @@ RUN corepack enable && \
 # makes it into the final image; this whole stage is discarded afterwards.
 # -----------------------------------------------------------------------------
 FROM base AS build
+# The commit this image is built from, passed by infra/deploy.sh. .git is not in the
+# build context, so Vite cannot ask git itself; it reads AFK_BUILD_SHA instead and
+# writes it into packages/web/dist/version.json. Empty when not passed, which the
+# server and Vite both treat as unset.
+ARG GIT_SHA=""
+ENV AFK_BUILD_SHA=${GIT_SHA}
 COPY . .
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
@@ -54,6 +60,11 @@ RUN pnpm install --frozen-lockfile --prod --filter "@afk/server..."
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Build identity, reported by GET /versionz and compared by infra/deploy.sh after a
+# rollout. Both come from --build-arg (see deploy.sh); empty means unset.
+ARG GIT_SHA=""
+ARG BUILD_TIME=""
+ENV AFK_BUILD_SHA=${GIT_SHA} AFK_BUILD_TIME=${BUILD_TIME}
 
 COPY --from=base /app/package.json ./package.json
 COPY pnpm-workspace.yaml ./pnpm-workspace.yaml

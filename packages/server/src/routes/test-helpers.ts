@@ -4,7 +4,7 @@
  * session-creation and frame-posting boilerplate.
  */
 import { makeHost } from "@afk/shared/testing";
-import type { Frame, HostInfo } from "@afk/shared";
+import type { Frame, HostInfo, ServerBuildInfo } from "@afk/shared";
 import type { createApp } from "../app.ts";
 import type { AppConfig } from "../env.ts";
 import { DEFAULT_LIMITS, DEFAULT_MINIMUM_VERSIONS, DEFAULT_SSE_KEEPALIVE_MS } from "../env.ts";
@@ -19,6 +19,13 @@ export const NO_CLIENT_SCRIPT = "/nonexistent/afk-test-cli/afk";
 /** What every request from a real client carries; the server answers 426 without it. */
 export const CLIENT_VERSION_HEADER = { "x-afk-client": "bash/0.1.0" };
 
+/** A fixed server build identity, so version assertions never depend on the real package.json. */
+export const TEST_BUILD: ServerBuildInfo = {
+  version: "0.0.0-test",
+  commit: "abc1234",
+  builtAt: "2026-09-15T00:00:00.000Z",
+};
+
 /** An AppConfig with boring defaults; override only what the test is about. */
 export function makeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -28,6 +35,8 @@ export function makeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     limits: DEFAULT_LIMITS,
     minimumVersions: DEFAULT_MINIMUM_VERSIONS,
     sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
+    build: TEST_BUILD,
+    webBuild: null,
     ...overrides,
   };
 }

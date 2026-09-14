@@ -30,8 +30,17 @@ CONTAINER_PORT=4141
 # argument so a pushed image can be traced back to the commit that built it.
 IMAGE_TAG="${1:-${IMAGE_TAG:-afk:latest}}"
 
-echo "==> Building ${IMAGE_TAG} from ${REPO_ROOT}"
-docker build -t "${IMAGE_TAG}" "${REPO_ROOT}"
+# The commit and time this image is built from, baked in as AFK_BUILD_SHA and
+# AFK_BUILD_TIME (see the Dockerfile) and reported by GET /versionz. The rollout
+# check at the end of this script compares the live server's commit with GIT_SHA.
+GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+echo "==> Building ${IMAGE_TAG} from ${REPO_ROOT} (commit ${GIT_SHA})"
+docker build \
+  --build-arg "GIT_SHA=${GIT_SHA}" \
+  --build-arg "BUILD_TIME=${BUILD_TIME}" \
+  -t "${IMAGE_TAG}" "${REPO_ROOT}"
 
 echo "==> Pushing ${IMAGE_TAG} to the Lightsail registry for ${SERVICE_NAME}"
 # Captures the registered image name (e.g. ":afk.server.3") from the CLI's own

@@ -85,6 +85,19 @@ see the "Hardening" section of [ARCHITECTURE.md](ARCHITECTURE.md) for what that 
 | --------------- | ------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AFK_LOG_LEVEL` | `info`  | Lowest level written: `debug`, `info`, `warn`, or `error`. | `info` is one line per accepted batch, session lifecycle step, anomaly event, and sweeper run. `debug` adds one line per accepted frame, including the `afk run` command line, which is otherwise never logged; expect tens of thousands of lines an hour at the session cap. |
 
+## Build identity
+
+Reported by `GET /versionz` and `GET /api/version` (see [PROTOCOL.md](PROTOCOL.md)) and,
+as `serverVersion`, by `GET /api/stats`. The server's own version is not a variable: it
+is `packages/server/package.json`'s `version`, read once at startup. The dashboard's
+version and commit come from `packages/web/dist/version.json`, which Vite writes at
+build time (`packages/web/vite.config.ts`).
+
+| Variable         | Default | Meaning                                             | Notes                                                                                                                                                                                                     |
+| ---------------- | ------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AFK_BUILD_SHA`  | unset   | Short git commit the running image was built from.  | The Dockerfile sets it from `--build-arg GIT_SHA`, which `infra/deploy.sh` passes; Vite reads the same variable during the image build for the dashboard's commit. Reported as `commit`, null when unset. |
+| `AFK_BUILD_TIME` | unset   | When the image was built, as an ISO 8601 timestamp. | From `--build-arg BUILD_TIME`, also set by `infra/deploy.sh`. Free-form; reported as `builtAt`, null when unset.                                                                                          |
+
 ## Client
 
 The bash client reads `AFK_SERVER` (the server origin) and `AFK_HOME` (its spool
@@ -99,5 +112,6 @@ The installer itself reads `AFK_INSTALL_DIR` (where to put `afk`, default `~/.lo
 
 `infra/deploy.sh` sets `AFK_PORT`, `AFK_PUBLIC_BASE_URL`, `AFK_STORAGE=s3`, and the four
 `AFK_S3_*` variables in the container deployment spec (see [infra/README.md](../infra/README.md));
-everything else runs on its default. Add a variable there only when production needs a
-non-default value.
+everything else runs on its default. `AFK_BUILD_SHA` and `AFK_BUILD_TIME` are baked into
+the image by `docker build --build-arg` rather than set in the spec. Add a variable to
+the spec only when production needs a non-default value.
