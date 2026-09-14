@@ -74,11 +74,12 @@ through a `gone` marker from the sender. The server, for its part, ends a sessio
 has sent nothing for `AFK_END_AFTER_SILENT_SECONDS` (10 minutes) in the same tick that
 runs `client.stale`, at the moment the silence began plus that.
 
-The dashboard URL is printed with a QR code under it when stdout is a terminal, so a
-phone can scan it off the screen. The code comes from the server
-(`GET /api/sessions/:id/qr`, see [PROTOCOL.md](PROTOCOL.md)): bash has no QR library,
-and fetching a text block keeps the client dependency-free. A failed fetch prints
-nothing; `afk qr` reprints it; `--no-qr` or `AFK_NO_QR=1` turns it off.
+The dashboard URL is printed once: under a QR code when stdout is a terminal, so a
+phone can scan it off the screen, and on a line of its own otherwise. The code comes
+from the server (`GET /api/sessions/:id/qr`, see [PROTOCOL.md](PROTOCOL.md)), whose
+text block ends with the URL: bash has no QR library, and fetching a text block keeps
+the client dependency-free. A failed fetch falls back to the URL line; `afk qr`
+reprints the code; `--no-qr` or `AFK_NO_QR=1` turns it off.
 
 #### `afk run`
 

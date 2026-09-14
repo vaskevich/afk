@@ -2239,31 +2239,34 @@ describe("afk with no state", () => {
   });
 });
 
-describe("print_qr", () => {
+describe("print_dashboard_url", () => {
   /** The session as its owner set it up; SESSION_DIR is where the token file for curl goes. */
   const sessionEnv = (afkHome: string) => ({
     SESSION_ID: "sess123",
     INGEST_TOKEN: "tok-abc",
     AFK_VERSION: "0.2.0",
+    DASHBOARD_URL: "http://example.test/s/sess123",
     SESSION_DIR: join(afkHome, "sessions", "sess123"),
   });
   /** What the server's text render looks like: half-block lines, then the URL. */
   const QR_TEXT = "█████████\n█▀▀▀▀▀▀▀█\n█ ▄▀▄ ▄ █\n█████████\nhttp://example.test/s/sess123\n";
+  /** The URL on a line of its own, for when the QR is not shown. */
+  const URL_LINE = "\n  http://example.test/s/sess123\n\n";
   /** The test process has no tty, so a snippet that wants the terminal path says so. */
   const ON_A_TERMINAL = "stdout_is_terminal() { return 0; }";
 
-  it("prints the QR the server returns, fetched with the bearer token and the client header", async () => {
+  it("prints the QR the server returns with the URL under it, fetched with the bearer token and the client header", async () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
-    const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+    const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_dashboard_url`, {
       ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
 
     expect(code, stderr).toBe(0);
-    expect(stdout).toBe(QR_TEXT);
+    expect(stdout).toBe(`\n${QR_TEXT}\n`);
     expect(server.requests).toHaveLength(1);
     expect(server.requests[0]).toMatchObject({
       method: "GET",
@@ -2281,7 +2284,7 @@ describe("print_qr", () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
-    const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+    const { stdout, stderr, code } = await runBash(`${ON_A_TERMINAL}\nprint_dashboard_url`, {
       ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
@@ -2291,33 +2294,33 @@ describe("print_qr", () => {
 
     expect(code, stderr).toBe(0);
     expect(stderr).not.toContain("illegal byte sequence");
-    expect(stdout).toBe(QR_TEXT);
+    expect(stdout).toBe(`\n${QR_TEXT}\n`);
   });
 
   // Regression: an older server answered the QR path with the dashboard's index.html and
   // a 200 from its single-page fallback, and the client printed the whole page.
-  it("prints nothing when a 200 response is not a QR code", async () => {
+  it("prints the URL alone when a 200 response is not a QR code", async () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({
       status: 200,
       body: "<!doctype html>\n<html><body>afk dashboard</body></html>\n",
     }));
 
-    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_dashboard_url`, {
       ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
 
     expect(code).toBe(0);
-    expect(stdout).toBe("");
+    expect(stdout).toBe(URL_LINE);
   });
 
-  it("prints nothing and asks the server for nothing with AFK_NO_QR=1", async () => {
+  it("prints the URL alone and asks the server for nothing with AFK_NO_QR=1", async () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
-    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_dashboard_url`, {
       ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
@@ -2325,44 +2328,43 @@ describe("print_qr", () => {
     });
 
     expect(code).toBe(0);
-    expect(stdout).toBe("");
+    expect(stdout).toBe(URL_LINE);
     expect(server.requests).toHaveLength(0);
   });
 
-  it("prints nothing when stdout is not a terminal", async () => {
+  it("prints the URL alone when stdout is not a terminal", async () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({ status: 200, body: QR_TEXT }));
 
-    const { stdout, code } = await runBash("print_qr", {
+    const { stdout, code } = await runBash("print_dashboard_url", {
       ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
 
     expect(code).toBe(0);
-    expect(stdout).toBe("");
+    expect(stdout).toBe(URL_LINE);
     expect(server.requests).toHaveLength(0);
   });
 
-  it("prints nothing and still succeeds when the server answers with an error", async () => {
+  it("prints the URL alone and still succeeds when the server answers with an error", async () => {
     const afkHome = await makeTempDir();
     const server = await startServer(() => ({ status: 500, body: '{"error":"boom"}' }));
 
-    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_dashboard_url`, {
       ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       AFK_SERVER: server.url,
     });
 
     expect(code).toBe(0);
-    expect(stdout).toBe("");
-    expect(stdout).not.toMatch(/[█▀▄]/);
+    expect(stdout).toBe(URL_LINE);
   });
 
-  it("prints nothing and still succeeds when the server cannot be reached", async () => {
+  it("prints the URL alone and still succeeds when the server cannot be reached", async () => {
     const afkHome = await makeTempDir();
 
-    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_qr`, {
+    const { stdout, code } = await runBash(`${ON_A_TERMINAL}\nprint_dashboard_url`, {
       ...sessionEnv(afkHome),
       AFK_HOME: afkHome,
       // Port 1 needs root to bind and nothing listens there: the connection is refused.
@@ -2370,8 +2372,93 @@ describe("print_qr", () => {
     });
 
     expect(code).toBe(0);
-    expect(stdout).toBe("");
+    expect(stdout).toBe(URL_LINE);
   });
+});
+
+// Regression: `afk start` once printed the URL on its own line and then again under the
+// QR code. These run the whole command, so they need the macOS collectors.
+describe("afk start printing the dashboard URL", () => {
+  const URL = "http://example.test/s/newSession";
+  const created = `{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"${URL}","maxDurationSeconds":3600}`;
+  const QR_TEXT = `█████████\n█▀▀▀▀▀▀▀█\n█ ▄▀▄ ▄ █\n█████████\n${URL}\n`;
+  const ON_A_TERMINAL = "stdout_is_terminal() { return 0; }";
+
+  /**
+   * A server that creates the session, answers the QR path with `qr`, and accepts the
+   * rest. The first frame batch leaves a marker file in `afkHome`: the sampler that
+   * produces it only starts once `afk start` has printed the URL and installed its
+   * signal handler, so that is when the test can end the session cleanly.
+   */
+  function startQrServer(afkHome: string, qr: TestResponse): Promise<TestServer> {
+    return startServer(async (req) => {
+      if (req.url === "/api/sessions") {
+        return { status: 201, body: created };
+      }
+      if (req.url === "/api/sessions/newSession/qr") {
+        return qr;
+      }
+      if (req.url === "/api/sessions/newSession/frames") {
+        await writeFile(join(afkHome, "frames-seen"), "");
+      }
+      return { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' };
+    });
+  }
+
+  /** Runs `afk start ${args}` until it is sending frames, ends it with SIGTERM, and returns its stdout. */
+  async function stdoutOfStart(afkHome: string, serverUrl: string, args = ""): Promise<string> {
+    const { stdout, stderr } = await runBash(
+      [
+        ON_A_TERMINAL,
+        `main start ${args} > "$AFK_HOME/out.txt" 2> "$AFK_HOME/err.txt" & START=$!`,
+        'for _ in $(seq 1 100); do [ -e "$AFK_HOME/frames-seen" ] && break; sleep 0.1; done',
+        'kill -TERM "$START"; wait "$START"; printf "START_RC=%d\\n" "$?"',
+      ].join("\n"),
+      { AFK_HOME: afkHome, AFK_SERVER: serverUrl },
+      15_000,
+    );
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ START_RC: "0" });
+    return readFile(join(afkHome, "out.txt"), "utf8");
+  }
+
+  const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+
+  it.skipIf(process.platform !== "darwin")(
+    "prints the URL once, under the QR code, when the server renders one",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startQrServer(afkHome, { status: 200, body: QR_TEXT });
+
+      const out = await stdoutOfStart(afkHome, server.url);
+
+      expect(occurrences(out, URL)).toBe(1);
+      expect(out).toBe(`\n${QR_TEXT}\n`);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")("prints the URL once with --no-qr", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startQrServer(afkHome, { status: 200, body: QR_TEXT });
+
+    const out = await stdoutOfStart(afkHome, server.url, "--no-qr");
+
+    expect(occurrences(out, URL)).toBe(1);
+    expect(out).toBe(`\n  ${URL}\n\n`);
+    expect(server.requests.map((req) => req.url)).not.toContain("/api/sessions/newSession/qr");
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "prints the URL once when the QR cannot be fetched",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startQrServer(afkHome, { status: 500, body: '{"error":"boom"}' });
+
+      const out = await stdoutOfStart(afkHome, server.url);
+
+      expect(occurrences(out, URL)).toBe(1);
+      expect(out).toBe(`\n  ${URL}\n\n`);
+    },
+  );
 });
 
 describe("cmd_qr", () => {
