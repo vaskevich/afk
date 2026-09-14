@@ -1048,11 +1048,15 @@ record_dropped() { # session-dir frames bytes
   bytes=$(dropped_bytes "$1")
   printf '%d %d\n' $((frames + $2)) $((bytes + $3)) > "$1/$DROPPED_RECORD_NAME"
 }
+# Both read 0 until the first enforcement writes the record (awk is given the file
+# itself, and would not reach END on a missing one).
 dropped_frames() { # session-dir
-  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ f += $1 } END { print f + 0 }'
+  [ -e "$1/$DROPPED_RECORD_NAME" ] || { echo 0; return 0; }
+  awk '{ f += $1 } END { print f + 0 }' "$1/$DROPPED_RECORD_NAME"
 }
 dropped_bytes() { # session-dir
-  cat "$1/$DROPPED_RECORD_NAME" 2>/dev/null | awk '{ b += $2 } END { print b + 0 }'
+  [ -e "$1/$DROPPED_RECORD_NAME" ] || { echo 0; return 0; }
+  awk '{ b += $2 } END { print b + 0 }' "$1/$DROPPED_RECORD_NAME"
 }
 
 # The session being over on the server (410) ends the sender, and with it the sampler,
