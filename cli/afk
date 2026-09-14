@@ -42,6 +42,9 @@ AFK_HOME="${AFK_HOME:-$HOME/.afk}"
 # The sampler ticks once per SAMPLE_INTERVAL_SECONDS; each collector runs on every tick
 # or, for the slower ones, every N seconds (must be a multiple of the tick).
 SAMPLE_INTERVAL_SECONDS=1
+# A sampler further behind schedule than this (the machine slept) skips ahead instead
+# of catching up tick by tick; see system_sampler_loop.
+SAMPLE_MAX_CATCHUP_SECONDS=2
 PROCESSES_INTERVAL_SECONDS=5
 # How many of the busiest processes a processes frame carries (PROCESSES_TOP_MAX in shared).
 PROCESSES_TOP_MAX=10
@@ -453,8 +456,9 @@ flush_queue() {
 # sender, or by hitting the cap). Runs in the foreground for `afk start` and in the
 # background for an `afk run` that had to start its own session.
 system_sampler_loop() {
-  local started
+  local started now deadline
   started=$(now_seconds)
+  deadline=$started
   while [ ! -e "$SESSION_DIR/stop" ]; do
     if [ $(( $(now_seconds) - started )) -ge "$MAX_DURATION_SECONDS" ]; then
       log "reached the maximum session length"
@@ -463,8 +467,21 @@ system_sampler_loop() {
       break
     fi
     sample_once
-    sleep "$SAMPLE_INTERVAL_SECONDS"
-    # TODO(sampling): subtract collector runtime so ticks stay closer to exactly 1 Hz.
+    # Ticks are scheduled against a deadline that advances by the interval, rather
+    # than sleeping a fixed interval after the collectors, so their runtime does not
+    # push every tick later than the last. Stock macOS has no sub-second clock (no
+    # `date +%N`), so a tick that finishes early sleeps to the next whole second
+    # and one that finishes late is followed by the next tick straight away: single
+    # gaps vary by the collectors' runtime, but the average rate stays at 1 Hz. A
+    # deadline more than SAMPLE_MAX_CATCHUP_SECONDS behind (the machine slept) is
+    # re-based on the current time instead of being caught up in a burst.
+    deadline=$((deadline + SAMPLE_INTERVAL_SECONDS))
+    now=$(now_seconds)
+    if [ "$now" -lt "$deadline" ]; then
+      sleep $((deadline - now))
+    elif [ $((now - deadline)) -gt "$SAMPLE_MAX_CATCHUP_SECONDS" ]; then
+      deadline=$now
+    fi
   done
 }
 

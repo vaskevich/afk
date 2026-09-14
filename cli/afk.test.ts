@@ -528,6 +528,80 @@ describe("enforce_spool_cap", () => {
   });
 });
 
+describe("system_sampler_loop", () => {
+  /**
+   * Runs the loop against a fake clock: `sleep` advances it and prints what it was
+   * asked for, and each fake tick costs `tickCost` seconds (with an optional jump on
+   * one tick, standing in for the machine sleeping). Stops after `ticks` ticks.
+   */
+  async function runLoop(options: {
+    tickCost: number;
+    ticks: number;
+    jumpOnTick?: number;
+    jumpSeconds?: number;
+  }): Promise<{ lines: string[]; stderr: string; code: number }> {
+    const sessionDir = await makeTempDir();
+    const { stdout, stderr, code } = await runBash(
+      [
+        "FAKE_NOW=1000; TICKS=0",
+        "now_seconds() { printf '%s' \"$FAKE_NOW\"; }",
+        "sleep() { printf 'sleep=%s\\n' \"$1\"; FAKE_NOW=$((FAKE_NOW + $1)); }",
+        "sample_once() {",
+        "  TICKS=$((TICKS + 1)); printf 'tick=%s\\n' \"$FAKE_NOW\"",
+        "  FAKE_NOW=$((FAKE_NOW + TICK_COST))",
+        '  [ "$TICKS" = "$JUMP_ON_TICK" ] && FAKE_NOW=$((FAKE_NOW + JUMP_SECONDS))',
+        '  [ "$TICKS" -ge "$MAX_TICKS" ] && touch "$SESSION_DIR/stop"',
+        "  return 0",
+        "}",
+        "system_sampler_loop",
+      ].join("\n"),
+      {
+        SESSION_DIR: sessionDir,
+        MAX_DURATION_SECONDS: "100000",
+        TICK_COST: String(options.tickCost),
+        MAX_TICKS: String(options.ticks),
+        JUMP_ON_TICK: String(options.jumpOnTick ?? 0),
+        JUMP_SECONDS: String(options.jumpSeconds ?? 0),
+      },
+    );
+    return { lines: stdout.split("\n").filter((line) => line !== ""), stderr, code };
+  }
+
+  it("sleeps to the next whole second when the collectors finish early", async () => {
+    const { lines, stderr, code } = await runLoop({ tickCost: 0, ticks: 3 });
+
+    expect(code, stderr).toBe(0);
+    expect(lines).toEqual(["tick=1000", "sleep=1", "tick=1001", "sleep=1", "tick=1002", "sleep=1"]);
+  });
+
+  it("does not sleep after a tick that took a whole second, so the rate stays 1 Hz", async () => {
+    const { lines, stderr, code } = await runLoop({ tickCost: 1, ticks: 3 });
+
+    expect(code, stderr).toBe(0);
+    expect(lines).toEqual(["tick=1000", "tick=1001", "tick=1002"]);
+  });
+
+  it("skips ahead instead of catching up tick by tick after the clock jumps", async () => {
+    const { lines, stderr, code } = await runLoop({
+      tickCost: 0,
+      ticks: 4,
+      jumpOnTick: 2,
+      jumpSeconds: 3600,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(lines).toEqual([
+      "tick=1000",
+      "sleep=1",
+      "tick=1001",
+      "tick=4601",
+      "sleep=1",
+      "tick=4602",
+      "sleep=1",
+    ]);
+  });
+});
+
 describe("create_session", () => {
   const hostEnv = {
     HOST_NAME: "test-host",
