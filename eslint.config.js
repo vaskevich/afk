@@ -2,6 +2,7 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier";
+import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 
 export default tseslint.config(
@@ -19,6 +20,22 @@ export default tseslint.config(
         tsconfigRootDir: import.meta.dirname,
       },
       globals: globals.node,
+    },
+  },
+  {
+    // Dashboard: browser globals and the React hooks rules on top of the TS rules.
+    files: ["packages/web/src/**/*.{ts,tsx}"],
+    extends: [
+      js.configs.recommended,
+      ...tseslint.configs.recommended,
+      reactHooks.configs.flat.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+      globals: globals.browser,
     },
   },
   {
