@@ -11,6 +11,7 @@ import {
   readFile,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,6 +22,9 @@ import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  AGENT_ACTIVE_SECONDS,
+  AGENT_SUBAGENT_ACTIVE_SECONDS,
+  AgentsCollectorData,
   Frame,
   PROCESSES_TOP_MAX,
   ProcessesCollectorData,
@@ -430,8 +434,278 @@ describe("collect_processes", () => {
   );
 });
 
+/**
+ * One Claude Code session as its state directory shows it. Ages are seconds before
+ * now; a transcript age of `undefined` means no transcript file at all.
+ */
+interface FakeClaudeSession {
+  pid: number;
+  status: string;
+  transcriptAgeSeconds?: number;
+  subagentAgesSeconds?: number[];
+}
+
+/** What a session file carries that must never leave the machine. */
+const SESSION_NAME = "secret-project-aa";
+const SESSION_CWD = "/Users/someone/src/secret.project_dir";
+/** The transcript directory Claude Code derives from that cwd: every non-alphanumeric as `-`. */
+const SESSION_SLUG = SESSION_CWD.replace(/[^A-Za-z0-9]/g, "-");
+
+/**
+ * A fake home directory with `.claude/sessions/<pid>.json` for each session, a `.key`
+ * file next to each (the collector must never open one), and transcripts under
+ * `.claude/projects/<slug>/` with their mtimes set to the requested ages.
+ */
+async function makeClaudeHome(sessions: readonly FakeClaudeSession[]): Promise<string> {
+  const home = await makeTempDir();
+  const claude = join(home, ".claude");
+  await mkdir(join(claude, "sessions"), { recursive: true });
+  const now = Date.now() / 1000;
+  for (const [i, session] of sessions.entries()) {
+    const sessionId = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    const record = {
+      pid: session.pid,
+      sessionId,
+      cwd: SESSION_CWD,
+      kind: "interactive",
+      entrypoint: "cli",
+      name: SESSION_NAME,
+      status: session.status,
+      updatedAt: Math.round(now * 1000),
+    };
+    await writeFile(join(claude, "sessions", `${session.pid}.json`), `${JSON.stringify(record)}\n`);
+    await writeFile(join(claude, "sessions", `${session.pid}.0123abcd.key`), "not for afk\n");
+    const project = join(claude, "projects", SESSION_SLUG);
+    await mkdir(join(project, sessionId, "subagents"), { recursive: true });
+    if (session.transcriptAgeSeconds !== undefined) {
+      const transcript = join(project, `${sessionId}.jsonl`);
+      await writeFile(transcript, '{"type":"user"}\n');
+      await utimes(transcript, now, now - session.transcriptAgeSeconds);
+    }
+    for (const [j, age] of (session.subagentAgesSeconds ?? []).entries()) {
+      const subagent = join(project, sessionId, "subagents", `agent-a${j}.jsonl`);
+      await writeFile(subagent, '{"type":"assistant"}\n');
+      await utimes(subagent, now, now - age);
+      // The metadata file next to a transcript is not a transcript.
+      await writeFile(join(project, sessionId, "subagents", `agent-a${j}.meta.json`), "{}\n");
+    }
+  }
+  return home;
+}
+
+/** The pid of a process that has already exited, as a crashed session's file would name. */
+async function deadPid(): Promise<number> {
+  const child = spawn("true", [], { stdio: "ignore" });
+  await new Promise<void>((resolve) => {
+    child.on("exit", () => {
+      resolve();
+    });
+  });
+  return child.pid!;
+}
+
+async function collectAgents(home: string): Promise<AgentsCollectorData> {
+  const { stdout, stderr, code } = await runBash("collect_agents", { HOME: home });
+  expect(code, stderr).toBe(0);
+  const result = AgentsCollectorData.strict().safeParse(JSON.parse(stdout));
+  expect(result.success, JSON.stringify(result.success ? null : result.error.issues)).toBe(true);
+  return result.data!;
+}
+
+describe("collect_agents", () => {
+  const LIVE_PID = process.pid;
+
+  it("counts a busy session with a fresh transcript as working", async () => {
+    const home = await makeClaudeHome([{ pid: LIVE_PID, status: "busy", transcriptAgeSeconds: 3 }]);
+
+    const data = await collectAgents(home);
+
+    expect(data).toEqual({
+      available: true,
+      claude: { sessions: 1, working: 1, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
+    });
+  });
+
+  it("counts a busy session whose transcript is older than AGENT_ACTIVE_SECONDS as waiting on input", async () => {
+    const home = await makeClaudeHome([
+      { pid: LIVE_PID, status: "busy", transcriptAgeSeconds: AGENT_ACTIVE_SECONDS + 5 },
+    ]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toEqual({
+      sessions: 1,
+      working: 0,
+      idle: 0,
+      waitingOnInput: 1,
+      subagentsWorking: 0,
+    });
+  });
+
+  it("still counts a busy session as working when its transcript is exactly AGENT_ACTIVE_SECONDS old", async () => {
+    const home = await makeClaudeHome([
+      { pid: LIVE_PID, status: "busy", transcriptAgeSeconds: AGENT_ACTIVE_SECONDS - 2 },
+    ]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toMatchObject({ working: 1, waitingOnInput: 0 });
+  });
+
+  it("counts an idle session as idle however fresh its transcript is", async () => {
+    const home = await makeClaudeHome([{ pid: LIVE_PID, status: "idle", transcriptAgeSeconds: 1 }]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toEqual({
+      sessions: 1,
+      working: 0,
+      idle: 1,
+      waitingOnInput: 0,
+      subagentsWorking: 0,
+    });
+  });
+
+  it("counts a busy session with a quiet transcript as working while one of its subagents is writing", async () => {
+    const home = await makeClaudeHome([
+      { pid: LIVE_PID, status: "busy", transcriptAgeSeconds: 600, subagentAgesSeconds: [10] },
+    ]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toEqual({
+      sessions: 1,
+      working: 1,
+      idle: 0,
+      waitingOnInput: 0,
+      subagentsWorking: 1,
+    });
+  });
+
+  it("counts the subagent transcripts modified within AGENT_SUBAGENT_ACTIVE_SECONDS and not the older ones", async () => {
+    const home = await makeClaudeHome([
+      {
+        pid: LIVE_PID,
+        status: "busy",
+        transcriptAgeSeconds: 5,
+        subagentAgesSeconds: [
+          2,
+          AGENT_SUBAGENT_ACTIVE_SECONDS - 2,
+          AGENT_SUBAGENT_ACTIVE_SECONDS + 5,
+          900,
+        ],
+      },
+    ]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toMatchObject({ sessions: 1, working: 1, subagentsWorking: 2 });
+  });
+
+  it("treats a busy session whose transcript cannot be found as working, not waiting", async () => {
+    const home = await makeClaudeHome([{ pid: LIVE_PID, status: "busy" }]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toMatchObject({ sessions: 1, working: 1, waitingOnInput: 0 });
+  });
+
+  it("goes by transcript age alone for a status outside busy and idle", async () => {
+    const home = await makeClaudeHome([
+      { pid: LIVE_PID, status: "thinking", transcriptAgeSeconds: 900 },
+    ]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toMatchObject({ sessions: 1, working: 0, idle: 1, waitingOnInput: 0 });
+  });
+
+  it("skips a session file whose pid is dead, as a crash leaves behind", async () => {
+    const home = await makeClaudeHome([
+      { pid: await deadPid(), status: "busy", transcriptAgeSeconds: 900, subagentAgesSeconds: [1] },
+      { pid: LIVE_PID, status: "idle", transcriptAgeSeconds: 1 },
+    ]);
+
+    const data = await collectAgents(home);
+
+    expect(data.claude).toEqual({
+      sessions: 1,
+      working: 0,
+      idle: 1,
+      waitingOnInput: 0,
+      subagentsWorking: 0,
+    });
+  });
+
+  it("reports available:false with zero counts when there is no Claude Code state directory", async () => {
+    const home = await makeTempDir();
+
+    const data = await collectAgents(home);
+
+    expect(data).toEqual({
+      available: false,
+      claude: { sessions: 0, working: 0, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
+    });
+  });
+
+  it("sends counts only: no session name, id, or directory appears in the frame", async () => {
+    const home = await makeClaudeHome([{ pid: LIVE_PID, status: "busy", transcriptAgeSeconds: 1 }]);
+
+    const { stdout } = await runBash("collect_agents", { HOME: home });
+
+    expect(stdout).not.toContain(SESSION_NAME);
+    expect(stdout).not.toContain("secret");
+    expect(stdout).not.toContain("00000000-0000-4000");
+    expect(stdout).not.toContain(String(LIVE_PID));
+  });
+});
+
 describe("sample_once", () => {
   // Runs the real collectors, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "emits an agents frame on the first tick and then only every AGENTS_INTERVAL_SECONDS while Claude Code is here",
+    async () => {
+      const sessionDir = await makeTempDir();
+      await mkdir(join(sessionDir, "queue"));
+      const home = await makeClaudeHome([
+        { pid: process.pid, status: "idle", transcriptAgeSeconds: 1 },
+      ]);
+
+      const { code, stderr } = await runBash(
+        "gather_host_info\nAGENTS_INTERVAL_SECONDS=3\nsample_once; sample_once; sample_once; sample_once",
+        { SESSION_DIR: sessionDir, HOME: home },
+      );
+
+      expect(code, stderr).toBe(0);
+      const frames = await queuedFrames(sessionDir);
+      const agents = frames.filter((frame) => frame.stream === "agents");
+      expect(agents.map((frame) => frame.sequence)).toEqual([1, 2]);
+      expect(agents.every((frame) => frame.collector === "agents" && frame.data.available)).toBe(
+        true,
+      );
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "emits the unavailable agents frame once per session, not on every interval, when there is no Claude Code",
+    async () => {
+      const sessionDir = await makeTempDir();
+      await mkdir(join(sessionDir, "queue"));
+      const home = await makeTempDir();
+
+      const { code, stderr } = await runBash(
+        "gather_host_info\nAGENTS_INTERVAL_SECONDS=1\nsample_once; sample_once; sample_once",
+        { SESSION_DIR: sessionDir, HOME: home },
+      );
+
+      expect(code, stderr).toBe(0);
+      const frames = await queuedFrames(sessionDir);
+      const agents = frames.filter((frame) => frame.stream === "agents");
+      expect(agents).toHaveLength(1);
+      expect(agents[0]).toMatchObject({ sequence: 1, data: { available: false } });
+    },
+  );
+
   it.skipIf(process.platform !== "darwin")(
     "emits a processes frame on the first tick and then only every PROCESSES_INTERVAL_SECONDS",
     async () => {

@@ -157,9 +157,9 @@ export const ProcessesCollectorData = z.object({
 export type ProcessesCollectorData = z.infer<typeof ProcessesCollectorData>;
 
 /**
- * A Claude Code session whose status is busy and whose transcript changed within this
- * many seconds is `working`; busy but quieter than that is `waitingOnInput` (a
- * permission prompt or a question nobody has answered). A client-side threshold,
+ * A Claude Code session whose status is busy and whose transcript (its own or a
+ * subagent's) changed within this many seconds is `working`; busy but quieter than
+ * that is `waitingOnInput` (a permission prompt or a question nobody has answered). A client-side threshold,
  * mirrored in cli/afk as AGENT_ACTIVE_SECONDS; here so the docs and the dashboard
  * can say what the counts mean.
  */

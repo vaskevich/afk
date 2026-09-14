@@ -5,8 +5,9 @@
 #
 # afk — away-from-keyboard telemetry for your machine.
 #
-# Starts a session, samples machine health once a second (and the busiest processes
-# every few seconds), and streams it to an afk server so you can watch a shareable
+# Starts a session, samples machine health once a second (and, every few seconds, the
+# busiest processes and how many Claude Code agents are working, waiting on you, or
+# idle: counts only, never names), and streams it to an afk server so you can watch a shareable
 # dashboard from your phone. Designed to be downloaded, read, and run: plain bash 3.2
 # (what macOS ships), curl, and stock macOS tools only. No jq, no python.
 #
@@ -130,6 +131,15 @@ SAMPLE_INTERVAL_SECONDS=1
 # of catching up tick by tick; see system_sampler_loop.
 SAMPLE_MAX_CATCHUP_SECONDS=2
 PROCESSES_INTERVAL_SECONDS=5
+AGENTS_INTERVAL_SECONDS=5
+# Where Claude Code keeps its state; the agents collector reads (never writes) two
+# things under it: sessions/<pid>.json and the mtimes of transcripts under projects/.
+CLAUDE_HOME="$HOME/.claude"
+# A busy Claude Code session whose transcript changed within this many seconds is
+# working; busy but quieter than that is waiting on input (AGENT_ACTIVE_SECONDS and
+# AGENT_SUBAGENT_ACTIVE_SECONDS in shared; see docs/PROTOCOL.md for the states).
+AGENT_ACTIVE_SECONDS=120
+AGENT_SUBAGENT_ACTIVE_SECONDS=30
 # How many of the busiest processes a processes frame carries (PROCESSES_TOP_MAX in shared).
 PROCESSES_TOP_MAX=10
 # Full executable paths are cut to this many characters (PROCESS_COMMAND_MAX_LENGTH in shared).
@@ -282,9 +292,12 @@ random_id() { head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 if [ "$(uname -s)" = "Darwin" ]; then
   file_size() { stat -f %z "$1" 2>/dev/null || echo 0; }
   file_mtime() { stat -f %m "$1" 2>/dev/null || now_seconds; }
+  # One mtime per line for many files in one call; files that do not exist print nothing.
+  file_mtimes() { stat -f %m "$@" 2>/dev/null; }
 else
   file_size() { stat -c %s "$1" 2>/dev/null || echo 0; }
   file_mtime() { stat -c %Y "$1" 2>/dev/null || now_seconds; }
+  file_mtimes() { stat -c %Y "$@" 2>/dev/null; }
 fi
 
 file_age_seconds() { echo $(( $(now_seconds) - $(file_mtime "$1") )); }
@@ -499,6 +512,100 @@ collect_processes() {
         (NR > 1 ? "," : ""), $1, $2, $3, $4, $5 * 1024, json_escape(command)
     }
     END { printf "]}" }'
+}
+
+# ---------------------------------------------------------------------------
+# agents collector: how many Claude Code agents are on the machine and what they are
+# doing. Counts only; no session name, id, directory, or transcript content leaves
+# the machine (see docs/PROTOCOL.md and the decision log in docs/ARCHITECTURE.md).
+#
+# What it reads, all undocumented Claude Code internals as of 2.1.x:
+#   $CLAUDE_HOME/sessions/<pid>.json    one single-line JSON record per live session,
+#                                       whatever started it (a terminal `claude`, the
+#                                       desktop app); removed on exit, so the pid is
+#                                       checked too since a crash can leave one behind.
+#                                       `status` is "busy" while a turn runs and
+#                                       "idle" between turns; `cwd` and `sessionId`
+#                                       locate the transcript. The `<pid>.<hex>.key`
+#                                       files next to them are never opened.
+#   $CLAUDE_HOME/projects/<slug>/<sessionId>.jsonl
+#                                       the main transcript, <slug> being the cwd with
+#                                       every character outside [A-Za-z0-9] as `-`;
+#                                       its mtime is the session's activity signal
+#                                       (the session file's mtime is not one).
+#   $CLAUDE_HOME/projects/<slug>/<sessionId>/subagents/agent-*.jsonl
+#                                       one transcript per subagent, which has no
+#                                       process and no session file of its own.
+#
+# A busy session whose transcript (its own or a subagent's) changed within
+# AGENT_ACTIVE_SECONDS is working; busy but older than that is waiting on input (a
+# permission prompt, a question); idle is idle. A main transcript that cannot be found
+# reads as changed now (file_mtime's fallback), so a layout change turns into
+# "working", never a false "waiting"; a status outside that vocabulary goes by
+# transcript age alone, working or idle. A subagent transcript changed within
+# AGENT_SUBAGENT_ACTIVE_SECONDS is a working subagent. Without a readable sessions
+# directory the frame says available:false with zero counts.
+# ---------------------------------------------------------------------------
+
+AGENTS_UNAVAILABLE_JSON='{"available":false,"claude":{"sessions":0,"working":0,"idle":0,"waitingOnInput":0,"subagentsWorking":0}}'
+
+claude_sessions_available() { [ -d "$CLAUDE_HOME/sessions" ] && [ -r "$CLAUDE_HOME/sessions" ]; }
+
+# The agents stream is worth a frame when Claude Code is here, and once per session
+# (sequence still 0; chaining resets it) when it is not, so the dashboard can say
+# "Claude Code not found" without a frame every AGENTS_INTERVAL_SECONDS saying so again.
+agents_frame_due() { claude_sessions_available || [ "$SEQ_AGENTS" -eq 0 ]; }
+
+collect_agents() {
+  local now sessions=0 working=0 idle=0 waiting=0 subagents=0
+  local file record pid status session_id cwd slug project latest mtime
+  if ! claude_sessions_available; then
+    printf '%s' "$AGENTS_UNAVAILABLE_JSON"
+    return
+  fi
+  now=$(now_seconds)
+  for file in "$CLAUDE_HOME"/sessions/*.json; do
+    [ -e "$file" ] || continue
+    pid=${file##*/}
+    pid=${pid%.json}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    pid_alive "$pid" || continue
+    # The record is one line; `read` takes the first without a fork (and reports the
+    # missing trailing newline as a failure, hence the second test). A file that
+    # vanished between the glob and here (the session just exited) is skipped.
+    record=""
+    IFS= read -r record < "$file" 2>/dev/null || [ -n "$record" ] || continue
+    sessions=$((sessions + 1))
+    status=$(json_get_string "$record" status)
+    session_id=$(json_get_string "$record" sessionId)
+    cwd=$(json_get_string "$record" cwd)
+    slug=$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9' '-')
+    project="$CLAUDE_HOME/projects/$slug"
+    # The session's last activity is the newest of its main transcript and its
+    # subagents' (a session that has delegated a task writes nothing itself until
+    # the subagent returns). One stat call covers every subagent transcript; a
+    # session with none prints nothing (the unexpanded glob names no file).
+    latest=$(file_mtime "$project/$session_id.jsonl")
+    for mtime in $(file_mtimes "$project/$session_id"/subagents/agent-*.jsonl); do
+      if [ $((now - mtime)) -le "$AGENT_SUBAGENT_ACTIVE_SECONDS" ]; then
+        subagents=$((subagents + 1))
+      fi
+      if [ "$mtime" -gt "$latest" ]; then
+        latest=$mtime
+      fi
+    done
+    if [ "$status" = "idle" ]; then
+      idle=$((idle + 1))
+    elif [ $((now - latest)) -le "$AGENT_ACTIVE_SECONDS" ]; then
+      working=$((working + 1))
+    elif [ "$status" = "busy" ]; then
+      waiting=$((waiting + 1))
+    else
+      idle=$((idle + 1))
+    fi
+  done
+  printf '{"available":true,"claude":{"sessions":%d,"working":%d,"idle":%d,"waitingOnInput":%d,"subagentsWorking":%d}}' \
+    "$sessions" "$working" "$idle" "$waiting" "$subagents"
 }
 
 # ---------------------------------------------------------------------------
@@ -881,6 +988,7 @@ chain_session() {
   done
   SEQ_SYSTEM=0
   SEQ_PROCESSES=0
+  SEQ_AGENTS=0
   SAMPLE_TICK=0
   log "session $old_id reached its ${old_cap}s cap; continuing in session $SESSION_ID (max ${MAX_DURATION_SECONDS}s)"
   print_dashboard_url
@@ -1024,6 +1132,7 @@ resend_leftover_queues() {
 
 SEQ_SYSTEM=0
 SEQ_PROCESSES=0
+SEQ_AGENTS=0
 # Counts sampler ticks (one per SAMPLE_INTERVAL_SECONDS) so slower collectors can run
 # every Nth tick; the first tick runs every collector so a session starts with each stream.
 SAMPLE_TICK=0
@@ -1055,6 +1164,10 @@ sample_once() {
   if due_every "$PROCESSES_INTERVAL_SECONDS"; then
     SEQ_PROCESSES=$((SEQ_PROCESSES + 1))
     emit_frame processes processes "$SEQ_PROCESSES" "$(collect_processes)"
+  fi
+  if due_every "$AGENTS_INTERVAL_SECONDS" && agents_frame_due; then
+    SEQ_AGENTS=$((SEQ_AGENTS + 1))
+    emit_frame agents agents "$SEQ_AGENTS" "$(collect_agents)"
   fi
 }
 
