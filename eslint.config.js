@@ -2,6 +2,7 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier";
+import promise from "eslint-plugin-promise";
 import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 
@@ -14,12 +15,19 @@ export default tseslint.config(
     // tsconfig via projectService.
     files: ["packages/*/src/**/*.ts"],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
+    plugins: { promise },
     languageOptions: {
       parserOptions: {
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
       globals: globals.node,
+    },
+    rules: {
+      // Use async/await instead of promise chaining. `strict: true` also flags
+      // `.then()`/`.catch()`/`.finally()` calls that are themselves awaited
+      // (e.g. `await x.catch(() => null)`), which should be a try/catch instead.
+      "promise/prefer-await-to-then": ["error", { strict: true }],
     },
   },
   {
@@ -30,12 +38,19 @@ export default tseslint.config(
       ...tseslint.configs.recommended,
       reactHooks.configs.flat.recommended,
     ],
+    plugins: { promise },
     languageOptions: {
       parserOptions: {
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
       globals: globals.browser,
+    },
+    rules: {
+      // Use async/await instead of promise chaining. `strict: true` also flags
+      // `.then()`/`.catch()`/`.finally()` calls that are themselves awaited
+      // (e.g. `await x.catch(() => null)`), which should be a try/catch instead.
+      "promise/prefer-await-to-then": ["error", { strict: true }],
     },
   },
   {
@@ -47,9 +62,16 @@ export default tseslint.config(
     files: ["scenarios/[!.]*"],
     ignores: ["scenarios/**/*.md"],
     extends: [js.configs.recommended],
+    plugins: { promise },
     languageOptions: {
       sourceType: "commonjs",
       globals: globals.node,
+    },
+    rules: {
+      // Use async/await instead of promise chaining. `strict: true` also flags
+      // `.then()`/`.catch()`/`.finally()` calls that are themselves awaited
+      // (e.g. `await x.catch(() => null)`), which should be a try/catch instead.
+      "promise/prefer-await-to-then": ["error", { strict: true }],
     },
   },
   eslintConfigPrettier,
