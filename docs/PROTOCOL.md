@@ -35,7 +35,7 @@ remembers it and the `404`'s message is `session deleted` with `details`
 `unknown session`.
 
 Every client request (create, ingest, end, qr) carries `X-Afk-Client: <name>/<semver>`,
-`bash/0.2.0` today. The server refuses clients below its minimum version, and requests
+`bash/0.3.0` today. The server refuses clients below its minimum version, and requests
 on those four endpoints with a missing or malformed header, with `426 Upgrade
 Required`; the body is an `ErrorResponse` whose `details` is `UpgradeRequiredDetails`
 (`minimumClientVersion`, `minimumProtocolVersion`, `yourVersion`). Read endpoints are
@@ -119,7 +119,7 @@ the same proof of ownership every other write to a session needs:
 POST /api/sessions
 Authorization: Bearer <previous session's ingestToken>
 
-{ "protocolVersion": 1, "clientVersion": "0.2.0", "host": { … },
+{ "protocolVersion": 1, "clientVersion": "0.3.0", "host": { … },
   "previousSessionId": "D3FzMqK8qOLVva9LoHF9uc" }
 ```
 

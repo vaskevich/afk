@@ -7,7 +7,7 @@ rather than the other way round. Two independent numbers make that tractable.
 | number               | where                                   | today   | what it describes                                    |
 | -------------------- | --------------------------------------- | ------- | ---------------------------------------------------- |
 | **protocol version** | `PROTOCOL_VERSION` in `packages/shared` | `1`     | the wire contract: shapes, field meanings, endpoints |
-| **client version**   | `AFK_VERSION` in `cli/afk` (semver)     | `0.2.0` | the client implementation                            |
+| **client version**   | `AFK_VERSION` in `cli/afk` (semver)     | `0.3.0` | the client implementation                            |
 
 They move independently. A client release almost never bumps the protocol; a protocol
 bump always ships with a client release.
@@ -45,7 +45,7 @@ retirement is itself a deliberate change with a changelog line.
 ## Client version
 
 A semver string, sent as `clientVersion` in the create request and as
-`X-Afk-Client: <name>/<semver>` on every client request (`bash/0.2.0` today). It is the
+`X-Afk-Client: <name>/<semver>` on every client request (`bash/0.3.0` today). It is the
 implementation, not the contract: **bump it on every client release**, whether or not
 the protocol changed. Patch for a fix, minor for a new collector or command, major for a
 protocol bump or a change in how the script is invoked.
