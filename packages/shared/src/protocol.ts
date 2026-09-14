@@ -152,3 +152,42 @@ export const ErrorResponse = z.object({
   details: z.unknown().optional(),
 });
 export type ErrorResponse = z.infer<typeof ErrorResponse>;
+
+// ---------------------------------------------------------------------------
+// Reading a session (dashboard side)
+// ---------------------------------------------------------------------------
+
+/**
+ * A frame as the server stores and serves it. `index` is the session-wide position
+ * (1-based, monotonic across all streams) and doubles as the SSE event id, so a
+ * dashboard reconnecting with `Last-Event-ID` picks up exactly where it left off.
+ */
+export const StoredFrame = z.object({
+  index: z.number().int().positive(),
+  /** Server clock, unix milliseconds. */
+  receivedAt: z.number().int(),
+  frame: Frame,
+});
+export type StoredFrame = z.infer<typeof StoredFrame>;
+
+/** GET /api/sessions/:id/frames?after=<index> */
+export const FramesResponse = z.object({
+  session: SessionSummary,
+  frames: z.array(StoredFrame),
+});
+export type FramesResponse = z.infer<typeof FramesResponse>;
+
+/**
+ * GET /api/sessions/:id/stream (text/event-stream). Events, in order of appearance:
+ *   session  data = SessionSummary; sent on connect and whenever the status changes
+ *   frame    data = StoredFrame; id = StoredFrame.index
+ *   end      data = SessionSummary; sent once the session is over, then the stream closes
+ * Reconnect with `Last-Event-ID` (or `?after=<index>`) to replay what was missed.
+ * TODO(events): an `event` event for server-detected anomalies once rules exist.
+ */
+export const StreamEventName = {
+  Session: "session",
+  Frame: "frame",
+  End: "end",
+} as const;
+export type StreamEventName = (typeof StreamEventName)[keyof typeof StreamEventName];

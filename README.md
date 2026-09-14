@@ -19,3 +19,14 @@ pnpm install
 pnpm dev:server                                     # http://localhost:4141
 AFK_SERVER=http://localhost:4141 ./cli/afk start    # in another terminal
 ```
+
+Watch a session's frames arrive as server-sent events (works in a browser tab or curl):
+
+```bash
+curl -N http://localhost:4141/api/sessions/<sessionId>/stream
+```
+
+Reconnect where you left off with `-H 'Last-Event-ID: <index>'` or `?after=<index>`.
+`GET /api/sessions/<sessionId>/frames?after=<index>` returns the same data as one JSON document.
+Set `AFK_PUBLIC_BASE_URL=http://localhost:5173` when running the Vite dev server so the
+printed dashboard URL opens the web app.

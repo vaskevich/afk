@@ -1,12 +1,13 @@
-import type { Frame, HostInfo, SessionSummary, SessionStatus } from "@afk/shared";
+import type { Frame, HostInfo, SessionSummary, SessionStatus, StoredFrame } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import { randomId, randomToken } from "../utils/ids.ts";
 
-export interface StoredFrame {
-  frame: Frame;
-  /** Server clock, unix milliseconds. */
-  receivedAt: number;
-}
+export type { StoredFrame };
+
+/** Something that happened to a session that live subscribers (SSE) care about. */
+export type SessionEvent =
+  { type: "frames"; frames: StoredFrame[] } | { type: "ended"; summary: SessionSummary };
+export type SessionListener = (event: SessionEvent) => void;
 
 export interface Session {
   sessionId: string;
@@ -20,6 +21,7 @@ export interface Session {
   latestSequence: Map<string, number>;
   /** TODO(persistence): append to disk (later S3) instead of holding everything in memory. */
   frames: StoredFrame[];
+  listeners: Set<SessionListener>;
 }
 
 export interface IngestResult {
@@ -44,6 +46,7 @@ export class SessionStore {
       maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
       latestSequence: new Map(),
       frames: [],
+      listeners: new Set(),
     };
     this.sessions.set(session.sessionId, session);
     return session;
@@ -72,7 +75,24 @@ export class SessionStore {
   }
 
   end(session: Session): void {
-    if (session.endedAt === null) session.endedAt = Date.now();
+    if (session.endedAt !== null) return;
+    session.endedAt = Date.now();
+    this.emit(session, { type: "ended", summary: this.summary(session) });
+  }
+
+  /** Frames after the given session-wide index (0 = everything). */
+  framesAfter(session: Session, index: number): StoredFrame[] {
+    return index <= 0 ? session.frames.slice() : session.frames.slice(index);
+  }
+
+  /** Subscribe to live changes. Returns an unsubscribe function. */
+  subscribe(session: Session, listener: SessionListener): () => void {
+    session.listeners.add(listener);
+    return () => session.listeners.delete(listener);
+  }
+
+  private emit(session: Session, event: SessionEvent): void {
+    for (const listener of session.listeners) listener(event);
   }
 
   /**
@@ -91,10 +111,11 @@ export class SessionStore {
         continue;
       }
       session.latestSequence.set(frame.stream, frame.sequence);
-      const stored = { frame, receivedAt };
+      const stored: StoredFrame = { index: session.frames.length + 1, receivedAt, frame };
       session.frames.push(stored);
       accepted.push(stored);
     }
+    if (accepted.length > 0) this.emit(session, { type: "frames", frames: accepted });
     return { accepted, duplicates };
   }
 }
