@@ -337,6 +337,54 @@ describe("json_get_number", () => {
   });
 });
 
+describe("log", () => {
+  /** The test process has no tty; a snippet that wants the terminal path says so. */
+  const AT_A_TERMINAL = "stderr_is_terminal() { return 0; }";
+  const TAG = "[1;33mafk ▸[0m ";
+
+  it("prefixes its messages with the plain afk: on stderr when stderr is not a terminal", async () => {
+    const { stdout, stderr } = await runBash("log hello world");
+
+    expect(stderr).toBe("afk: hello world\n");
+    expect(stdout).toBe("");
+  });
+
+  it("tags its messages in bold yellow on a terminal, so they stand apart from a command's output", async () => {
+    const { stderr } = await runBash(`${AT_A_TERMINAL}; log hello world`);
+
+    expect(stderr).toBe(`${TAG}hello world\n`);
+  });
+
+  it("keeps the plain prefix on a terminal when NO_COLOR is set", async () => {
+    const { stderr } = await runBash(`${AT_A_TERMINAL}; log hello world`, { NO_COLOR: "1" });
+
+    expect(stderr).toBe("afk: hello world\n");
+  });
+
+  it("ignores an empty NO_COLOR, as the convention says", async () => {
+    const { stderr } = await runBash(`${AT_A_TERMINAL}; log hello`, { NO_COLOR: "" });
+
+    expect(stderr).toBe(`${TAG}hello\n`);
+  });
+
+  it("puts the same tag on die and on the update question", async () => {
+    const { stderr, code } = await runBash(
+      [
+        AT_A_TERMINAL,
+        "can_prompt() { return 0; }",
+        "AFK_VERSION=0.1.0; LATEST_CLIENT_VERSION=0.2.0; UPDATE_PROMPT_TIMEOUT_SECONDS=1",
+        "check_client_update prompt </dev/null",
+        "die boom",
+      ].join("\n"),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(`${TAG}update now? [y/N] `);
+    expect(stderr).toContain(`${TAG}error: boom\n`);
+    expect(stderr).not.toContain("afk: ");
+  });
+});
+
 describe("collect_system", () => {
   // Uses ps, sysctl, and vm_stat, which only exist on macOS.
   it.skipIf(process.platform !== "darwin")(
@@ -2793,6 +2841,30 @@ describe("cmd_run", () => {
       });
       // The tail was the last use of the captured output.
       expect(await leftoverCaptures(afkHome)).toEqual([]);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "passes the command's stdout and stderr through on their own descriptors, in order, and exits with its status",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+      const command = "for i in 1 2 3; do echo out $i; echo err $i >&2; done; exit 7";
+
+      const { code, stdout, stderr } = await runBash(`cmd_run -- sh -c '${command}'`, {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+      });
+
+      expect(code).toBe(7);
+      // stdout is the dashboard URL block, then the command's lines exactly as written.
+      expect(stdout).toMatch(/^\n {2}http:\/\/example\.test\/s\/sess123\n\nout 1\nout 2\nout 3\n$/);
+      // stderr has the command's lines in order, and only afk's own lines around them.
+      const commandLines = stderr.split("\n").filter((line) => line.startsWith("err "));
+      expect(commandLines).toEqual(["err 1", "err 2", "err 3"]);
+      const afkLines = stderr.split("\n").filter((line) => line !== "" && !line.startsWith("err "));
+      expect(afkLines.every((line) => line.startsWith("afk: "))).toBe(true);
+      expect(stderr).not.toContain("out ");
     },
   );
 

@@ -113,7 +113,10 @@ install the newer client the server serves; the one-line notice still prints),
 the installer itself installs: the running copy's own directory for the first two,
 `~/.local/bin` for a fresh `curl | sh`), `AFK_RUN_TAIL_LINES`, and
 `AFK_RUN_CAPTURE_MAX_BYTES` (the chunk size, 64 MiB by default, of the wrapped
-command's output `afk run` keeps on disk while it runs).
+command's output `afk run` keeps on disk while it runs), and the conventional
+`NO_COLOR` (set to anything non-empty and afk's own lines on a terminal keep the plain
+`afk: ` prefix instead of the coloured `afk ▸` tag; off a terminal the prefix is
+always plain).
 
 The installer itself reads `AFK_INSTALL_DIR` (where to put `afk`, default `~/.local/bin`).
 

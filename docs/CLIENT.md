@@ -20,6 +20,14 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   its exit code.
 - Print readable errors for capacity, version, and network problems, including curl's
   own reason when the server cannot be reached.
+- Keep its own lines apart from a wrapped command's. `afk run` passes the command's
+  stdout and stderr through on their own descriptors, unchanged and unbuffered (`tee`
+  mirrors each into the run capture; the tests check that both streams arrive in order
+  on the right descriptor and that the exit code is the command's). Everything afk says
+  for itself goes to stderr through `log`: on a terminal with a bold yellow `afk ▸`
+  tag, otherwise (a pipe, a log file, or `NO_COLOR` set, per <https://no-color.org>)
+  with the plain `afk: ` prefix a script can grep for. The dashboard URL is the one
+  thing on stdout, bare, because it is meant to be captured.
 - Be something a stranger can inspect before running.
 - Notice when the server it talks to serves a newer copy of itself (the create
   response says so), tell the user, and on a terminal offer to run the server's

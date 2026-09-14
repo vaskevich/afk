@@ -32,7 +32,10 @@
 #                        version it serves
 #
 # The dashboard URL is printed with a QR code under it when stdout is a terminal, so
-# you can point a phone at the screen instead of typing it; --no-qr skips that.
+# you can point a phone at the screen instead of typing it; --no-qr skips that. It is
+# the one thing afk prints on stdout; everything afk says for itself goes to stderr,
+# tagged `afk ▸` on a terminal and prefixed `afk: ` elsewhere, so a wrapped command's
+# own output is never mistaken for it.
 #
 # When the server serves a newer client than this one, `afk start` (and an `afk run`
 # that started its own session) says so; on a terminal `afk start` also asks whether
@@ -51,6 +54,8 @@
 #   AFK_HOME             state directory, default ~/.afk
 #   AFK_SPOOL_MAX_BYTES  cap on queued frames on disk, default 50 MiB; oldest dropped past it
 #   AFK_NO_QR            set to 1 to never print the QR code (same as --no-qr)
+#   NO_COLOR             set to anything and afk's own lines on a terminal keep the
+#                        plain `afk: ` prefix instead of the coloured `afk ▸` tag
 #   AFK_NO_UPDATE_PROMPT set to 1 to never be asked to update (the notice still prints)
 #   AFK_INSTALL_DIR      where `afk update` and the prompt install the new copy; default
 #                        is this copy's own directory
@@ -181,7 +186,25 @@ SESSION_ORPHAN_RETENTION_SECONDS=172800
 # helpers
 # ---------------------------------------------------------------------------
 
-log()  { printf 'afk: %s\n' "$*" >&2; }
+# Everything afk says for itself goes to stderr through `log`, with a prefix that tells
+# its lines apart from a wrapped command's output: on a terminal a bold yellow tag,
+# otherwise (a pipe, a log file, NO_COLOR set, see https://no-color.org) the plain
+# `afk: ` a script can grep for. The dashboard URL on stdout is data, not a message,
+# and carries no prefix. The tests replace stderr_is_terminal to see the tag. The
+# prefix is chosen on every call (stderr can be redirected per command) without a
+# subshell, since log runs in background loops that are stopped by signalling their
+# process tree, and a fork there is one more child to catch.
+LOG_PREFIX_PLAIN='afk: '
+LOG_PREFIX_TTY=$'\033[1;33mafk \xe2\x96\xb8\033[0m '
+LOG_PREFIX=$LOG_PREFIX_PLAIN
+stderr_is_terminal() { [ -t 2 ]; }
+set_log_prefix() {
+  LOG_PREFIX=$LOG_PREFIX_PLAIN
+  if [ -z "${NO_COLOR:-}" ] && stderr_is_terminal; then
+    LOG_PREFIX=$LOG_PREFIX_TTY
+  fi
+}
+log()  { set_log_prefix; printf '%s%s\n' "$LOG_PREFIX" "$*" >&2; }
 die()  { log "error: $*"; exit 1; }
 
 # Escape a string for use inside a JSON string literal.
@@ -1250,7 +1273,8 @@ check_client_update() { # [prompt]
   if [ "${1:-}" != prompt ] || [ "${AFK_NO_UPDATE_PROMPT:-0}" = 1 ] || ! can_prompt; then
     return 0
   fi
-  printf 'afk: update now? [y/N] ' >&2
+  set_log_prefix
+  printf '%supdate now? [y/N] ' "$LOG_PREFIX" >&2
   # read fails on the timeout (and on end of input); either is a no, with the cursor
   # still on the question's line.
   read -r -t "$UPDATE_PROMPT_TIMEOUT_SECONDS" answer || printf '\n' >&2
