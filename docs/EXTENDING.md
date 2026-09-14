@@ -12,9 +12,12 @@ A collector is a named kind of measurement. Four places, in this order:
    values; interpretation belongs on the server.
 2. **Client** (`cli/afk`): add a `collect_<name>()` function that prints one compact
    JSON object matching the schema, and call it from `sample_once` with its own
-   sequence counter. Bash 3.2 only: no associative arrays, no `${var,,}`, no `mapfile`.
-   Numbers can be printed directly; strings must go through `json_string`. Keep it a
-   point-in-time command, not a long-lived process.
+   sequence counter. The sampler counts ticks (one per `SAMPLE_INTERVAL_SECONDS`), so a
+   collector that does not need 1 Hz runs behind `due_every "$<NAME>_INTERVAL_SECONDS"`
+   the way `processes` does (every 5 s). Bash 3.2 only: no associative arrays, no
+   `${var,,}`, no `mapfile`. Numbers can be printed directly; strings must go through
+   `json_string` (or an equivalent escape inside awk, as `collect_processes` does).
+   Keep it a point-in-time command, not a long-lived process.
 3. **Server**: add a `case` to `describeFrame` in `packages/server/src/log/describe.ts`
    for readable logs, and, if this collector's data can indicate something worth
    flagging, a rules module for the events it can raise (see "Adding a server-side
@@ -29,10 +32,10 @@ A collector is a named kind of measurement. Four places, in this order:
 Per-instance collectors (a wrapped command, a watched log file) use a stream id of
 `<collector>:<shortId>` so each instance gets its own row and sequence space.
 
-Planned collectors: `processes` (top processes with pid, parent pid, cpu, rss, full
-path), `agents` (running claude / codex counts). `run` (`afk run -- <cmd>`) shipped;
-see the wire shape in [PROTOCOL.md](PROTOCOL.md) and "Adding an output flavor for
-`run`" below for extending it further.
+Shipped so far: `system`, `run` (`afk run -- <cmd>`), and `processes` (the busiest
+processes with pid, parent pid, cpu, rss, full path, every 5 s). Planned: `agents`
+(running claude / codex counts). See the wire shapes in [PROTOCOL.md](PROTOCOL.md) and
+"Adding an output flavor for `run`" below for extending `run` further.
 
 ### External collectors (planned)
 
@@ -55,16 +58,26 @@ The types (`rules/types.ts`):
   (dotted, e.g. `"cpu.high"`). `create()` returns a fresh `RuleInstance` — the engine
   makes one per `(stream, rule kind)`, lazily, the first time that stream sees a frame
   from a matching collector.
-- **`RuleInstance<C>`**: `onFrame(frame, atMs): Verdict`, run for every frame of the
-  stream in index order; optionally `onTick(nowMs): Verdict` for rules that need to
-  notice _silence_ rather than a frame (only `client.stale` does today). The engine
-  ticks time-based rules with each frame's own timestamp during replay, so history and
-  a live viewer produce the same events.
-- **`Verdict`**: `{ active, severity, message, since?, instant? }`. `active: false` (or
-  `INACTIVE`) closes any open event for this rule. `since` backdates the start to when
-  the condition first held rather than when the rule became sure (a "high for 30 s"
-  rule reports `since` as the moment it crossed the line, not 30 s later). `instant`
-  marks a point-in-time event (a command exiting) that is created already closed.
+- **`RuleInstance<C>`**: `onFrame(frame, atMs, context): Verdict`, run for every frame
+  of the stream in index order; optionally `onTick(nowMs, context): Verdict` for rules
+  that need to notice _silence_ rather than a frame (only `client.stale` does today).
+  The engine ticks time-based rules with each frame's own timestamp during replay, so
+  history and a live viewer produce the same events.
+- **`RuleContext`**: what a rule may consult beyond its own stream. `latestFrame(stream)`
+  returns the newest `StoredFrame` of any stream as of the frame or tick being
+  processed (the engine records a frame before running rules on it, so a rule sees its
+  own stream's current frame too). `cpu.high` uses it to read the latest `processes`
+  frame when it opens. Because the map is filled in index order, a replayed session
+  sees exactly what a live one did.
+- **`Verdict`**: `{ active, severity, message, since?, instant?, details? }`.
+  `active: false` (or `INACTIVE`) closes any open event for this rule. `since`
+  backdates the start to when the condition first held rather than when the rule
+  became sure (a "high for 30 s" rule reports `since` as the moment it crossed the
+  line, not 30 s later). `instant` marks a point-in-time event (a command exiting)
+  that is created already closed. `details` (`AnomalyEventDetails` in shared) is a
+  structured snapshot stored on the event when it opens and left alone afterwards —
+  add a field to that shared object rather than inventing a per-rule shape, so the
+  dashboard can render it.
 - **`Sustain`**: helper for "this condition has held for at least N ms" — feed it a
   boolean each frame, it returns the timestamp the condition first held once the
   duration is met, else `null`. Every current sustained rule uses it; write a new one

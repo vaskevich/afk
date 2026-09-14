@@ -191,6 +191,35 @@ The final frame (`state: "exited"`) carries the same shape with `exitCode` set a
 what closes the row: `elapsedSeconds` is the command's total wall time and `output` is
 its final cumulative counts.
 
+### Collector: `processes`
+
+The busiest processes, sampled every 5 s (the client's `PROCESSES_INTERVAL_SECONDS`)
+on its own `processes` stream. One `ps -Aro pid=,ppid=,%cpu=,%mem=,rss=,comm=` call,
+so `top` is in cpu-descending order and `sampledCount` is how many processes there
+were in total. `rssBytes` is bytes (converted from ps's KiB); `command` is the full
+executable path as ps's `comm` reports it, cut to 512 chars.
+
+```json
+{
+  "sampledCount": 834,
+  "top": [
+    {
+      "pid": 51234,
+      "parentPid": 51200,
+      "cpuPercent": 1112.4,
+      "memoryPercent": 0.8,
+      "rssBytes": 272629760,
+      "command": "/opt/homebrew/bin/node"
+    }
+  ]
+}
+```
+
+`top` holds at most 10 entries (`PROCESSES_TOP_MAX` in shared). `cpuPercent` is the
+per-process `%cpu` from ps, so a process using several cores reports several hundred
+percent; the `system` collector's `cpu.percent` is the same numbers summed and divided
+by core count.
+
 ## Reading a session
 
 ### History
@@ -246,9 +275,24 @@ belong to a stream, i.e. a timeline row.
   "stream": "system",
   "kind": "cpu.high",
   "severity": "warning",
-  "message": "cpu above 90% for over 30s",
+  "message": "cpu above 90% for over 30s (top: node 1112%, WindowServer 9%, Google Chrome Helper 7%)",
   "startedAt": 1789371394000,
-  "endedAt": null
+  "endedAt": null,
+  "details": {
+    "topProcesses": [
+      { "pid": 51234, "cpuPercent": 1112.4, "command": "/opt/homebrew/bin/node" },
+      {
+        "pid": 442,
+        "cpuPercent": 9.1,
+        "command": "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"
+      },
+      {
+        "pid": 60300,
+        "cpuPercent": 7.3,
+        "command": "/Applications/Google Chrome.app/…/Google Chrome Helper"
+      }
+    ]
+  }
 }
 ```
 
@@ -261,22 +305,36 @@ belong to a stream, i.e. a timeline row.
 | `message`   | one readable sentence, e.g. "cpu above 90% for 45s (peak 97%)"                                                                                |
 | `startedAt` | unix milliseconds, derived from frame timestamps — backdated to when the condition first held, not when the rule became sure                  |
 | `endedAt`   | `null` while the condition is still ongoing (a spanning event); set immediately, equal to `startedAt`, for a point-in-time event (an instant) |
+| `details`   | optional structured snapshot the rule captured when the event opened (`AnomalyEventDetails`, below); absent when the rule had nothing to add  |
+
+`details` is a named object so rules can add fields over time without changing the
+event envelope. Today it has one: `topProcesses`, at most 3 entries of `{ pid,
+cpuPercent, command }` (`EVENT_TOP_PROCESSES_MAX`), taken from the latest `processes`
+frame at the moment the event opened. It is a snapshot: while the event stays open the
+message and severity may be updated by later verdicts, but `details` keeps what was
+running when the condition began.
 
 The rule catalogue today:
 
-| kind              | collector | severity           | trigger                                                                                    | shape    |
-| ----------------- | --------- | ------------------ | ------------------------------------------------------------------------------------------ | -------- |
-| `cpu.high`        | `system`  | warning            | cpu ≥ 90% sustained 30 s; backdated to when it crossed                                     | spanning |
-| `memory.pressure` | `system`  | warning / critical | pressure level ≥ warn (critical if ≥ critical) sustained 5 s                               | spanning |
-| `client.stale`    | `system`  | warning            | no frame from the stream for 60 s; opens on a tick, backdated to 60 s after the last frame | spanning |
-| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero)                                          | instant  |
-| `run.stalled`     | `run`     | warning            | still running but output volume unchanged for 60 s; backdated to when it stopped changing  | spanning |
+| kind              | collector | severity           | trigger                                                                                       | shape    |
+| ----------------- | --------- | ------------------ | --------------------------------------------------------------------------------------------- | -------- |
+| `cpu.high`        | `system`  | warning            | cpu ≥ 90% sustained 30 s; backdated to when it crossed; names the top 3 processes (see below) | spanning |
+| `memory.pressure` | `system`  | warning / critical | pressure level ≥ warn (critical if ≥ critical) sustained 5 s                                  | spanning |
+| `client.stale`    | `system`  | warning            | no frame from the stream for 60 s; opens on a tick, backdated to 60 s after the last frame    | spanning |
+| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero)                                             | instant  |
+| `run.stalled`     | `run`     | warning            | still running but output volume unchanged for 60 s; backdated to when it stopped changing     | spanning |
 
 A spanning event opens with `endedAt: null` and later gets an `endedAt` once the
 condition clears (or the session ends, which closes everything still open). An instant
 event (`run.exited`) is created already closed: `startedAt` equals `endedAt`. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how the rules engine derives these and
 [EXTENDING.md](EXTENDING.md) for how to add one.
+
+`cpu.high` looks across streams: when it opens it reads the session's latest
+`processes` frame, puts the three busiest by `cpuPercent` into `details.topProcesses`,
+and appends them to the message by basename, e.g. "cpu above 90% for over 30s (top:
+node 1112%, WindowServer 9%, Google Chrome Helper 7%)". A session without a
+`processes` stream gets the plain message and no `details`.
 
 ## GET /api/stats
 

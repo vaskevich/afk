@@ -35,7 +35,8 @@ shareable dashboard. Three pieces, one shared contract.
 A single bash 3.2 script (what macOS ships) with only curl and stock tools as
 dependencies, so it can be downloaded, read, and run. Two loops:
 
-- **Sampler**: runs each collector on its interval and appends one frame per line to
+- **Sampler**: ticks once a second, runs each collector on its own interval (`system`
+  every tick, `processes` every 5 s), and appends one frame per line to
   `~/.afk/sessions/<id>/current.ndjson`.
 - **Sender** (background subshell): atomically renames `current.ndjson` into
   `queue/`, ships the oldest queued batches in one request, deletes them on a 2xx,
@@ -111,6 +112,11 @@ usable). That means an improved rule, or a new one, applies retroactively to eve
 past session the next time it is loaded — there is nothing to migrate. A non-active
 session is immediately replayed through `engine.closeAll` so nothing is left open past
 the point the session actually stopped.
+
+Both callbacks receive a `RuleContext` whose `latestFrame(stream)` returns the newest
+frame of any stream so far — the engine records each frame before running rules on it —
+which is how `cpu.high` reads the `processes` stream to put the busiest processes into
+the event's `details` when it opens.
 
 Two rules are time-based rather than purely frame-driven (`client.stale`, which needs
 to notice _silence_, and any future rule like it): their `RuleInstance` also
@@ -230,6 +236,12 @@ private network. See `infra/` and the Deployment section of BACKLOG.md.
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** Events carry a small structured `details` snapshot captured when they
+  open (`AnomalyEventDetails` in shared; today `topProcesses`, at most 3). Rules get a
+  `RuleContext` with `latestFrame(stream)` so `cpu.high` can name what was running
+  from the `processes` stream. Snapshot, not tracked: the question an event answers is
+  "what was going on when this started", and a changing top list would re-emit the
+  event on every processes sample.
 - **2026-09-14** Tests are Vitest, one config at the repo root, co-located with the
   code they cover (`foo.test.ts` next to `foo.ts`), builders (`makeSystemFrame`,
   `makeEvent`, …) over literals, real implementations (`MemorySessionStorage`,

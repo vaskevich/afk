@@ -12,7 +12,7 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [x] Web: event markers on the timeline once the server emits anomaly events -- `timeline/EventMarkers.tsx` + `clusters.ts`, `StatusBanner`, `NearbyEvents`
 - [x] Server: anomaly rules (cpu sustained high, memory pressure warn/critical, client stale) -- `packages/server/src/rules/`
 - [x] CLI: `afk run -- <cmd>` joins the current session; reports stdout/stderr bytes per tick + exit code
-- [ ] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps`
+- [x] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps` -- `collect_processes`, every 5 s on the `processes` stream; `cpu.high` names the top three in `details.topProcesses`. The agents collector is still open, see the wishlist below
 - [x] Server rules for runs: exited non-zero, no output for N seconds -- `rules/run.ts` (`run.exited`, `run.stalled`)
 
 ## Wishlist: agents collector (claude / codex)
@@ -57,7 +57,7 @@ object storage (S3-compatible API) for the hosted deployment.
 - [ ] Auto-chain a new session when the 1 hour cap is hit, print the new URL -- `system_sampler_loop` in `cli/afk` just stops and logs "reached the maximum session length"; the `TODO(sessions)` next to it is still open
 - [ ] Mark a session ended after the client goes silent for N minutes -- the server has `client.stale` as an anomaly event but does not end the session on it
 - [ ] Multiple processes joining one session: only the first runs the long-lived collectors -- `afk run` already distinguishes owner vs joiner (see ARCHITECTURE.md), but no second `afk start` guard exists yet
-- [ ] Per-collector sampling intervals (not everything needs 1 Hz)
+- [x] Per-collector sampling intervals (not everything needs 1 Hz) -- `sample_once` counts ticks and `due_every` runs a collector every N seconds (`processes` at 5 s)
 - [ ] Sampling drift: subtract collector runtime from the sleep
 
 ## Hardening (server)
