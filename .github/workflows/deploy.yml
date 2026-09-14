@@ -25,6 +25,10 @@ on:
   push:
     branches: [main]
 
+# Job-level permissions below add id-token: write for the deploy job only.
+permissions:
+  contents: read
+
 concurrency:
   group: deploy-${{ github.ref }}
   # Never cancel a deploy that's already pushing an image or mid-rollout --

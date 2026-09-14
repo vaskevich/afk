@@ -8,20 +8,11 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <meta name="robots" content="noindex, nofollow" />
     <title>afk</title>
-    <!-- Sets the theme before the first paint; src/theme.ts owns the same key and rules. -->
-    <script>
-      (function () {
-        var stored = null;
-        try {
-          stored = localStorage.getItem("afk.theme");
-        } catch (e) {}
-        var dark =
-          stored === "dark" ||
-          (stored !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
-      })();
-    </script>
+    <!-- Sets the theme before the first paint (see public/theme-init.js); external because
+         the content security policy allows no inline scripts. -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

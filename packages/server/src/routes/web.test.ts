@@ -76,6 +76,16 @@ describe("web routes with a built dashboard", () => {
     expect(await res.text()).toContain("afk dashboard");
   });
 
+  it("tells crawlers not to index anything, on the dashboard and on the API", async () => {
+    const app = buildApp(distDir);
+
+    const page = await app.request("/s/abc");
+    const api = await app.request("/api/health");
+
+    expect(page.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(api.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  });
+
   it("answers an unknown API path with a JSON 404, never the dashboard's index.html", async () => {
     const app = buildApp(distDir);
 
