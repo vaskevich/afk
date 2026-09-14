@@ -13,19 +13,21 @@ data "aws_route53_zone" "osv_im" {
   private_zone = false
 }
 
-# One CNAME per domain_validation_options entry, so AWS can confirm we control
-# afk.osv.im and issue aws_lightsail_certificate.afk. A set, so it's for_each'd
-# keyed by domain name rather than indexed by position.
+# One CNAME per validated domain, so AWS can confirm we control afk.osv.im and
+# issue aws_lightsail_certificate.afk.
+#
+# for_each is keyed off var.domain_name -- the same (and only) name given to the
+# certificate -- rather than off domain_validation_options. for_each *keys* must
+# be known at plan time, and the certificate's validation options are unknown
+# until after apply; the record *values* looked up from them may stay unknown.
 resource "aws_route53_record" "afk_certificate_validation" {
-  for_each = {
-    for dvo in aws_lightsail_certificate.afk.domain_validation_options : dvo.domain_name => dvo
-  }
+  for_each = toset([var.domain_name])
 
   zone_id = data.aws_route53_zone.osv_im.zone_id
-  name    = each.value.resource_record_name
-  type    = each.value.resource_record_type
+  name    = one([for dvo in aws_lightsail_certificate.afk.domain_validation_options : dvo.resource_record_name if dvo.domain_name == each.key])
+  type    = one([for dvo in aws_lightsail_certificate.afk.domain_validation_options : dvo.resource_record_type if dvo.domain_name == each.key])
   ttl     = 300
-  records = [each.value.resource_record_value]
+  records = [one([for dvo in aws_lightsail_certificate.afk.domain_validation_options : dvo.resource_record_value if dvo.domain_name == each.key])]
 }
 
 # Points the public hostname at the container service's own generated hostname.
