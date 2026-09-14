@@ -5,10 +5,11 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 
 ## Next up (MVP path)
 
-- [ ] Server: persist frames to disk (append-only NDJSON per session) instead of memory
-- [ ] Server: history endpoint + SSE stream with `Last-Event-ID` catch-up
-- [ ] Web: Vite + React + TanStack scaffold, dark theme, live status page
-- [ ] Web: timeline with one row per stream, scrubber, event markers
+- [x] Server: persist frames to disk (append-only NDJSON per session) instead of memory
+- [x] Server: history endpoint + SSE stream with `Last-Event-ID` catch-up
+- [x] Web: Vite + React + TanStack scaffold, dark theme, live status page
+- [x] Web: timeline with one row per stream, scrubber; follows active sessions live
+- [ ] Web: event markers on the timeline once the server emits anomaly events
 - [ ] Server: anomaly rules (cpu sustained high, memory pressure warn/critical, client stale)
 - [ ] CLI: `afk run -- <cmd>` joins the current session; reports stdout/stderr bytes per tick + exit code
 - [ ] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps`
@@ -17,8 +18,14 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 
 ## Storage & retention
 
-- [ ] Store session files in S3 with a lifecycle expiration policy (7 days) — bucket + lifecycle rule already defined in `infra/storage.tf` behind `enable_s3_storage`; flip the variable and wire IAM access once the server writes there
-- [ ] Local sweeper for expired sessions until S3 lands
+Decision (Sep 2026): sessions go through the `SessionStorage` interface in
+`packages/server/src/store/storage.ts`. Local disk for dev and self-hosting, Lightsail
+object storage (S3-compatible API) for the hosted deployment.
+
+- [x] `SessionStorage` interface + disk implementation (`sessions/<id>/session.json` + `frames.ndjson`)
+- [ ] S3-compatible implementation (one object per frame batch under `sessions/<id>/frames/`); select with `AFK_STORAGE=disk|s3`; works against Lightsail buckets, real S3, MinIO
+- [ ] Expiry: sweeper that deletes sessions 7 days after they end (Lightsail buckets have no lifecycle rules, so the server owns this for every backend)
+- [ ] Evict idle ended sessions from the in-memory cache
 - [ ] Persist only what the dashboard needs (truncate process lists, drop unused fields)
 - [ ] Downsample or window frames for the browser if sessions ever exceed a few MB compressed
 
@@ -55,9 +62,14 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 
 ## Deployment
 
-- [x] Design + OpenTofu config for Lightsail + Caddy + Route53 `afk.osv.im` — see `infra/README.md`
-- [ ] Actually run `tofu apply` and cut the box over (design-only so far; not yet applied to AWS)
-- [ ] Once "persist frames to disk" (above) lands, have it honor `AFK_DATA_DIR` (the systemd unit already sets it, pointed at `packages/server/data` under the app dir)
-- [ ] Build the server to plain JS for prod instead of running through `tsx`, so `pnpm install --prod` is enough on deploy and the cheaper `nano_3_0` Lightsail tier becomes viable
-- [ ] Serve the built dashboard from the Node server
+Decision (Sep 2026): deploy as a Lightsail container service rather than an instance.
+No persistent volume, so storage is the Lightsail bucket above; TLS and the public
+endpoint come from Lightsail; deploys are push-image + new deployment.
+
+- [ ] Rework `infra/` for a container service: service + custom domain certificate + DNS validation records + `afk.osv.im` record in the osv.im zone + Lightsail bucket with access granted to the service; drop the instance, key pair, static IP, and cloud-init bootstrap
+- [ ] Dockerfile that builds the dashboard and runs the server (compile to plain JS rather than running `tsx` in prod)
+- [ ] `deploy.sh` becomes build image, push to Lightsail, create deployment
+- [ ] Confirm SSE passes through the container service load balancer (15 s keepalive is already in place)
+- [ ] Actually run `tofu apply`
+- [x] Serve the built dashboard from the Node server
 - [ ] Installer one-liner that downloads `cli/afk`
