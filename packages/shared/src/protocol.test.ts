@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  makeAgentsFrame,
   makeEvent,
   makeHost,
   makeProcessesData,
@@ -58,6 +59,49 @@ describe("Frame", () => {
     const result = Frame.safeParse(makeProcessesFrame(0));
 
     expect(result.success).toBe(true);
+  });
+
+  it("accepts a valid agents frame", () => {
+    const result = Frame.safeParse(makeAgentsFrame(0));
+
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts an agents frame from a machine without Claude Code, with zero counts", () => {
+    const frame = makeAgentsFrame(0, {
+      available: false,
+      sessions: 0,
+      working: 0,
+      idle: 0,
+      waitingOnInput: 0,
+      subagentsWorking: 0,
+    });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result).toMatchObject({ success: true, data: { data: { available: false } } });
+  });
+
+  it("rejects a negative agent count, naming the field", () => {
+    const frame = makeAgentsFrame(0, { waitingOnInput: -1 });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["data", "claude", "waitingOnInput"]);
+    }
+  });
+
+  it("rejects a fractional agent count, naming the field", () => {
+    const frame = makeAgentsFrame(0, { subagentsWorking: 1.5 });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["data", "claude", "subagentsWorking"]);
+    }
   });
 
   it("rejects a processes frame with more than the maximum top entries", () => {

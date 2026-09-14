@@ -56,6 +56,17 @@ export function describeFrame(frame: Frame): string {
             `rss=${kib(busiest.rssBytes)} pid=${busiest.pid}`;
       return `${frame.stream} #${frame.sequence} processes=${sampledCount} ${summary}`;
     }
+    case "agents": {
+      const { available, claude } = frame.data;
+      if (!available) {
+        return `${frame.stream} #${frame.sequence} claude=unavailable`;
+      }
+      return (
+        `${frame.stream} #${frame.sequence} claude=${claude.sessions} ` +
+        `working=${claude.working} waiting=${claude.waitingOnInput} idle=${claude.idle} ` +
+        `subagents=${claude.subagentsWorking}`
+      );
+    }
   }
 }
 

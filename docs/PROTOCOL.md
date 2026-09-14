@@ -429,6 +429,54 @@ per-process `%cpu` from ps, so a process using several cores reports several hun
 percent; the `system` collector's `cpu.percent` is the same numbers summed and divided
 by core count.
 
+### Collector: `agents`
+
+How many coding agents are running on the machine and what they are doing, sampled
+every 5 s (the client's `AGENTS_INTERVAL_SECONDS`) on its own `agents` stream. Counts
+only: no session names, ids, working directories, or transcript contents ever leave
+the machine (see the 2026-09-14 entry in [ARCHITECTURE.md](ARCHITECTURE.md)'s decision
+log). Claude Code is the one tool counted today; Codex is on the backlog.
+
+```json
+{
+  "available": true,
+  "claude": {
+    "sessions": 3,
+    "working": 1,
+    "waitingOnInput": 1,
+    "idle": 1,
+    "subagentsWorking": 2
+  }
+}
+```
+
+| field                     | meaning                                                                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `available`               | `false` when `~/.claude/sessions` does not exist or cannot be read; every count is then `0` and means nothing ("no Claude Code here") |
+| `claude.sessions`         | live Claude Code sessions (a terminal `claude` or the desktop app), each confirmed by a live pid                                      |
+| `claude.working`          | sessions whose status is busy and whose transcript changed within the last 120 s (`AGENT_ACTIVE_SECONDS`)                             |
+| `claude.waitingOnInput`   | sessions whose status is busy but whose transcript is older than that: a permission prompt or a question nobody has answered          |
+| `claude.idle`             | sessions whose status is idle: the turn is over and the agent waits for the next message                                              |
+| `claude.subagentsWorking` | subagent transcripts, across every session, modified within the last 30 s (`AGENT_SUBAGENT_ACTIVE_SECONDS`)                           |
+
+`working`, `waitingOnInput`, and `idle` partition `sessions`. `subagentsWorking` is
+counted on its own (a subagent has no process and no session file) and can exceed
+`sessions`. All five are non-negative integers.
+
+The collector reads undocumented Claude Code internals: one single-line JSON file per
+live session under `~/.claude/sessions/<pid>.json` (its `status` field, its `cwd` and
+`sessionId` only to find the transcript), the main transcript's mtime under
+`~/.claude/projects/<cwd with / as ->/<sessionId>.jsonl`, and the mtimes of
+`<sessionId>/subagents/agent-*.jsonl` next to it. A session file whose pid is dead
+(a crash left it behind) is not counted. When the layout changes the collector reports
+`available: false` rather than failing; the states are the client's reading of those
+files with the thresholds above, and the server only ever counts, never re-derives them.
+
+When the directory is missing the client emits the `available: false` frame once, at
+the start of the session (or of each chained successor), and nothing more on the
+stream; the dashboard can say "Claude Code not found" without a frame every 5 s
+repeating it.
+
 ## Reading a session
 
 ### History
