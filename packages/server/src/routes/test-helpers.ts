@@ -29,7 +29,7 @@ export async function createTestSession(
 }
 
 /** Posts a batch of frames as an NDJSON body with the session's bearer token. */
-export function postFrames(
+export async function postFrames(
   app: App,
   sessionId: string,
   ingestToken: string,
