@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { Frame, SystemCollectorData } from "@afk/shared";
+import { Frame, PROCESSES_TOP_MAX, ProcessesCollectorData, SystemCollectorData } from "@afk/shared";
 
 /** True when the path exists; the tests use it to assert a file was deleted or moved. */
 async function exists(path: string): Promise<boolean> {
@@ -198,6 +198,62 @@ describe("collect_system", () => {
       expect(result.success, JSON.stringify(result.success ? null : result.error.issues)).toBe(
         true,
       );
+    },
+  );
+});
+
+describe("collect_processes", () => {
+  // Uses ps with macOS column names.
+  it.skipIf(process.platform !== "darwin")(
+    "prints a frame body that validates as ProcessesCollectorData, cpu descending, capped at the top max",
+    async () => {
+      const { stdout, stderr, code } = await runBash("collect_processes");
+
+      expect(code, stderr).toBe(0);
+      const result = ProcessesCollectorData.safeParse(JSON.parse(stdout));
+      expect(result.success, JSON.stringify(result.success ? null : result.error.issues)).toBe(
+        true,
+      );
+      if (result.success) {
+        const { top, sampledCount } = result.data;
+        expect(top.length).toBeLessThanOrEqual(PROCESSES_TOP_MAX);
+        expect(sampledCount).toBeGreaterThanOrEqual(top.length);
+        const cpus = top.map((entry) => entry.cpuPercent);
+        expect(cpus).toEqual([...cpus].sort((a, b) => b - a));
+        // comm is the path the process was execed with, which may be relative, so only
+        // check that every entry has one.
+        expect(top.every((entry) => entry.command.length > 0)).toBe(true);
+      }
+    },
+  );
+});
+
+describe("sample_once", () => {
+  // Runs the real collectors, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "emits a processes frame on the first tick and then only every PROCESSES_INTERVAL_SECONDS",
+    async () => {
+      const sessionDir = await makeTempDir();
+
+      const { code, stderr } = await runBash(
+        "gather_host_info\nPROCESSES_INTERVAL_SECONDS=3\nsample_once; sample_once; sample_once; sample_once",
+        { SESSION_DIR: sessionDir },
+      );
+
+      expect(code, stderr).toBe(0);
+      const content = await readFile(join(sessionDir, "current.ndjson"), "utf8");
+      const frames = content
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => Frame.parse(JSON.parse(line)));
+      expect(frames.map((frame) => `${frame.stream}#${frame.sequence}`)).toEqual([
+        "system#1",
+        "processes#1",
+        "system#2",
+        "system#3",
+        "system#4",
+        "processes#2",
+      ]);
     },
   );
 });

@@ -2,10 +2,10 @@
 #
 # afk — away-from-keyboard telemetry for your machine.
 #
-# Starts a session, samples machine health once a second, and streams it to an afk
-# server so you can watch a shareable dashboard from your phone. Designed to be
-# downloaded, read, and run: plain bash 3.2 (what macOS ships), curl, and stock
-# macOS tools only. No jq, no python.
+# Starts a session, samples machine health once a second (and the busiest processes
+# every few seconds), and streams it to an afk server so you can watch a shareable
+# dashboard from your phone. Designed to be downloaded, read, and run: plain bash 3.2
+# (what macOS ships), curl, and stock macOS tools only. No jq, no python.
 #
 # Usage:
 #   afk start            start a session in the foreground (Ctrl-C to end it)
@@ -38,7 +38,14 @@ AFK_PROTOCOL_VERSION=1
 AFK_SERVER="${AFK_SERVER:-https://afk.osv.im}"
 AFK_HOME="${AFK_HOME:-$HOME/.afk}"
 
+# The sampler ticks once per SAMPLE_INTERVAL_SECONDS; each collector runs on every tick
+# or, for the slower ones, every N seconds (must be a multiple of the tick).
 SAMPLE_INTERVAL_SECONDS=1
+PROCESSES_INTERVAL_SECONDS=5
+# How many of the busiest processes a processes frame carries (PROCESSES_TOP_MAX in shared).
+PROCESSES_TOP_MAX=10
+# Full executable paths are cut to this many characters (PROCESS_COMMAND_MAX_LENGTH in shared).
+PROCESS_COMMAND_MAX_LENGTH=512
 SEND_INTERVAL_SECONDS=1
 SEND_MAX_BACKOFF_SECONDS=30
 SEND_MAX_FILES_PER_BATCH=200
@@ -86,7 +93,7 @@ check_platform() {
 # machine right now. The sampler wraps it in a frame envelope. Keep collectors free of
 # interpretation: raw numbers in, server decides what they mean.
 #
-# TODO(collectors): processes, agents (claude/codex), run. TODO(linux): /proc equivalents.
+# TODO(collectors): agents (claude/codex). TODO(linux): /proc equivalents.
 # TODO(plugins): allow any executable printing JSON to act as a collector.
 # ---------------------------------------------------------------------------
 
@@ -123,6 +130,28 @@ collect_system() {
       printf "\"inactiveBytes\":%d,\"wiredBytes\":%d,\"compressedBytes\":%d,", inactive * page, wired * page, compressed * page
       printf "\"swapUsedBytes\":%d,\"swapTotalBytes\":%d}}", swap_used_mb * 1048576, swap_total_mb * 1048576
     }'
+}
+
+# The busiest processes right now. One ps call, sorted by cpu descending (-r), captured
+# once: the first PROCESSES_TOP_MAX lines are the frame's `top`, the line count is how
+# many processes there were. rss is KiB on macOS and is converted to bytes. `comm` is
+# the full executable path and may contain spaces (.app bundles), so everything after
+# the fifth column is the command; a small awk function escapes it for JSON.
+collect_processes() {
+  local listing total
+  listing=$(ps -Aro pid=,ppid=,%cpu=,%mem=,rss=,comm=)
+  total=$(printf '%s\n' "$listing" | wc -l | tr -d ' ')
+  printf '%s\n' "$listing" | head -n "$PROCESSES_TOP_MAX" | awk -v total="$total" -v max_length="$PROCESS_COMMAND_MAX_LENGTH" '
+    function json_escape(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    BEGIN { printf "{\"sampledCount\":%d,\"top\":[", total }
+    {
+      # Everything after the five numeric columns, spaces intact.
+      match($0, /^ *[0-9]+ +[0-9]+ +[0-9.]+ +[0-9.]+ +[0-9]+ +/)
+      command = substr($0, RLENGTH + 1, max_length)
+      printf "%s{\"pid\":%d,\"parentPid\":%d,\"cpuPercent\":%s,\"memoryPercent\":%s,\"rssBytes\":%d,\"command\":\"%s\"}", \
+        (NR > 1 ? "," : ""), $1, $2, $3, $4, $5 * 1024, json_escape(command)
+    }
+    END { printf "]}" }'
 }
 
 # ---------------------------------------------------------------------------
@@ -270,16 +299,29 @@ end_session() {
 # ---------------------------------------------------------------------------
 
 SEQ_SYSTEM=0
+SEQ_PROCESSES=0
+# Counts sampler ticks (one per SAMPLE_INTERVAL_SECONDS) so slower collectors can run
+# every Nth tick; the first tick runs every collector so a session starts with each stream.
+SAMPLE_TICK=0
 
 emit_frame() { # stream collector data-json
   printf '{"stream":"%s","collector":"%s","sequence":%d,"timestamp":%d,"data":%s}\n' \
     "$1" "$2" "$3" "$(now_seconds)" "$4" >> "$SESSION_DIR/current.ndjson"
 }
 
+# True on the ticks a collector with this interval (in seconds) is due.
+due_every() { # interval-seconds
+  [ $(( (SAMPLE_TICK - 1) % ($1 / SAMPLE_INTERVAL_SECONDS) )) -eq 0 ]
+}
+
 sample_once() {
+  SAMPLE_TICK=$((SAMPLE_TICK + 1))
   SEQ_SYSTEM=$((SEQ_SYSTEM + 1))
   emit_frame system system "$SEQ_SYSTEM" "$(collect_system)"
-  # TODO(collectors): per-collector intervals; not everything needs 1 Hz.
+  if due_every "$PROCESSES_INTERVAL_SECONDS"; then
+    SEQ_PROCESSES=$((SEQ_PROCESSES + 1))
+    emit_frame processes processes "$SEQ_PROCESSES" "$(collect_processes)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
