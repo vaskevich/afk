@@ -46,6 +46,9 @@ function renderThemed() {
 }
 
 const appliedTheme = () => document.documentElement.dataset.theme;
+const summary = () => screen.getByRole("button", { name: /^Theme:/ });
+/** The choices are hidden from the accessibility tree until the control expands. */
+const option = (name: string) => screen.queryByRole("button", { name });
 
 describe("ThemeProvider", () => {
   beforeEach(() => {
@@ -59,14 +62,14 @@ describe("ThemeProvider", () => {
     delete (window as { matchMedia?: unknown }).matchMedia;
   });
 
-  it("follows the operating system by default", () => {
+  it("follows the operating system by default and says so", () => {
     stubMatchMedia(true);
 
     renderThemed();
 
     expect(screen.getByTestId("resolved").textContent).toBe("dark");
     expect(appliedTheme()).toBe("dark");
-    expect(screen.getByRole("button", { name: "Theme: system. Switch to dark" })).toBeDefined();
+    expect(summary().getAttribute("aria-label")).toBe("Theme: dark, following the system");
   });
 
   it("changes with the operating system while the page is open", () => {
@@ -80,15 +83,36 @@ describe("ThemeProvider", () => {
     expect(screen.getByTestId("resolved").textContent).toBe("dark");
   });
 
-  it("applies an explicit choice, persists it, and ignores the operating system", () => {
+  it("keeps the choices hidden until tapped, then applies, persists, and marks a choice", () => {
     stubMatchMedia(false);
     renderThemed();
+    expect(option("Force dark")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Theme: system. Switch to dark" }));
+    fireEvent.click(summary());
+    expect(summary().getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(option("Force dark")!);
 
     expect(appliedTheme()).toBe("dark");
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
-    expect(screen.getByRole("button", { name: "Theme: dark. Switch to light" })).toBeDefined();
+    expect(summary().getAttribute("aria-label")).toBe(
+      "Theme: dark, set here instead of following the system",
+    );
+    expect(summary().classList.contains("theme-menu-overriding")).toBe(true);
+    // Choosing closes what the tap opened; the next tap shows the choice as pressed.
+    expect(summary().getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(summary());
+    expect(option("Force dark")!.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("reveals the choices on keyboard focus and hides them when focus leaves", () => {
+    stubMatchMedia(true);
+    renderThemed();
+
+    act(() => summary().focus());
+    expect(option("Follow the system")).not.toBeNull();
+    act(() => summary().blur());
+
+    expect(option("Follow the system")).toBeNull();
   });
 
   it("starts from the stored choice", () => {
@@ -98,6 +122,7 @@ describe("ThemeProvider", () => {
     renderThemed();
 
     expect(appliedTheme()).toBe("light");
+    expect(summary().classList.contains("theme-menu-overriding")).toBe(true);
   });
 
   it("falls back to system when the stored value is junk", () => {
@@ -107,7 +132,7 @@ describe("ThemeProvider", () => {
     renderThemed();
 
     expect(appliedTheme()).toBe("dark");
-    expect(screen.getByRole("button", { name: "Theme: system. Switch to dark" })).toBeDefined();
+    expect(summary().getAttribute("aria-label")).toBe("Theme: dark, following the system");
   });
 
   it("still renders and switches when storage throws", () => {
@@ -120,8 +145,8 @@ describe("ThemeProvider", () => {
     });
 
     renderThemed();
-    fireEvent.click(screen.getByRole("button", { name: "Theme: system. Switch to dark" }));
-    fireEvent.click(screen.getByRole("button", { name: "Theme: dark. Switch to light" }));
+    fireEvent.click(summary());
+    fireEvent.click(option("Force light")!);
 
     expect(appliedTheme()).toBe("light");
   });

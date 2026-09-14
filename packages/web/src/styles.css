@@ -137,17 +137,75 @@ button:focus-visible {
 
 /* ---- theme toggle ---------------------------------------------------- */
 
-.theme-toggle {
+/*
+ * A one-glyph button at rest; the choices slide out to its left when it is hovered,
+ * focused, or tapped. They are absolutely positioned so nothing else moves.
+ */
+.theme-menu {
+  position: relative;
   margin-left: auto;
   align-self: center;
-  padding: 2px 8px;
+  display: inline-flex;
+}
+
+.theme-menu button {
+  padding: 2px 7px;
   font-family: var(--font-mono);
   font-size: 12px;
+  line-height: 1.45;
   color: var(--fg-muted);
   white-space: nowrap;
 }
-.theme-toggle:hover {
+.theme-menu button:hover {
   color: var(--fg);
+}
+
+.theme-menu-summary {
+  position: relative;
+  min-width: 30px;
+}
+.theme-menu-summary[aria-expanded="true"] {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  color: var(--fg);
+}
+/* The dot that says "chosen here, not following the operating system". */
+.theme-menu-overriding::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.theme-menu-options {
+  position: absolute;
+  top: 0;
+  right: 100%;
+  bottom: 0;
+  display: inline-flex;
+}
+.theme-menu-options[hidden] {
+  display: none;
+}
+.theme-menu-option {
+  border-radius: 0;
+  margin-right: -1px;
+}
+.theme-menu-option:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+.theme-menu-option[aria-pressed="true"] {
+  color: var(--fg);
+  background: var(--accent-soft);
+}
+.theme-menu-option:hover,
+.theme-menu-option:focus-visible {
+  position: relative;
+  z-index: 1;
 }
 
 @media (max-width: 520px) {
@@ -155,7 +213,7 @@ button:focus-visible {
   .session-header .wordmark {
     order: -2;
   }
-  .session-header .theme-toggle {
+  .session-header .theme-menu {
     order: -1;
   }
   .session-header h1 {
