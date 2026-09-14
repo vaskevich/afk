@@ -143,7 +143,27 @@ describe("loadConfig", () => {
       endpoint: "http://minio:9000",
       accessKeyId: "AKIATESTKEYID",
       secretAccessKey: "verySecretValue",
+      slabFlushSeconds: 60,
+      slabMaxFrames: 100,
     });
+  });
+
+  it("reads the slab bounds for s3 storage", () => {
+    const config = loadConfig(
+      { ...S3_ENV, AFK_S3_SLAB_FLUSH_SECONDS: "5", AFK_S3_SLAB_MAX_FRAMES: "250" },
+      PATHS,
+    );
+
+    expect(config.storage).toMatchObject({ slabFlushSeconds: 5, slabMaxFrames: 250 });
+  });
+
+  it("rejects a slab bound of zero, naming the variable", () => {
+    expect(() => loadConfig({ ...S3_ENV, AFK_S3_SLAB_MAX_FRAMES: "0" }, PATHS)).toThrow(
+      'AFK_S3_SLAB_MAX_FRAMES: expected a whole number >= 1, got "0"',
+    );
+    expect(() => loadConfig({ ...S3_ENV, AFK_S3_SLAB_FLUSH_SECONDS: "0" }, PATHS)).toThrow(
+      'AFK_S3_SLAB_FLUSH_SECONDS: expected a whole number >= 1, got "0"',
+    );
   });
 
   it("rejects a number that is not a whole number, naming the variable and the value", () => {
@@ -250,7 +270,9 @@ describe("describeConfig", () => {
   it("names the bucket and region for s3 storage but never the credentials", () => {
     const line = describeConfig(loadConfig(S3_ENV, PATHS));
 
-    expect(line).toContain("storage s3 (bucket test-bucket, region us-east-1)");
+    expect(line).toContain(
+      "storage s3 (bucket test-bucket, region us-east-1, slabs every 60s or 100 frames)",
+    );
     expect(line).not.toContain("verySecretValue");
     expect(line).not.toContain("AKIATESTKEYID");
   });

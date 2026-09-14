@@ -3,6 +3,8 @@ import { DiskSessionStorage } from "./disk-storage.ts";
 import { S3SessionStorage } from "./s3-storage.ts";
 import type { SessionStorage } from "./storage.ts";
 
+const MS_PER_SECOND = 1000;
+
 /**
  * Builds the `SessionStorage` backend the configuration asks for: `disk` (the default,
  * for local dev and self-hosting) or `s3` (Lightsail object storage, real S3, or MinIO,
@@ -20,5 +22,7 @@ export function createStorage(config: StorageConfig): SessionStorage {
     endpoint: config.endpoint,
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,
+    slabFlushIntervalMs: config.slabFlushSeconds * MS_PER_SECOND,
+    slabMaxFrames: config.slabMaxFrames,
   });
 }

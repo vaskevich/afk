@@ -25,6 +25,7 @@ import { parseSemver } from "./utils/semver.ts";
 import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS, type AdmissionLimits } from "./env.ts";
 import { DEFAULT_LOG_LEVEL, LOG_LEVELS, type LogLevel } from "./log/logger.ts";
 import { REPO_ROOT, repoPaths } from "./paths.ts";
+import { DEFAULT_SLAB_FLUSH_INTERVAL_MS, DEFAULT_SLAB_MAX_FRAMES } from "./store/s3-storage.ts";
 import { DEFAULT_STORE_OPTIONS, DEFAULT_TICK_INTERVAL_MS } from "./store/sessions.ts";
 import { DEFAULT_RETENTION_DAYS, DEFAULT_SWEEP_INTERVAL_MS } from "./store/sweeper.ts";
 
@@ -91,6 +92,8 @@ export const CONFIG_DEFAULTS = {
   evictEndedAfterSeconds: DEFAULT_STORE_OPTIONS.evictEndedAfterMs / MS_PER_SECOND,
   endAfterSilentSeconds: DEFAULT_STORE_OPTIONS.endAfterSilentMs / MS_PER_SECOND,
   sseKeepaliveSeconds: DEFAULT_SSE_KEEPALIVE_MS / MS_PER_SECOND,
+  s3SlabFlushSeconds: DEFAULT_SLAB_FLUSH_INTERVAL_MS / MS_PER_SECOND,
+  s3SlabMaxFrames: DEFAULT_SLAB_MAX_FRAMES,
 } as const;
 
 export const STORAGE_BACKENDS = ["disk", "s3"] as const;
@@ -107,6 +110,9 @@ export type StorageConfig =
       endpoint: string | undefined;
       accessKeyId: string;
       secretAccessKey: string;
+      /** Slab bounds: buffered frames are written when either is reached (see store/s3-storage.ts). */
+      slabFlushSeconds: number;
+      slabMaxFrames: number;
     };
 
 /** Everything the server can be told from the environment, validated and defaulted. */
@@ -227,6 +233,8 @@ const EnvSchema = z
     AFK_S3_ENDPOINT: optionalString,
     AFK_S3_ACCESS_KEY_ID: optionalString,
     AFK_S3_SECRET_ACCESS_KEY: optionalString,
+    AFK_S3_SLAB_FLUSH_SECONDS: integer(CONFIG_DEFAULTS.s3SlabFlushSeconds, 1),
+    AFK_S3_SLAB_MAX_FRAMES: integer(CONFIG_DEFAULTS.s3SlabMaxFrames, 1),
 
     AFK_MAX_ACTIVE_SESSIONS: integer(CONFIG_DEFAULTS.maxActiveSessions, 1),
     AFK_MAX_STREAMS_PER_SESSION: integer(CONFIG_DEFAULTS.maxStreamsPerSession, 1),
@@ -283,6 +291,8 @@ function storageConfig(env: ParsedEnv, defaultDataDir: string): StorageConfig {
     endpoint: env.AFK_S3_ENDPOINT,
     accessKeyId: env.AFK_S3_ACCESS_KEY_ID ?? "",
     secretAccessKey: env.AFK_S3_SECRET_ACCESS_KEY ?? "",
+    slabFlushSeconds: env.AFK_S3_SLAB_FLUSH_SECONDS,
+    slabMaxFrames: env.AFK_S3_SLAB_MAX_FRAMES,
   };
 }
 
@@ -340,7 +350,8 @@ function describeStorage(storage: StorageConfig): string {
   }
   // Credentials are never printed, not even partially.
   const endpoint = storage.endpoint === undefined ? "" : `, endpoint ${storage.endpoint}`;
-  return `storage s3 (bucket ${storage.bucket}, region ${storage.region}${endpoint})`;
+  const slabs = `slabs every ${storage.slabFlushSeconds}s or ${storage.slabMaxFrames} frames`;
+  return `storage s3 (bucket ${storage.bucket}, region ${storage.region}${endpoint}, ${slabs})`;
 }
 
 /** One line for the startup log with every effective setting and no secrets. */
