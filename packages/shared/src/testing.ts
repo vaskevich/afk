@@ -6,6 +6,8 @@
 import type {
   AnomalyEvent,
   HostInfo,
+  ProcessesCollectorData,
+  ProcessesFrame,
   RunCollectorData,
   RunFrame,
   SessionSummary,
@@ -15,7 +17,7 @@ import type {
 } from "./protocol.ts";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS, MemoryPressureLevel } from "./protocol.ts";
 
-type Frame = SystemFrame | RunFrame;
+type Frame = SystemFrame | RunFrame | ProcessesFrame;
 
 /** A fixed, readable origin for timestamps: 2026-01-01T00:00:00Z. */
 export const T0_SECONDS = 1_767_225_600;
@@ -102,6 +104,60 @@ export function makeRunFrame(
     sequence: sequence ?? atSeconds + 1,
     timestamp: T0_SECONDS + atSeconds,
     data: makeRunData({ elapsedSeconds: atSeconds, ...data }),
+  };
+}
+
+const MIB = 1024 ** 2;
+
+/** Three plausible busiest processes, cpu descending, as `ps -r` would list them. */
+export function makeProcessesData(
+  overrides: Partial<ProcessesCollectorData> = {},
+): ProcessesCollectorData {
+  return {
+    sampledCount: 412,
+    top: [
+      {
+        pid: 5821,
+        parentPid: 5800,
+        cpuPercent: 180,
+        memoryPercent: 2.1,
+        rssBytes: 350 * MIB,
+        command: "/opt/homebrew/bin/node",
+      },
+      {
+        pid: 60300,
+        parentPid: 13869,
+        cpuPercent: 45,
+        memoryPercent: 1.4,
+        rssBytes: 230 * MIB,
+        command:
+          "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper",
+      },
+      {
+        pid: 442,
+        parentPid: 1,
+        cpuPercent: 20,
+        memoryPercent: 0.6,
+        rssBytes: 96 * MIB,
+        command: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/** A processes frame `atSeconds` after T0. Sequence defaults to the offset plus one. */
+export function makeProcessesFrame(
+  atSeconds: number,
+  overrides: Partial<ProcessesCollectorData> & { sequence?: number } = {},
+): ProcessesFrame {
+  const { sequence, ...data } = overrides;
+  return {
+    stream: "processes",
+    collector: "processes",
+    sequence: sequence ?? atSeconds + 1,
+    timestamp: T0_SECONDS + atSeconds,
+    data: makeProcessesData(data),
   };
 }
 

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   makeEvent,
   makeHost,
+  makeProcessesData,
+  makeProcessesFrame,
   makeRunFrame,
   makeSessionSummary,
   makeStoredFrames,
@@ -10,9 +12,11 @@ import {
 import {
   AnomalyEvent,
   CreateSessionRequest,
+  EVENT_TOP_PROCESSES_MAX,
   Frame,
   FramesResponse,
   MemoryPressureLevel,
+  PROCESSES_TOP_MAX,
   PROTOCOL_VERSION,
   StoredFrame,
   StreamEventName,
@@ -35,6 +39,38 @@ describe("Frame", () => {
     const result = Frame.safeParse(makeRunFrame(0));
 
     expect(result.success).toBe(true);
+  });
+
+  it("accepts a valid processes frame", () => {
+    const result = Frame.safeParse(makeProcessesFrame(0));
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a processes frame with more than the maximum top entries", () => {
+    const [entry] = makeProcessesData().top;
+    const frame = makeProcessesFrame(0, {
+      top: Array.from({ length: PROCESSES_TOP_MAX + 1 }, () => ({ ...entry! })),
+    });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["data", "top"]);
+    }
+  });
+
+  it("rejects a process command longer than 512 characters", () => {
+    const [entry] = makeProcessesData().top;
+    const frame = makeProcessesFrame(0, { top: [{ ...entry!, command: "/x".repeat(257) }] });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["data", "top", 0, "command"]);
+    }
   });
 
   it("rejects an unknown collector", () => {
@@ -179,6 +215,39 @@ describe("AnomalyEvent", () => {
     const result = AnomalyEvent.safeParse(makeEvent({ endedAt: null }));
 
     expect(result.success).toBe(true);
+  });
+
+  it("accepts an event without details", () => {
+    const event: Record<string, unknown> = { ...makeEvent() };
+    delete event.details;
+
+    const result = AnomalyEvent.safeParse(event);
+
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts details naming up to three top processes", () => {
+    const topProcesses = makeProcessesData().top.map(({ pid, cpuPercent, command }) => ({
+      pid,
+      cpuPercent,
+      command,
+    }));
+
+    const result = AnomalyEvent.safeParse(makeEvent({ details: { topProcesses } }));
+
+    expect(result).toMatchObject({ success: true, data: { details: { topProcesses } } });
+  });
+
+  it("rejects details naming more than three top processes", () => {
+    const one = { pid: 1, cpuPercent: 1, command: "/bin/sh" };
+    const topProcesses = Array.from({ length: EVENT_TOP_PROCESSES_MAX + 1 }, () => one);
+
+    const result = AnomalyEvent.safeParse(makeEvent({ details: { topProcesses } }));
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["details", "topProcesses"]);
+    }
   });
 });
 

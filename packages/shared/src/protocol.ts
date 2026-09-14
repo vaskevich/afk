@@ -96,7 +96,33 @@ export const RunCollectorData = z.object({
 });
 export type RunCollectorData = z.infer<typeof RunCollectorData>;
 
-// TODO(collectors): processes (pid, parentPid, cpu, rss, fullPath), agents (claude/codex counts).
+/** How many processes a `processes` frame carries at most; the client sends the busiest ones. */
+export const PROCESSES_TOP_MAX = 10;
+/** Full executable paths can be long (nested .app bundles); anything past this is cut. */
+export const PROCESS_COMMAND_MAX_LENGTH = 512;
+
+/**
+ * Point-in-time list of the busiest processes, sampled every few seconds. `top` is
+ * ordered by cpu descending as `ps -r` lists them; `sampledCount` is how many
+ * processes there were in total. rss is bytes; `command` is the full executable path.
+ */
+export const ProcessEntry = z.object({
+  pid: z.number().int().nonnegative(),
+  parentPid: z.number().int().nonnegative(),
+  cpuPercent: z.number().min(0),
+  memoryPercent: z.number().min(0),
+  rssBytes: z.number().int().nonnegative(),
+  command: z.string().max(PROCESS_COMMAND_MAX_LENGTH),
+});
+export type ProcessEntry = z.infer<typeof ProcessEntry>;
+
+export const ProcessesCollectorData = z.object({
+  sampledCount: z.number().int().nonnegative(),
+  top: z.array(ProcessEntry).max(PROCESSES_TOP_MAX),
+});
+export type ProcessesCollectorData = z.infer<typeof ProcessesCollectorData>;
+
+// TODO(collectors): agents (claude/codex counts).
 
 // ---------------------------------------------------------------------------
 // Frames
@@ -128,8 +154,14 @@ export const RunFrame = FrameBase.extend({
 });
 export type RunFrame = z.infer<typeof RunFrame>;
 
+export const ProcessesFrame = FrameBase.extend({
+  collector: z.literal("processes"),
+  data: ProcessesCollectorData,
+});
+export type ProcessesFrame = z.infer<typeof ProcessesFrame>;
+
 /** Every frame the server accepts. Add new collectors to this union. */
-export const Frame = z.discriminatedUnion("collector", [SystemFrame, RunFrame]);
+export const Frame = z.discriminatedUnion("collector", [SystemFrame, RunFrame, ProcessesFrame]);
 export type Frame = z.infer<typeof Frame>;
 export type CollectorName = Frame["collector"];
 
@@ -234,6 +266,30 @@ export type StoredFrame = z.infer<typeof StoredFrame>;
 export const EventSeverity = z.enum(["info", "warning", "critical"]);
 export type EventSeverity = z.infer<typeof EventSeverity>;
 
+/** How many processes an event names at most; enough to say what was going on. */
+export const EVENT_TOP_PROCESSES_MAX = 3;
+
+/**
+ * Structured context a rule captured when the event opened, so the event itself can
+ * say what was going on at that moment (the dashboard and log render it; nothing is
+ * recomputed from it). A named object so future rules can add fields to it.
+ */
+export const AnomalyEventDetails = z.object({
+  /** The busiest processes at the time, from the `processes` stream, cpu descending. */
+  topProcesses: z
+    .array(
+      z.object({
+        pid: z.number().int().nonnegative(),
+        cpuPercent: z.number().min(0),
+        /** Full executable path, as the collector reported it. */
+        command: z.string().max(PROCESS_COMMAND_MAX_LENGTH),
+      }),
+    )
+    .max(EVENT_TOP_PROCESSES_MAX)
+    .optional(),
+});
+export type AnomalyEventDetails = z.infer<typeof AnomalyEventDetails>;
+
 /**
  * Something the server's rules decided is worth calling out. Events are derived from
  * frames on the server (never persisted, recomputed on load, so improved rules apply
@@ -252,6 +308,8 @@ export const AnomalyEvent = z.object({
   startedAt: z.number().int(),
   /** Null while the condition is still ongoing. */
   endedAt: z.number().int().nullable(),
+  /** Snapshot captured when the event opened; absent when the rule had nothing to add. */
+  details: AnomalyEventDetails.optional(),
 });
 export type AnomalyEvent = z.infer<typeof AnomalyEvent>;
 
