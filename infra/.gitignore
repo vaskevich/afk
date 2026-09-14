@@ -11,7 +11,7 @@ crash.*.log
 *.tfvars
 *.tfvars.json
 
-# Leftover deploy SSH key pair from the old instance-based design. No longer used
-# (the container service has no SSH access) but left in place and gitignored
-# rather than deleted -- see README.
+# Key material never belongs in the repo. The old instance-based design kept its
+# deploy SSH key pair here; that pair is deleted (the container service has no SSH
+# access), the rule stays as a guard.
 .ssh/
