@@ -3,6 +3,7 @@ import { createApp } from "./app.ts";
 import { ConfigError, describeConfig, loadConfig, type ServerConfig } from "./config.ts";
 import type { AppConfig } from "./env.ts";
 import { log } from "./log/logger.ts";
+import { handleSignals } from "./shutdown.ts";
 import { createStorage } from "./store/create-storage.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { MS_PER_DAY, startSweeper } from "./store/sweeper.ts";
@@ -32,8 +33,8 @@ const store = new SessionStore(storage, {
   maxSessionDurationSeconds: config.maxSessionDurationSeconds,
   evictEndedAfterMs: config.evictEndedAfterSeconds * MS_PER_SECOND,
 });
-store.startTicker(config.tickIntervalSeconds * MS_PER_SECOND);
-startSweeper({
+const stopTicker = store.startTicker(config.tickIntervalSeconds * MS_PER_SECOND);
+const stopSweeper = startSweeper({
   storage,
   store,
   retentionMs: config.retentionDays * MS_PER_DAY,
@@ -50,6 +51,7 @@ const appConfig: AppConfig = {
 };
 const app = createApp(appConfig, store);
 
-serve({ fetch: app.fetch, port: config.port }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   log.info(`afk server listening on http://localhost:${info.port} (${describeConfig(config)})`);
 });
+handleSignals({ server, store, stopTicker, stopSweeper });

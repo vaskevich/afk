@@ -288,6 +288,15 @@ export class SessionStore {
   }
 
   /**
+   * Resolves once every storage append queued so far, on every session in memory, has
+   * settled. Shutdown waits on this so an accepted batch is never left half-written.
+   */
+  async drainWrites(): Promise<void> {
+    const drains = [...this.sessions.values()].map((session) => session.writeQueue.drain());
+    await Promise.all(drains);
+  }
+
+  /**
    * Drops a session from the in-memory cache without touching storage. Used by the
    * retention sweeper after it has deleted the session's data, so a later `get` does
    * not serve a copy of something that no longer exists. Returns whether it was cached.

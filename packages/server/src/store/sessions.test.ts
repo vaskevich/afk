@@ -254,6 +254,50 @@ describe("SessionStore", () => {
     });
   });
 
+  describe("drainWrites", () => {
+    it("resolves only once every pending append on every session has settled", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const a = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const b = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const append = storage.appendFrames.bind(storage);
+      vi.spyOn(storage, "appendFrames").mockImplementation(async (sessionId, frames) => {
+        await gate;
+        await append(sessionId, frames);
+      });
+      const ingests = [
+        store.ingest(a, [makeSystemFrame(0)]),
+        store.ingest(b, [makeSystemFrame(0)]),
+      ];
+      let drained = false;
+
+      const drain = (async () => {
+        await store.drainWrites();
+        drained = true;
+      })();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(drained).toBe(false);
+      release();
+      await drain;
+      await Promise.all(ingests);
+
+      expect(drained).toBe(true);
+      await expect(storage.readFrames(a.sessionId)).resolves.toHaveLength(1);
+      await expect(storage.readFrames(b.sessionId)).resolves.toHaveLength(1);
+    });
+
+    it("resolves at once when nothing is pending", async () => {
+      const store = new SessionStore(new MemorySessionStorage());
+      await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      await expect(store.drainWrites()).resolves.toBeUndefined();
+    });
+  });
+
   describe("end", () => {
     it("sets endedAt, persists it, closes open events, and emits ended", async () => {
       vi.useFakeTimers();
