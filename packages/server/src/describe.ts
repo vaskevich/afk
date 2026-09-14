@@ -1,7 +1,13 @@
-import type { Frame } from "@afk/shared";
+import { MemoryPressureLevel, type Frame } from "@afk/shared";
 
 const GIB = 1024 ** 3;
 const gib = (bytes: number) => `${(bytes / GIB).toFixed(1)}G`;
+
+const MEMORY_PRESSURE_LABELS: Record<MemoryPressureLevel, string> = {
+  [MemoryPressureLevel.Normal]: "normal",
+  [MemoryPressureLevel.Warn]: "warn",
+  [MemoryPressureLevel.Critical]: "critical",
+};
 
 /**
  * One-line human summary of a frame for server logs. Interpretation such as the
@@ -12,7 +18,7 @@ export function describeFrame(frame: Frame): string {
     case "system": {
       const { cpu, loadAverage, memory } = frame.data;
       const pressure =
-        { 1: "normal", 2: "warn", 4: "critical" }[memory.pressureLevel] ??
+        MEMORY_PRESSURE_LABELS[memory.pressureLevel as MemoryPressureLevel] ??
         `level ${memory.pressureLevel}`;
       const used = memory.activeBytes + memory.wiredBytes + memory.compressedBytes;
       return (

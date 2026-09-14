@@ -21,10 +21,19 @@ export const DEFAULT_MAX_SESSION_DURATION_SECONDS = 60 * 60;
 // ---------------------------------------------------------------------------
 
 /**
+ * Raw values of macOS `sysctl kern.memorystatus_vm_pressure_level`. The client sends
+ * this number as-is; the server maps it to a label (see `describeFrame`).
+ */
+export enum MemoryPressureLevel {
+  Normal = 1,
+  Warn = 2,
+  Critical = 4,
+}
+
+/**
  * Point-in-time snapshot of whole-machine health. Sampled at ~1 Hz.
  * All memory values are bytes. Pressure level is the raw value of
- * `sysctl kern.memorystatus_vm_pressure_level` (1 = normal, 2 = warn, 4 = critical);
- * the server maps it to a label.
+ * `sysctl kern.memorystatus_vm_pressure_level`; the server maps it to a label.
  */
 export const SystemCollectorData = z.object({
   cpu: z.object({
@@ -37,6 +46,9 @@ export const SystemCollectorData = z.object({
     fifteenMinutes: z.number().min(0),
   }),
   memory: z.object({
+    // Not z.nativeEnum(MemoryPressureLevel): the client sends the raw sysctl value,
+    // and unknown/future levels must still be accepted and stored, not rejected.
+    // See MemoryPressureLevel above for the known values.
     pressureLevel: z.number().int(),
     totalBytes: z.number().int().nonnegative(),
     freeBytes: z.number().int().nonnegative(),
