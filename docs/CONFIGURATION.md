@@ -20,12 +20,12 @@ so the numbers below are the numbers the code uses.
 
 ## Server
 
-| Variable              | Default                   | Meaning                                                                    | Notes                                                                                                                                         |
-| --------------------- | ------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AFK_PORT`            | `4141`                    | TCP port to listen on.                                                     | 1–65535.                                                                                                                                      |
-| `AFK_PUBLIC_BASE_URL` | `http://localhost:<port>` | Public origin used to build the dashboard URLs the client prints.          | Production sets `https://afk.osv.im`. For UI work against the Vite dev server, set `http://localhost:5173` so printed URLs open there.        |
-| `AFK_WEB_DIST`        | `packages/web/dist`       | Absolute path to the built dashboard the server serves.                    | Resolved relative to `config.ts` when unset, which is why the Dockerfile keeps the same `packages/` layout.                                   |
-| `AFK_CLIENT_SCRIPT`   | `cli/afk`                 | Absolute path to the client script served at `/cli/afk` and by `/install`. | Resolved relative to `config.ts` when unset; the Dockerfile copies `cli/afk` to that layout. Both routes answer 404 when the file is missing. |
+| Variable              | Default                   | Meaning                                                                    | Notes                                                                                                                                                                 |
+| --------------------- | ------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AFK_PORT`            | `4141`                    | TCP port to listen on.                                                     | 1–65535.                                                                                                                                                              |
+| `AFK_PUBLIC_BASE_URL` | `http://localhost:<port>` | Public origin used to build the dashboard URLs the client prints.          | Production sets `https://afk.osv.im`. For UI work against the Vite dev server, set `http://localhost:5173` so printed URLs open there.                                |
+| `AFK_WEB_DIST`        | `packages/web/dist`       | Absolute path to the built dashboard the server serves.                    | Under the repo root `paths.ts` derives from its own location when unset (the same in dev and in the image), which is why the Dockerfile keeps the `packages/` layout. |
+| `AFK_CLIENT_SCRIPT`   | `cli/afk`                 | Absolute path to the client script served at `/cli/afk` and by `/install`. | Under the same repo root when unset; the Dockerfile copies `cli/afk` to that layout. Both routes answer 404 when the file is missing.                                 |
 
 ## Storage
 

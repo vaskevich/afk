@@ -39,10 +39,14 @@ Status: early prototype. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 
 ```bash
 pnpm install
-pnpm build                                          # builds the dashboard into packages/web/dist
-pnpm dev:server                                     # http://localhost:4141, serves the built dashboard
+pnpm build                                          # dashboard into packages/web/dist, server and shared into their dist/
+pnpm dev:server                                     # http://localhost:4141 under tsx watch, serves the built dashboard
 AFK_SERVER=http://localhost:4141 ./cli/afk start    # in another terminal; open the URL it prints
 ```
+
+`pnpm dev:server` runs the TypeScript source through `tsx`; the Docker image runs the
+compiled output instead (`pnpm --filter @afk/server start`, i.e.
+`node --conditions=afk-compiled dist/index.js`, is the same entrypoint locally).
 
 The dashboard follows an active session live over server-sent events and shows the
 whole trace once it ends. To iterate on the UI without rebuilding, run `pnpm dev:web`

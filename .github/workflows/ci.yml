@@ -76,8 +76,35 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # `pnpm build` compiles @afk/shared and @afk/server with tsc (a type error fails
+      # here as well as in the typecheck step) and builds the dashboard.
       - name: Build
         run: pnpm build
+
+      # The image's entrypoint, exercised on Linux: the same command as the
+      # Dockerfile's CMD, from the same layout (the repo root stands in for /app),
+      # with no tsx or TypeScript source involved. Catches a compiled server that
+      # cannot start, which the typecheck cannot -- a missing runtime dependency, a
+      # broken import rewrite, or the `afk-compiled` exports condition falling out
+      # of step with packages/shared/dist.
+      - name: Smoke-test the compiled server
+        run: |
+          AFK_STORAGE=disk AFK_DATA_DIR="$(mktemp -d)" AFK_PORT=4141 \
+            node --conditions=afk-compiled packages/server/dist/index.js &
+          server_pid=$!
+          for _ in $(seq 1 50); do
+            if health="$(curl -fsS http://localhost:4141/api/health 2>/dev/null)"; then
+              echo "GET /api/health: ${health}"
+              echo "GET /versionz:   $(curl -fsS http://localhost:4141/versionz)"
+              kill "${server_pid}"
+              wait "${server_pid}"
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "error: the compiled server did not answer /api/health within 10 s" >&2
+          kill "${server_pid}" || true
+          exit 1
 
   # The bash client's collectors and the end-to-end contract test only run on macOS
   # (every such test is `skipIf(platform !== "darwin")`), so on the Ubuntu job above a
