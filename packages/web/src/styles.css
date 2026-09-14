@@ -150,6 +150,19 @@ button:focus-visible {
   color: var(--fg);
 }
 
+@media (max-width: 520px) {
+  /* Keep the toggle in the corner next to the wordmark; the hostname takes its own line. */
+  .session-header .wordmark {
+    order: -2;
+  }
+  .session-header .theme-toggle {
+    order: -1;
+  }
+  .session-header h1 {
+    flex-basis: 100%;
+  }
+}
+
 .wordmark {
   font-family: var(--font-mono);
   font-weight: 600;
