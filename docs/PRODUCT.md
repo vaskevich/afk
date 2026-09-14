@@ -89,3 +89,20 @@
 - **Agents collector.** Parked in BACKLOG.md: undocumented tool internals, session names leaving the machine. Its payoff, "an agent has waited on you for 10 minutes", is a notification, so it follows item 6; `afk run -- claude` and the `processes` row cover the rest today.
 - **Accounts and a server-side session list.** The unguessable id (docs/PROTOCOL.md) is the whole auth model and keeps time-to-first-value at one command. Item 9 covers the second day locally.
 - **A client rewrite or Linux port.** docs/CLIENT.md names the triggers (a Linux port, a second contributor, a thousand lines, a quoting bug); none has fired at 550 lines. The contract test makes a later port safe.
+
+## Implemented
+
+- **2026-09-15, item 1 (install in one line).** `GET /install` on the server returns a
+  short POSIX `sh` installer with the server's own origin filled in; it downloads
+  `GET /cli/afk` from that origin, installs it to `~/.local/bin/afk` (`AFK_INSTALL_DIR`
+  overrides), and rewrites the client's default `AFK_SERVER` to the origin it came from,
+  so `curl -fsSL https://afk.osv.im/install | sh` and a self-hosted
+  `curl -fsSL http://afk.internal:4141/install | sh` both work with no env var. The
+  client's path is `AFK_CLIENT_SCRIPT` (docs/CONFIGURATION.md) and ships in the Docker
+  image. `LandingPage.tsx` now leads with the one-liner (copy button, built from
+  `window.location.origin`), `afk start` and `afk run`, a "what leaves your machine"
+  paragraph (the start of item 4), and the demo link; the service stats moved below.
+  New mark and favicon: "afk" in bold monospace, `#FFD60A` on `#000000`
+  (`packages/web/public/favicon.svg`, plus 32 px and 180 px PNGs). Still open from this
+  item: Linux in the installer (the client itself is macOS-only), and the client's
+  upgrade hint still points at GitHub rather than `<server>/install`.
