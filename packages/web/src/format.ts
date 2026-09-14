@@ -1,9 +1,19 @@
 import { MemoryPressureLevel } from "@afk/shared";
 
 const GIB = 1024 ** 3;
+const MIB = 1024 ** 2;
 
 export function formatGiB(bytes: number): string {
   return `${(bytes / GIB).toFixed(1)} GiB`;
+}
+
+export function formatMiB(bytes: number): string {
+  return `${(bytes / MIB).toFixed(0)} MiB`;
+}
+
+/** The last path segment of an executable path: "/opt/homebrew/bin/node" reads as "node". */
+export function commandBasename(command: string): string {
+  return command.slice(command.lastIndexOf("/") + 1);
 }
 
 export function formatPercent(n: number): string {

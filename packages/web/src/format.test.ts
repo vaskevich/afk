@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { MemoryPressureLevel } from "@afk/shared";
-import { formatDuration, formatGiB, formatOffset, formatPercent, pressureLabel } from "./format.ts";
+import {
+  commandBasename,
+  formatDuration,
+  formatGiB,
+  formatMiB,
+  formatOffset,
+  formatPercent,
+  pressureLabel,
+} from "./format.ts";
 
 const GIB = 1024 ** 3;
 
@@ -76,5 +84,27 @@ describe("pressureLabel", () => {
 
   it("labels an unrecognized level as unknown", () => {
     expect(pressureLabel(99)).toBe("unknown");
+  });
+});
+
+describe("formatMiB", () => {
+  it("rounds to whole mebibytes", () => {
+    expect(formatMiB(350 * 1024 * 1024 + 300_000)).toBe("350 MiB");
+  });
+});
+
+describe("commandBasename", () => {
+  it("returns the last path segment of an absolute path", () => {
+    expect(commandBasename("/opt/homebrew/bin/node")).toBe("node");
+  });
+
+  it("keeps spaces inside the last segment", () => {
+    expect(
+      commandBasename("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper"),
+    ).toBe("Google Chrome Helper");
+  });
+
+  it("returns a bare name unchanged", () => {
+    expect(commandBasename("node")).toBe("node");
   });
 });

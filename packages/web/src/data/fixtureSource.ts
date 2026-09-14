@@ -1,5 +1,12 @@
-import { MemoryPressureLevel } from "@afk/shared";
-import type { AnomalyEvent, FramesResponse, StoredFrame, SessionSummary } from "@afk/shared";
+import { EVENT_TOP_PROCESSES_MAX, MemoryPressureLevel, PROCESSES_TOP_MAX } from "@afk/shared";
+import type {
+  AnomalyEvent,
+  AnomalyEventDetails,
+  FramesResponse,
+  ProcessEntry,
+  StoredFrame,
+  SessionSummary,
+} from "@afk/shared";
 import type { SessionSource } from "./source.ts";
 
 /**
@@ -8,7 +15,9 @@ import type { SessionSource } from "./source.ts";
  * then a three minute cpu burn during which memory pressure goes to Warn and swap
  * starts creeping up. Earlier there is a short burst of pressure flaps (to exercise
  * marker clustering) and later a 90 s stretch with no frames at all (a stale client).
- * The anomaly events below are what the server's rules would derive from these frames.
+ * A second stream, `processes`, samples the busiest processes every 5 s and shows a
+ * `cpu-burn` node process dominating during the burn. The anomaly events below are
+ * what the server's rules would derive from these frames.
  */
 
 const DURATION_SECONDS = 15 * 60;
@@ -29,7 +38,105 @@ const PRESSURE_FLAPS: ReadonlyArray<readonly [number, number]> = [
 const STALE_START = 11 * 60;
 const STALE_END = STALE_START + 90;
 const STREAM = "system";
+const PROCESSES_STREAM = "processes";
+/** The client samples processes every 5 s (PROCESSES_INTERVAL_SECONDS in cli/afk). */
+const PROCESSES_INTERVAL_SECONDS = 5;
 const GIB = 1024 ** 3;
+const MIB = 1024 ** 2;
+
+/** The workload behind the burn: `scenarios/cpu-burn`, one worker thread per core. */
+const BURN_PROCESS = {
+  pid: 51234,
+  parentPid: 51200,
+  command: "/opt/homebrew/bin/node",
+};
+
+/** What the machine is usually doing; cpu wobbles around these, memory is steady. */
+const BACKGROUND_PROCESSES: readonly ProcessEntry[] = [
+  {
+    pid: 442,
+    parentPid: 1,
+    cpuPercent: 12,
+    memoryPercent: 0.5,
+    rssBytes: 96 * MIB,
+    command: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+  },
+  {
+    pid: 60300,
+    parentPid: 13869,
+    cpuPercent: 9,
+    memoryPercent: 1.4,
+    rssBytes: 320 * MIB,
+    command:
+      "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)",
+  },
+  {
+    pid: 38445,
+    parentPid: 38440,
+    cpuPercent: 6,
+    memoryPercent: 0.3,
+    rssBytes: 54 * MIB,
+    command:
+      "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper",
+  },
+  {
+    pid: 0,
+    parentPid: 0,
+    cpuPercent: 4,
+    memoryPercent: 0.1,
+    rssBytes: 20 * MIB,
+    command: "kernel_task",
+  },
+  {
+    pid: 13869,
+    parentPid: 1,
+    cpuPercent: 3,
+    memoryPercent: 0.9,
+    rssBytes: 290 * MIB,
+    command: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  },
+  {
+    pid: 95541,
+    parentPid: 1,
+    cpuPercent: 2,
+    memoryPercent: 0.1,
+    rssBytes: 18 * MIB,
+    command:
+      "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
+  },
+  {
+    pid: 812,
+    parentPid: 1,
+    cpuPercent: 1.5,
+    memoryPercent: 0.2,
+    rssBytes: 48 * MIB,
+    command: "/usr/libexec/coreduetd",
+  },
+  {
+    pid: 2210,
+    parentPid: 1,
+    cpuPercent: 1,
+    memoryPercent: 0.4,
+    rssBytes: 120 * MIB,
+    command: "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+  },
+  {
+    pid: 3320,
+    parentPid: 2210,
+    cpuPercent: 0.5,
+    memoryPercent: 0.1,
+    rssBytes: 22 * MIB,
+    command: "/opt/homebrew/bin/fish",
+  },
+  {
+    pid: 1,
+    parentPid: 0,
+    cpuPercent: 0.2,
+    memoryPercent: 0.1,
+    rssBytes: 14 * MIB,
+    command: "/sbin/launchd",
+  },
+];
 
 /** mulberry32: tiny seeded PRNG so the fixture is identical on every load. */
 function prng(seed: number) {
@@ -55,8 +162,55 @@ function isFlapping(second: number): boolean {
   return PRESSURE_FLAPS.some(([start, end]) => second >= start && second < end);
 }
 
-/** Events in the shape the server will produce: id is `<stream>:<kind>:<startedAt>`. */
-function demoEvents(startedAt: number): AnomalyEvent[] {
+/**
+ * The busiest processes at second `i`: the background set with a little wobble, plus
+ * the burn process while the burn is on. cpu descending, capped like the client does.
+ */
+function processesAt(
+  i: number,
+  machineCpuPercent: number,
+  cpuCount: number,
+  rand: () => number,
+): ProcessEntry[] {
+  const entries: ProcessEntry[] = BACKGROUND_PROCESSES.map((p) => ({
+    ...p,
+    cpuPercent: Math.round(p.cpuPercent * (0.6 + rand() * 0.8) * 10) / 10,
+  }));
+  if (i >= BURN_START && i < BURN_END) {
+    // The burn takes the whole machine: its %cpu is close to cores x 100.
+    const burnCpu = Math.round(machineCpuPercent * cpuCount * (0.94 + rand() * 0.04) * 10) / 10;
+    entries.push({
+      ...BURN_PROCESS,
+      cpuPercent: burnCpu,
+      memoryPercent: 0.8,
+      rssBytes: 260 * MIB,
+    });
+  }
+  entries.sort((a, b) => b.cpuPercent - a.cpuPercent);
+  return entries.slice(0, PROCESSES_TOP_MAX);
+}
+
+/** What the server's cpu.high rule snapshots into `details` when it opens: the busiest three. */
+function topProcessesDetails(top: readonly ProcessEntry[]): AnomalyEventDetails {
+  return {
+    topProcesses: top
+      .slice(0, EVENT_TOP_PROCESSES_MAX)
+      .map(({ pid, cpuPercent, command }) => ({ pid, cpuPercent, command })),
+  };
+}
+
+function commandBasename(command: string): string {
+  return command.slice(command.lastIndexOf("/") + 1);
+}
+
+/**
+ * Events in the shape the server will produce: id is `<stream>:<kind>:<startedAt>`.
+ * `processesWhenCpuHighOpened` is the processes frame the rule would have consulted.
+ */
+function demoEvents(
+  startedAt: number,
+  processesWhenCpuHighOpened: readonly ProcessEntry[],
+): AnomalyEvent[] {
   const at = (seconds: number) => startedAt + seconds * 1000;
   const event = (
     kind: string,
@@ -64,6 +218,7 @@ function demoEvents(startedAt: number): AnomalyEvent[] {
     startSeconds: number,
     endSeconds: number,
     message: string,
+    details?: AnomalyEventDetails,
   ): AnomalyEvent => ({
     id: `${STREAM}:${kind}:${at(startSeconds)}`,
     stream: STREAM,
@@ -72,12 +227,17 @@ function demoEvents(startedAt: number): AnomalyEvent[] {
     message,
     startedAt: at(startSeconds),
     endedAt: at(endSeconds),
+    ...(details === undefined ? {} : { details }),
   });
 
   const flaps = PRESSURE_FLAPS.map(([start, end]) =>
     event("memory.pressure", "warning", start, end, `memory pressure at warn for ${end - start}s`),
   );
   const cpuHighStart = BURN_START + CPU_HIGH_DELAY_SECONDS;
+  const details = topProcessesDetails(processesWhenCpuHighOpened);
+  const topSummary = (details.topProcesses ?? [])
+    .map((p) => `${commandBasename(p.command)} ${p.cpuPercent.toFixed(0)}%`)
+    .join(", ");
   const events = [
     ...flaps,
     event(
@@ -85,7 +245,8 @@ function demoEvents(startedAt: number): AnomalyEvent[] {
       "warning",
       cpuHighStart,
       BURN_END,
-      `cpu above 90% for ${describeSeconds(BURN_END - cpuHighStart)} (peak 97%)`,
+      `cpu above 90% for ${describeSeconds(BURN_END - cpuHighStart)}, peak 97% (top: ${topSummary})`,
+      details,
     ),
     event(
       "memory.pressure",
@@ -129,11 +290,17 @@ export function generateDemoSession(sessionId: string): FramesResponse {
     startedAt,
     endedAt: startedAt + DURATION_SECONDS * 1000,
     maxDurationSeconds: 60 * 60,
-    streamCount: 1,
+    streamCount: 2,
     maxStreams: 10,
   };
 
   const frames: StoredFrame[] = [];
+  // Separate generator for the processes stream so it does not disturb the cpu series.
+  const processRand = prng(0xbadcafe);
+  let systemSequence = 0;
+  let processesSequence = 0;
+  /** The busiest processes as of the last processes sample at or before cpu.high opened. */
+  let processesWhenCpuHighOpened: ProcessEntry[] = [];
   // Low-pass filtered noise so the cpu line wobbles instead of looking like static.
   let cpuNoise = 0;
   let load1 = 1.8;
@@ -178,14 +345,14 @@ export function generateDemoSession(sessionId: string): FramesResponse {
     }
 
     const timestamp = startSeconds + i;
-    const sequence = frames.length + 1;
+    systemSequence += 1;
     frames.push({
-      index: sequence,
+      index: frames.length + 1,
       receivedAt: timestamp * 1000 + 40 + Math.round(rand() * 120),
       frame: {
         stream: STREAM,
         collector: "system",
-        sequence,
+        sequence: systemSequence,
         timestamp,
         data: {
           cpu: { percent: Math.round(cpuPercent * 10) / 10 },
@@ -208,9 +375,31 @@ export function generateDemoSession(sessionId: string): FramesResponse {
         },
       },
     });
+
+    if (i % PROCESSES_INTERVAL_SECONDS === 0) {
+      const top = processesAt(i, cpuPercent, session.host.cpuCount, processRand);
+      if (i <= BURN_START + CPU_HIGH_DELAY_SECONDS) {
+        processesWhenCpuHighOpened = top;
+      }
+      processesSequence += 1;
+      frames.push({
+        index: frames.length + 1,
+        receivedAt: timestamp * 1000 + 60 + Math.round(processRand() * 120),
+        frame: {
+          stream: PROCESSES_STREAM,
+          collector: "processes",
+          sequence: processesSequence,
+          timestamp,
+          data: {
+            sampledCount: 400 + Math.round(processRand() * 30),
+            top,
+          },
+        },
+      });
+    }
   }
 
-  return { session, frames, events: demoEvents(startedAt) };
+  return { session, frames, events: demoEvents(startedAt, processesWhenCpuHighOpened) };
 }
 
 export const fixtureSource: SessionSource = {

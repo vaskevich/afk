@@ -1,6 +1,7 @@
 import type { AnomalyEvent } from "@afk/shared";
 import { eventEndMs } from "../events.ts";
 import { formatDuration, formatOffset } from "../format.ts";
+import { TopProcesses } from "./TopProcesses.tsx";
 
 interface Props {
   /** Every event of the session, sorted by start. */
@@ -27,7 +28,12 @@ function EventList({ events, t0, onSelectEvent }: Pick<Props, "events" | "t0" | 
             <span className={`dot dot-${event.severity}`} />
             <span className="event-row-stream">{event.stream}</span>
             <span className="event-row-kind">{event.kind}</span>
-            <span className="event-row-message">{event.message}</span>
+            <span className="event-row-message">
+              {event.message}
+              {event.details?.topProcesses && (
+                <TopProcesses processes={event.details.topProcesses} />
+              )}
+            </span>
             <span className="event-row-when">
               +{formatOffset((event.startedAt - t0) / 1000)}
               <small>

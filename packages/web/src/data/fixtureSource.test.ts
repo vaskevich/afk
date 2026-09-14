@@ -40,4 +40,36 @@ describe("generateDemoSession", () => {
     // far edge of the gap between samples.
     expect(maxGapSeconds).toBe(91);
   });
+
+  it("samples the processes stream every 5 s, skipping the stale stretch", () => {
+    const data = generateDemoSession("demo");
+    const startSeconds = data.session.startedAt / 1000;
+
+    const processes = data.frames.filter((f) => f.frame.stream === "processes");
+
+    // 15 minutes at one sample per 5 s is 180 samples, minus the 18 that fall in the
+    // 90 s stale stretch.
+    expect(processes).toHaveLength(180 - 18);
+    expect(processes.every((f) => (f.frame.timestamp - startSeconds) % 5 === 0)).toBe(true);
+    expect(processes.map((f) => f.frame.sequence)).toEqual(processes.map((_, i) => i + 1));
+  });
+
+  it("gives the cpu.high event details matching the processes sample at its start", () => {
+    const data = generateDemoSession("demo");
+    const cpuHigh = data.events.find((event) => event.kind === "cpu.high")!;
+
+    const atOpen = data.frames.find(
+      (f) => f.frame.stream === "processes" && f.frame.timestamp * 1000 === cpuHigh.startedAt,
+    )!;
+
+    expect(atOpen.frame.collector).toBe("processes");
+    if (atOpen.frame.collector === "processes") {
+      const expected = atOpen.frame.data.top
+        .slice(0, 3)
+        .map(({ pid, cpuPercent, command }) => ({ pid, cpuPercent, command }));
+      expect(cpuHigh.details).toEqual({ topProcesses: expected });
+      expect(expected[0]!.command).toBe("/opt/homebrew/bin/node");
+      expect(cpuHigh.message).toContain("(top: node ");
+    }
+  });
 });

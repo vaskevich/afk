@@ -1,5 +1,6 @@
 import type { AnomalyEvent, SessionStatus } from "@afk/shared";
 import { isOpenEvent, pluralize, worstSeverity } from "../events.ts";
+import { TopProcesses } from "./TopProcesses.tsx";
 
 interface Props {
   status: SessionStatus;
@@ -55,7 +56,12 @@ export function StatusBanner({ status, events, onSelectEvent }: Props) {
               title={`${event.stream} ${event.kind}: jump to this anomaly`}
             >
               <span className={`dot dot-${event.severity}`} />
-              {event.message}
+              <span className="banner-event-text">
+                {event.message}
+                {event.details?.topProcesses && (
+                  <TopProcesses processes={event.details.topProcesses} />
+                )}
+              </span>
             </button>
           </li>
         ))}

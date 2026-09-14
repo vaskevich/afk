@@ -304,6 +304,30 @@ button:focus-visible {
   width: 7px;
   height: 7px;
 }
+.banner-event-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+/* The processes an event named when it opened, under its message. */
+.event-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.event-top .mono {
+  color: var(--fg);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
 
 /* ---- timeline -------------------------------------------------------- */
 
@@ -664,6 +688,46 @@ button:focus-visible {
   margin: 0;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* processes details: one row per busy process. */
+.proc-summary {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+
+.proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.proc-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--fg-faint);
+  padding: 0 8px 3px 0;
+}
+.proc-table td {
+  padding: 1px 8px 1px 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.proc-table th.num,
+.proc-table td.num {
+  text-align: right;
+}
+.proc-table td.cmd {
+  /* Takes whatever width the numeric columns leave and truncates long names. */
+  width: 100%;
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.proc-table th:last-child,
+.proc-table td:last-child {
+  padding-right: 0;
 }
 
 .level-normal {
