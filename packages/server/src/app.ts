@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { AppConfig, AppDeps } from "./env.ts";
 import type { SessionStore } from "./store/sessions.ts";
 import { healthRoutes } from "./routes/health.ts";
+import { statsRoutes } from "./routes/stats.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
@@ -25,6 +26,7 @@ export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
   return new Hono()
     .route("/api/health", healthRoutes)
+    .route("/api/stats", statsRoutes(deps))
     .route("/api/sessions", sessionRoutes(deps))
     .route("/api/sessions", frameRoutes(deps))
     .route("/api/sessions", streamRoutes(deps))

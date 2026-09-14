@@ -7,6 +7,7 @@ import type {
   StoredFrame,
 } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
+import { DEFAULT_LIMITS, type AdmissionLimits } from "../env.ts";
 import { RuleEngine } from "../rules/engine.ts";
 import { randomId, randomToken } from "../utils/ids.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
@@ -32,11 +33,26 @@ export interface Session extends SessionRecord {
   writeQueue: SerialQueue;
   /** Anomaly rules and the events they have produced. Derived from frames, never persisted. */
   engine: RuleEngine;
+  /** Last read or write, server clock; idle ended sessions are evicted from memory. */
+  lastAccessAt: number;
 }
+
+/** How long an ended session with no viewers stays in memory before being evicted. */
+export const EVICT_ENDED_AFTER_MS = 10 * 60 * 1000;
 
 export interface IngestResult {
   accepted: StoredFrame[];
   duplicates: number;
+}
+
+/** Thrown by `ingest` when a batch would add an eleventh (etc.) stream to a session. */
+export class TooManyStreamsError extends Error {
+  constructor(
+    readonly stream: string,
+    readonly limit: number,
+  ) {
+    super(`stream "${stream}" would exceed the limit of ${limit} streams per session`);
+  }
 }
 
 /**
@@ -49,7 +65,40 @@ export class SessionStore {
   private readonly sessions = new Map<string, Session>();
   private readonly loading = new Map<string, Promise<Session | undefined>>();
 
-  constructor(private readonly storage: SessionStorage) {}
+  constructor(
+    private readonly storage: SessionStorage,
+    private readonly limits: AdmissionLimits = DEFAULT_LIMITS,
+  ) {}
+
+  /** Sessions that are still accepting frames. */
+  activeSessionCount(now = Date.now()): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (this.status(session, now) === "active") {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** True when another session may be created. */
+  hasCapacity(now = Date.now()): boolean {
+    return this.activeSessionCount(now) < this.limits.maxActiveSessions;
+  }
+
+  stats(now = Date.now()) {
+    let framesInMemory = 0;
+    for (const session of this.sessions.values()) {
+      framesInMemory += session.frames.length;
+    }
+    return {
+      activeSessions: this.activeSessionCount(now),
+      maxActiveSessions: this.limits.maxActiveSessions,
+      maxStreamsPerSession: this.limits.maxStreamsPerSession,
+      sessionsInMemory: this.sessions.size,
+      framesInMemory,
+    };
+  }
 
   async create(input: { host: HostInfo; clientVersion: string }): Promise<Session> {
     const record: SessionRecord = {
@@ -70,6 +119,7 @@ export class SessionStore {
   async get(sessionId: string): Promise<Session | undefined> {
     const cached = this.sessions.get(sessionId);
     if (cached) {
+      cached.lastAccessAt = Date.now();
       return cached;
     }
     // Coalesce concurrent loads of the same session so it is only read once.
@@ -118,6 +168,7 @@ export class SessionStore {
       listeners: new Set(),
       writeQueue: new SerialQueue(),
       engine,
+      lastAccessAt: Date.now(),
     };
     if (this.status(session) !== "active") {
       engine.closeAll(this.sessionEndMs(session));
@@ -155,6 +206,8 @@ export class SessionStore {
       startedAt: session.startedAt,
       endedAt: session.endedAt,
       maxDurationSeconds: session.maxDurationSeconds,
+      streamCount: session.latestSequence.size,
+      maxStreams: this.limits.maxStreamsPerSession,
     };
   }
 
@@ -184,15 +237,22 @@ export class SessionStore {
    * in memory. Returns a function that stops the ticker.
    */
   startTicker(intervalMs: number): () => void {
-    const timer = setInterval(() => {
-      const now = Date.now();
-      for (const session of this.sessions.values()) {
-        if (this.status(session, now) === "active") {
-          this.emitEvents(session, session.engine.onTick(now));
-        }
-      }
-    }, intervalMs);
+    const timer = setInterval(() => this.tick(Date.now()), intervalMs);
     return () => clearInterval(timer);
+  }
+
+  /** One pass of the periodic work: time-based rules for live sessions, eviction for idle ended ones. */
+  tick(now: number): void {
+    for (const [sessionId, session] of this.sessions) {
+      if (this.status(session, now) === "active") {
+        this.emitEvents(session, session.engine.onTick(now));
+      } else if (
+        session.listeners.size === 0 &&
+        now - session.lastAccessAt > EVICT_ENDED_AFTER_MS
+      ) {
+        this.sessions.delete(sessionId);
+      }
+    }
   }
 
   private emitEvents(session: Session, events: AnomalyEvent[]): void {
@@ -224,6 +284,7 @@ export class SessionStore {
    */
   async ingest(session: Session, frames: Frame[]): Promise<IngestResult> {
     const receivedAt = Date.now();
+    session.lastAccessAt = receivedAt;
     const accepted: StoredFrame[] = [];
     const nextSequence = new Map(session.latestSequence);
     let duplicates = 0;
@@ -233,6 +294,12 @@ export class SessionStore {
       if (frame.sequence <= latest) {
         duplicates++;
         continue;
+      }
+      if (
+        !nextSequence.has(frame.stream) &&
+        nextSequence.size >= this.limits.maxStreamsPerSession
+      ) {
+        throw new TooManyStreamsError(frame.stream, this.limits.maxStreamsPerSession);
       }
       nextSequence.set(frame.stream, frame.sequence);
       accepted.push({ index: nextIndex++, receivedAt, frame });

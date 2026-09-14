@@ -185,8 +185,24 @@ export const SessionSummary = z.object({
   startedAt: z.number().int(),
   endedAt: z.number().int().nullable(),
   maxDurationSeconds: z.number().int().positive(),
+  /** Distinct streams seen so far, and the server's cap. A client checks this before joining. */
+  streamCount: z.number().int().nonnegative(),
+  maxStreams: z.number().int().positive(),
 });
 export type SessionSummary = z.infer<typeof SessionSummary>;
+
+/** GET /api/stats: whole-service numbers for the landing page and for operators. */
+export const ServiceStats = z.object({
+  activeSessions: z.number().int().nonnegative(),
+  maxActiveSessions: z.number().int().positive(),
+  maxStreamsPerSession: z.number().int().positive(),
+  /** Sessions currently held in memory, active or recently viewed. */
+  sessionsInMemory: z.number().int().nonnegative(),
+  framesInMemory: z.number().int().nonnegative(),
+  uptimeSeconds: z.number().int().nonnegative(),
+  serverVersion: z.string(),
+});
+export type ServiceStats = z.infer<typeof ServiceStats>;
 
 export const ErrorResponse = z.object({
   error: z.string(),

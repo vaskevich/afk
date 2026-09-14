@@ -1,13 +1,23 @@
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { Frame, SystemCollectorData } from "@afk/shared";
+
+/** True when the path exists; the tests use it to assert a file was deleted or moved. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Drives cli/afk through bash rather than reimplementing it: the script is sourced
@@ -255,10 +265,7 @@ describe("rotate_current", () => {
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
     const remaining = await readFile(join(sessionDir, "current.ndjson"), "utf8");
     expect(remaining).toBe("");
-    const queued = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8").catch(
-      () => null,
-    );
-    expect(queued).toBeNull();
+    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
   });
 
   it("does nothing when current.ndjson is missing", async () => {
@@ -270,10 +277,7 @@ describe("rotate_current", () => {
     });
 
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
-    const queued = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8").catch(
-      () => null,
-    );
-    expect(queued).toBeNull();
+    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
   });
 });
 
@@ -323,10 +327,7 @@ describe("send_oldest_batch", () => {
       AFK_SERVER: server.url,
     });
 
-    const remaining = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8").catch(
-      () => null,
-    );
-    expect(remaining).toBeNull();
+    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
   });
 
   it("keeps the queued files and returns 1 on a 500 response", async () => {
@@ -375,10 +376,7 @@ describe("send_oldest_batch", () => {
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
     const rejected = await readFile(join(sessionDir, "rejected", "0000000001.ndjson"), "utf8");
     expect(rejected).toBe("AAA\n");
-    const remaining = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8").catch(
-      () => null,
-    );
-    expect(remaining).toBeNull();
+    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
   });
 });
 
@@ -479,8 +477,7 @@ describe("load_current_session", () => {
     });
 
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "1" });
-    const removed = await readFile(join(afkHome, "current"), "utf8").catch(() => null);
-    expect(removed).toBeNull();
+    expect(await exists(join(afkHome, "current"))).toBe(false);
   });
 
   it("fails when there is no current session file", async () => {

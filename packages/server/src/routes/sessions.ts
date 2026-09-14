@@ -15,12 +15,25 @@ async function readJsonBody(c: Context<AppEnv>): Promise<unknown> {
   }
 }
 
+/** What a client is told to wait before retrying a create that hit the session cap. */
+const CAPACITY_RETRY_AFTER_SECONDS = 60;
+
 /** Session lifecycle: create, inspect, end. Mounted at /api/sessions. */
 export function sessionRoutes(deps: AppDeps) {
   const { store, config } = deps;
 
   return new Hono<AppEnv>()
     .post("/", async (c) => {
+      if (!store.hasCapacity()) {
+        // TODO(hardening): also rate limit creation per client address.
+        c.header("Retry-After", String(CAPACITY_RETRY_AFTER_SECONDS));
+        return errorResponse(
+          c,
+          503,
+          `server is at capacity (${config.limits.maxActiveSessions} active sessions); try again later`,
+        );
+      }
+
       const parsed = CreateSessionRequest.safeParse(await readJsonBody(c));
       if (!parsed.success) {
         return errorResponse(c, 400, "invalid session request", parsed.error.flatten());

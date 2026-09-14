@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { makeEvent, makeHost, makeRunFrame, makeStoredFrames, makeSystemFrame } from "./testing.ts";
+import {
+  makeEvent,
+  makeHost,
+  makeRunFrame,
+  makeSessionSummary,
+  makeStoredFrames,
+  makeSystemFrame,
+} from "./testing.ts";
 import {
   AnomalyEvent,
   CreateSessionRequest,
@@ -144,15 +151,7 @@ describe("StoredFrame", () => {
 describe("FramesResponse", () => {
   it("round-trips a value built from the builders", () => {
     const response = {
-      session: {
-        sessionId: "sessionAAAAAAAAAAAAAAA",
-        status: "active" as const,
-        host: makeHost(),
-        clientVersion: "0.1.0",
-        startedAt: 0,
-        endedAt: null,
-        maxDurationSeconds: 3600,
-      },
+      session: makeSessionSummary({ startedAt: 0 }),
       frames: makeStoredFrames([makeSystemFrame(0), makeRunFrame(0)]),
       events: [makeEvent()],
     };

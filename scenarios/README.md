@@ -10,8 +10,11 @@ AFK_SERVER=http://localhost:4141 ./cli/afk start   # in one terminal
 scenarios/cpu-burn                                 # in another
 ```
 
-Once `afk run -- <cmd>` lands, wrap them instead so stdout/stderr rates and the exit
-code are reported alongside machine health:
+Wrap them with `afk run -- <cmd>` so stdout/stderr volume and the exit code are
+reported alongside machine health. This is the primary way to use `migration-hang`:
+it is the wrapper scenario, producing `run.stalled` when it goes quiet and a critical
+`run.exited` with `--crash`, while `cpu-burn` produces `cpu.high` and an info
+`run.exited` on its clean exit.
 
 ```bash
 afk run -- scenarios/cpu-burn

@@ -129,6 +129,8 @@ export function generateDemoSession(sessionId: string): FramesResponse {
     startedAt,
     endedAt: startedAt + DURATION_SECONDS * 1000,
     maxDurationSeconds: 60 * 60,
+    streamCount: 1,
+    maxStreams: 10,
   };
 
   const frames: StoredFrame[] = [];

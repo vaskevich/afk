@@ -2,7 +2,8 @@ import { serve } from "@hono/node-server";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApp } from "./app.ts";
-import { DiskSessionStorage } from "./store/disk-storage.ts";
+import { DEFAULT_LIMITS } from "./env.ts";
+import { createStorageFromEnv } from "./store/create-storage.ts";
 import { SessionStore } from "./store/sessions.ts";
 
 const port = Number(process.env.AFK_PORT ?? 4141);
@@ -11,19 +12,28 @@ const publicBaseUrl = process.env.AFK_PUBLIC_BASE_URL ?? `http://localhost:${por
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webDistDir = process.env.AFK_WEB_DIST ?? path.resolve(here, "../../web/dist");
 
-// TODO(storage): pick DiskSessionStorage or the S3-compatible storage from AFK_STORAGE=disk|s3.
-const dataDir = process.env.AFK_DATA_DIR ?? path.resolve(here, "../data");
-const store = new SessionStore(new DiskSessionStorage(dataDir));
+const defaultDataDir = path.resolve(here, "../data");
+const storage = createStorageFromEnv(process.env, defaultDataDir);
+const limits = {
+  maxActiveSessions: Number(
+    process.env.AFK_MAX_ACTIVE_SESSIONS ?? DEFAULT_LIMITS.maxActiveSessions,
+  ),
+  maxStreamsPerSession: Number(
+    process.env.AFK_MAX_STREAMS_PER_SESSION ?? DEFAULT_LIMITS.maxStreamsPerSession,
+  ),
+};
+const store = new SessionStore(storage, limits);
 
-/** How often time-based rules (client silent) get to run on live sessions. */
-const RULE_TICK_INTERVAL_MS = 5_000;
-store.startTicker(RULE_TICK_INTERVAL_MS);
+/** How often time-based rules (client silent) run and idle ended sessions are evicted. */
+const TICK_INTERVAL_MS = 5_000;
+store.startTicker(TICK_INTERVAL_MS);
 
-const app = createApp({ publicBaseUrl, webDistDir }, store);
+const app = createApp({ publicBaseUrl, webDistDir, limits }, store);
 
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(
     `afk server listening on http://localhost:${info.port} ` +
-      `(public base ${publicBaseUrl}, sessions stored in ${dataDir})`,
+      `(public base ${publicBaseUrl}, storage ${process.env.AFK_STORAGE ?? "disk"}, ` +
+      `limits ${limits.maxActiveSessions} sessions x ${limits.maxStreamsPerSession} streams)`,
   );
 });

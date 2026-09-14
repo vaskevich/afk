@@ -3,6 +3,7 @@ import type { IngestResponse } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
 import { errorResponse } from "../http/errors.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
+import { TooManyStreamsError } from "../store/sessions.ts";
 import { parseFrames } from "../utils/ndjson.ts";
 import { describeFrame } from "../log/describe.ts";
 
@@ -19,7 +20,16 @@ export function frameRoutes(deps: AppDeps) {
       return errorResponse(c, 400, parsed.message, parsed.details);
     }
 
-    const result = await store.ingest(session, parsed.frames);
+    let result;
+    try {
+      result = await store.ingest(session, parsed.frames);
+    } catch (err) {
+      if (err instanceof TooManyStreamsError) {
+        // 422 rather than 4xx-generic so the client knows the batch itself was well formed.
+        return errorResponse(c, 422, err.message, { stream: err.stream, limit: err.limit });
+      }
+      throw err;
+    }
     for (const stored of result.accepted) {
       console.log(`[session ${session.sessionId}] ${describeFrame(stored.frame)}`);
     }

@@ -43,6 +43,10 @@ SEND_INTERVAL_SECONDS=1
 SEND_MAX_BACKOFF_SECONDS=30
 SEND_MAX_FILES_PER_BATCH=200
 
+# When the server is at capacity, `afk start` waits and retries this often, for at most this long.
+CAPACITY_RETRY_SECONDS=30
+CAPACITY_MAX_WAIT_SECONDS=600
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -169,15 +173,26 @@ gather_host_info() {
   HOST_MEMORY_BYTES=$(sysctl -n hw.memsize)
 }
 
+# Creates a session. Returns 0 on success and 2 when the server is at capacity, so the
+# caller can choose between waiting and going on without telemetry. Dies on anything else.
 create_session() {
-  local body response
+  local body response status response_file="$AFK_HOME/create-response.json"
   body=$(printf '{"protocolVersion":%d,"clientVersion":"%s","host":{"hostname":"%s","platform":"%s","osVersion":"%s","cpuCount":%d,"memoryTotalBytes":%d}}' \
     "$AFK_PROTOCOL_VERSION" "$AFK_VERSION" "$(json_string "$HOST_NAME")" "$(json_string "$HOST_PLATFORM")" \
     "$(json_string "$HOST_OS_VERSION")" "$HOST_CPU_COUNT" "$HOST_MEMORY_BYTES")
 
-  response=$(curl -sS --connect-timeout 5 --max-time 15 \
+  status=$(curl -sS -o "$response_file" -w '%{http_code}' --connect-timeout 5 --max-time 15 \
     -H 'Content-Type: application/json' -H "X-Afk-Client: bash/$AFK_VERSION" \
     --data "$body" "$AFK_SERVER/api/sessions") || die "could not reach $AFK_SERVER"
+  response=$(cat "$response_file" 2>/dev/null)
+  rm -f "$response_file"
+  case "$status" in
+    201) ;;
+    503)
+      log "server is at capacity: $(json_get_string "$response" error)"
+      return 2 ;;
+    *) die "server refused to start a session (HTTP $status): $response" ;;
+  esac
 
   SESSION_ID=$(json_get_string "$response" sessionId)
   INGEST_TOKEN=$(json_get_string "$response" ingestToken)
@@ -188,15 +203,37 @@ create_session() {
 
   SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
   mkdir -p "$SESSION_DIR/queue"
-  # Lets a later `afk run` join this session. TODO(run): implement the join side.
+  # Lets a later `afk run` join this session.
   printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
     "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$AFK_HOME/current"
 }
 
+# For `afk start`: a machine you are about to leave should get a session eventually,
+# so wait for capacity rather than fail.
+create_session_or_wait() {
+  local waited=0 rc
+  while true; do
+    create_session; rc=$?
+    if [ "$rc" = 0 ]; then
+      return 0
+    fi
+    if [ "$rc" != 2 ]; then
+      exit 1
+    fi
+    if [ "$waited" -ge "$CAPACITY_MAX_WAIT_SECONDS" ]; then
+      die "gave up waiting for capacity after ${waited}s"
+    fi
+    log "retrying in ${CAPACITY_RETRY_SECONDS}s (Ctrl-C to give up)"
+    sleep "$CAPACITY_RETRY_SECONDS"
+    waited=$((waited + CAPACITY_RETRY_SECONDS))
+  done
+}
+
 # Reads ~/.afk/current, written by the process that owns the session. Returns 1 if
-# there is none or the server says it is over (a crashed owner can leave one behind).
+# there is none or the server says it is over (a crashed owner can leave one behind),
+# and 2 if the session is live but already has as many streams as the server allows.
 load_current_session() {
-  local file="$AFK_HOME/current" summary status
+  local file="$AFK_HOME/current" summary status stream_count max_streams
   [ -f "$file" ] || return 1
   SESSION_ID=$(sed -n 's/^sessionId=//p' "$file")
   INGEST_TOKEN=$(sed -n 's/^ingestToken=//p' "$file")
@@ -213,6 +250,12 @@ load_current_session() {
   SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
   MAX_DURATION_SECONDS=$(json_get_number "$summary" maxDurationSeconds)
   : "${MAX_DURATION_SECONDS:=3600}"
+  stream_count=$(json_get_number "$summary" streamCount)
+  max_streams=$(json_get_number "$summary" maxStreams)
+  if [ -n "$stream_count" ] && [ -n "$max_streams" ] && [ "$stream_count" -ge "$max_streams" ]; then
+    log "session $SESSION_ID already has $max_streams streams, the server's limit"
+    return 2
+  fi
 }
 
 end_session() {
@@ -285,7 +328,7 @@ send_oldest_batch() {
     410)
       log "server closed the session ($(cat "$SESSION_DIR/response.json" 2>/dev/null))"
       return 2 ;;
-    400|401|404|413)
+    400|401|404|413|422)
       # The server will never accept this batch; keep it out of the way so we don't stall.
       # TODO(hardening): decide whether to keep these for debugging or drop them.
       log "server rejected batch with HTTP $status: $(cat "$SESSION_DIR/response.json" 2>/dev/null)"
@@ -347,7 +390,7 @@ system_sampler_loop() {
 cmd_start() {
   check_platform
   gather_host_info
-  create_session
+  create_session_or_wait
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
   printf '\n  %s\n\n' "$DASHBOARD_URL"
 
@@ -374,15 +417,24 @@ cmd_run() {
   [ $# -gt 0 ] || die "usage: afk run -- <command> [args...]"
   check_platform
 
-  local owner=0
-  if load_current_session; then
-    log "joining session $SESSION_ID"
-  else
-    owner=1
-    gather_host_info
-    create_session
-    log "no session running here; started $SESSION_ID with machine telemetry for the length of this command"
-  fi
+  # Telemetry must never get in the way of the command itself: if the server is full
+  # or the session already has its maximum number of streams, just run the command.
+  local owner=0 joined
+  load_current_session; joined=$?
+  case "$joined" in
+    0) log "joining session $SESSION_ID" ;;
+    1)
+      owner=1
+      gather_host_info
+      if ! create_session; then
+        log "running without telemetry"
+        exec "$@"
+      fi
+      log "no session running here; started $SESSION_ID with machine telemetry for the length of this command" ;;
+    *)
+      log "running without telemetry"
+      exec "$@" ;;
+  esac
 
   RUN_ID=$(random_id)
   RUN_STARTED=$(now_seconds)
