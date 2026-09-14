@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # Builds the afk server image, pushes it to the Lightsail container registry, and
-# creates a new deployment on the "afk" container service. Run through aws-vault:
+# creates a new deployment on the "afk" container service. Shared by two callers:
 #
-#   aws-vault exec osv_im_admin -- infra/deploy.sh
+#   - A laptop, through aws-vault: aws-vault exec osv_im_admin -- infra/deploy.sh
+#   - .github/workflows/deploy.yml, after authenticating via OIDC (no aws-vault)
+#
+# Never embeds credentials itself: the AWS CLI picks up whatever credentials are
+# already in the environment (aws-vault's temporary ones, or the OIDC-assumed
+# role's in CI). Bucket configuration (name/access key) comes from the
+# AFK_S3_BUCKET/AFK_S3_ACCESS_KEY_ID/AFK_S3_SECRET_ACCESS_KEY environment
+# variables when set -- which is how CI supplies them, from a repository
+# variable and secrets, since a runner has no local tofu state -- and falls back
+# to `tofu output` otherwise, which is what a laptop run with no environment
+# variables set ends up doing. See infra/README.md.
 #
 # Assumes `aws-vault exec osv_im_admin -- tofu -chdir=infra apply` has already
-# created the container service and bucket (see infra/README.md). Never embeds
-# credentials: the AWS CLI picks up aws-vault's temporary credentials from the
-# environment, and the bucket access key is read fresh from tofu output each run.
+# created the container service and bucket.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +25,10 @@ REGION="us-west-2"
 SERVICE_NAME="afk"
 CONTAINER_NAME="server"
 CONTAINER_PORT=4141
-IMAGE_TAG="afk:latest"
+# The image tag to build and push: first CLI argument, else $IMAGE_TAG from the
+# environment, else "afk:latest". deploy.yml passes the commit SHA as the
+# argument so a pushed image can be traced back to the commit that built it.
+IMAGE_TAG="${1:-${IMAGE_TAG:-afk:latest}}"
 
 echo "==> Building ${IMAGE_TAG} from ${REPO_ROOT}"
 docker build -t "${IMAGE_TAG}" "${REPO_ROOT}"
@@ -41,14 +52,30 @@ if [[ -z "${REGISTERED_IMAGE}" ]]; then
 fi
 echo "==> Registered image: ${REGISTERED_IMAGE}"
 
-# Session storage credentials come from tofu output, not from any file on disk --
+# Session storage credentials: prefer whatever is already in the environment
+# (CI's repository secrets/variable), and only shell out to `tofu output` -- which
+# needs local state and AWS credentials with permission to read it -- for
+# whichever of these a laptop run left unset. Never stored in a file:
 # infra/terraform.tfvars only holds the bucket *name* variable, not these
-# generated values.
-echo "==> Reading bucket configuration from tofu output"
-S3_BUCKET="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_name)"
-S3_REGION="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_region)"
-S3_ACCESS_KEY_ID="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_access_key_id)"
-S3_SECRET_ACCESS_KEY="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_secret_access_key)"
+# generated values. The bucket always lives in $REGION (storage.tf gives it no
+# region of its own -- it inherits the provider's), so there's no separate
+# AFK_S3_REGION to configure anywhere.
+S3_BUCKET="${AFK_S3_BUCKET:-}"
+if [[ -z "${S3_BUCKET}" ]]; then
+  echo "==> AFK_S3_BUCKET not set; reading bucket name from tofu output"
+  S3_BUCKET="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_name)"
+fi
+S3_REGION="${REGION}"
+S3_ACCESS_KEY_ID="${AFK_S3_ACCESS_KEY_ID:-}"
+if [[ -z "${S3_ACCESS_KEY_ID}" ]]; then
+  echo "==> AFK_S3_ACCESS_KEY_ID not set; reading bucket access key from tofu output"
+  S3_ACCESS_KEY_ID="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_access_key_id)"
+fi
+S3_SECRET_ACCESS_KEY="${AFK_S3_SECRET_ACCESS_KEY:-}"
+if [[ -z "${S3_SECRET_ACCESS_KEY}" ]]; then
+  echo "==> AFK_S3_SECRET_ACCESS_KEY not set; reading bucket secret key from tofu output"
+  S3_SECRET_ACCESS_KEY="$(tofu -chdir="${SCRIPT_DIR}" output -raw bucket_secret_access_key)"
+fi
 
 # The deployment spec: one container running the image just pushed, plus the
 # public endpoint that wires the load balancer's health check to it. Written to a
