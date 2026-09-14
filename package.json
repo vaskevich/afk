@@ -5,6 +5,7 @@
   "packageManager": "pnpm@10.13.1",
   "scripts": {
     "dev:server": "pnpm --filter @afk/server dev",
+    "dev:web": "pnpm --filter @afk/web dev",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
