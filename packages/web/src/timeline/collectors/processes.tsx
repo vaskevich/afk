@@ -1,16 +1,12 @@
 import type { RowView, CollectorUi, FrameOf } from "../registry.ts";
 import { frameTimeMs } from "../model.ts";
+import { barSpansMs } from "../bars.ts";
 import { commandBasename, formatMiB, formatPercent } from "../../format.ts";
 
 type ProcessesFrame = FrameOf<"processes">;
 
 const PAD_TOP = 4;
 const BAR_GAP_PX = 1;
-/**
- * The collector samples every few seconds; a bar covers the time until the next sample
- * but never more than this, so a silent stretch reads as a gap rather than one wide bar.
- */
-const MAX_BAR_SPAN_MS = 5_000;
 
 function css(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -27,7 +23,10 @@ function busiestCpu(frame: ProcessesFrame): number {
 
 /**
  * One bar per sample, its height the busiest process's cpu relative to the row's own
- * peak, so a single runaway process stands out even on a quiet machine.
+ * peak, so a single runaway process stands out even on a quiet machine. A bar covers
+ * the time until the next sample (see `barSpansMs`): the collector runs every few
+ * seconds and a sample a little late still joins its neighbour, while a silent stretch
+ * reads as a gap rather than one wide bar.
  */
 function drawRow(ctx: CanvasRenderingContext2D, frames: readonly ProcessesFrame[], view: RowView) {
   const colors = {
@@ -50,6 +49,7 @@ function drawRow(ctx: CanvasRenderingContext2D, frames: readonly ProcessesFrame[
   }
 
   const peak = Math.max(1, ...frames.map(busiestCpu));
+  const spans = barSpansMs(frames.map(frameTimeMs));
   ctx.fillStyle = colors.accent;
   for (let i = 0; i < frames.length; i++) {
     const frame = frames[i]!;
@@ -58,10 +58,8 @@ function drawRow(ctx: CanvasRenderingContext2D, frames: readonly ProcessesFrame[
       continue;
     }
     const startMs = frameTimeMs(frame);
-    const next = frames[i + 1];
-    const spanMs = next ? Math.min(frameTimeMs(next) - startMs, MAX_BAR_SPAN_MS) : MAX_BAR_SPAN_MS;
     const x0 = view.x(startMs);
-    const x1 = view.x(startMs + spanMs);
+    const x1 = view.x(startMs + spans[i]!);
     if (x1 < 0 || x0 > view.width) {
       continue;
     }
