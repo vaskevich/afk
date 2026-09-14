@@ -17,7 +17,7 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 
 ## Storage & retention
 
-- [ ] Store session files in S3 with a lifecycle expiration policy (7 days)
+- [ ] Store session files in S3 with a lifecycle expiration policy (7 days) — bucket + lifecycle rule already defined in `infra/storage.tf` behind `enable_s3_storage`; flip the variable and wire IAM access once the server writes there
 - [ ] Local sweeper for expired sessions until S3 lands
 - [ ] Persist only what the dashboard needs (truncate process lists, drop unused fields)
 - [ ] Downsample or window frames for the browser if sessions ever exceed a few MB compressed
@@ -55,6 +55,9 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 
 ## Deployment
 
-- [ ] Lightsail, cheapest instance; Caddy for TLS; Route53 `afk.osv.im` record via existing terraform
+- [x] Design + OpenTofu config for Lightsail + Caddy + Route53 `afk.osv.im` — see `infra/README.md`
+- [ ] Actually run `tofu apply` and cut the box over (design-only so far; not yet applied to AWS)
+- [ ] Once "persist frames to disk" (above) lands, have it honor `AFK_DATA_DIR` (the systemd unit already sets it, pointed at `packages/server/data` under the app dir)
+- [ ] Build the server to plain JS for prod instead of running through `tsx`, so `pnpm install --prod` is enough on deploy and the cheaper `nano_3_0` Lightsail tier becomes viable
 - [ ] Serve the built dashboard from the Node server
 - [ ] Installer one-liner that downloads `cli/afk`

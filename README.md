@@ -10,7 +10,8 @@ Status: early prototype. See [BACKLOG.md](BACKLOG.md).
 - `cli/afk` – the client. One bash script, macOS only for now.
 - `packages/shared` – Zod schemas for the wire protocol; types are inferred from them.
 - `packages/server` – Node + Hono ingest and dashboard API.
-- `packages/web` – dashboard (not started yet).
+- `packages/web` – Vite + React + TanStack dashboard.
+- `infra` – OpenTofu config and deploy script for the `afk.osv.im` deployment.
 
 ## Dev
 

@@ -1,0 +1,12 @@
+# OpenTofu working files and state (local backend -- see versions.tf).
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Real variable files (SSH public key, profile overrides, etc). The lock file
+# (.terraform.lock.hcl) and terraform.tfvars.example are NOT ignored -- both
+# should be committed.
+*.tfvars
+*.tfvars.json
