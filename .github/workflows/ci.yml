@@ -1,5 +1,6 @@
 # Continuous integration: typecheck, lint, format, test, and build the monorepo,
-# plus a separate job that validates the OpenTofu config in infra/. Runs on every
+# a macOS job for the bash client's tests, plus a separate job that validates the
+# OpenTofu config in infra/. Runs on every
 # pull request, and is called as a reusable workflow (`workflow_call`) by deploy.yml
 # on pushes to main so a deployment is gated on these same jobs. It deliberately has
 # no `push` trigger of its own: a standalone run on main would share this concurrency
@@ -63,6 +64,39 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  # The bash client's collectors and the end-to-end contract test only run on macOS
+  # (every such test is `skipIf(platform !== "darwin")`), so on the Ubuntu job above a
+  # cli/afk change gets nothing but shellcheck. This job runs the client's unit tests
+  # and the contract test on a Mac runner. macOS minutes are free on public repos and
+  # billed at 10x on private ones, so this is the one job kept to what needs a Mac.
+  # deploy.yml gates on ci.yml as a whole (`uses: ./.github/workflows/ci.yml`), which
+  # means it waits for this job too without being told about it.
+  client-macos:
+    name: Client tests on macOS
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Client unit tests
+        run: pnpm vitest run cli
+
+      - name: Contract test
+        run: pnpm test:contract
 
   infra:
     name: OpenTofu fmt + validate
