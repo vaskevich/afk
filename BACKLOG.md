@@ -14,6 +14,7 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [x] CLI: `afk run -- <cmd>` joins the current session; reports stdout/stderr bytes per tick + exit code
 - [x] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps` -- `collect_processes`, every 5 s on the `processes` stream; `cpu.high` names the top three in `details.topProcesses`. The agents collector is still open, see the wishlist below
 - [x] Server rules for runs: exited non-zero, no output for N seconds -- `rules/run.ts` (`run.exited`, `run.stalled`)
+- [x] QR code of the dashboard URL so a phone scans it instead of typing it -- rendered on the server for the CLI (`GET /api/sessions/:id/qr`, `utils/qr.ts`, bearer token) and in the browser for the dashboard (`SharePanel.tsx`), so the bash client stays dependency-free; `afk start` prints it, `afk qr` reprints it, `--no-qr` / `AFK_NO_QR=1` skip it
 
 ## Wishlist: agents collector (claude / codex)
 

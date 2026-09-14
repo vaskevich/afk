@@ -52,6 +52,12 @@ See [EXTENDING.md](EXTENDING.md).
 can join the same session. A session is machine-wide; the first process that created
 it owns the long-running system collectors.
 
+The dashboard URL is printed with a QR code under it when stdout is a terminal, so a
+phone can scan it off the screen. The code comes from the server
+(`GET /api/sessions/:id/qr`, see [PROTOCOL.md](PROTOCOL.md)): bash has no QR library,
+and fetching a text block keeps the client dependency-free. A failed fetch prints
+nothing; `afk qr` reprints it; `--no-qr` or `AFK_NO_QR=1` turns it off.
+
 #### `afk run`
 
 `afk run -- <cmd>` wraps one command and reports its progress as its own `run:<runId>`
@@ -75,8 +81,9 @@ it.
 
 Hono on Node. Layout is documented at the top of `src/app.ts`:
 
-- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end),
-  `frames` (ingest), `stream` (history + SSE), `web` (built dashboard).
+- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end, the
+  dashboard URL as a QR code), `frames` (ingest), `stream` (history + SSE), `web` (built
+  dashboard).
 - `middleware/ingest-auth.ts` resolves the session, checks the bearer ingest token,
   rejects non-active sessions with 410. `middleware/client-version.ts` checks the
   `X-Afk-Client` header on the client-facing routes (426 below the minimum),
@@ -282,6 +289,12 @@ private network. See `infra/` and the Deployment section of BACKLOG.md.
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** QR rendering of the dashboard URL lives on the server for the CLI
+  (`GET /api/sessions/:id/qr`, `utils/qr.ts`, behind the ingest token because the URL
+  is the share link) and in the browser for the dashboard (`SharePanel.tsx`, from
+  `window.location.href`), so the bash client stays dependency-free and the dashboard
+  never needs the ingest token. Both use `qrcode-generator` (zero dependencies, types
+  included) rather than `qrcode`, which pulls in a CLI argument parser and a PNG writer.
 - **2026-09-15** All server tuning goes through environment variables parsed once in
   `config.ts` (`loadConfig`, a Zod schema keyed by variable name). No other module reads
   `process.env`; each default is owned by the module that uses it and referenced by the

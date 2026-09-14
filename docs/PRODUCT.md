@@ -89,3 +89,13 @@
 - **Agents collector.** Parked in BACKLOG.md: undocumented tool internals, session names leaving the machine. Its payoff, "an agent has waited on you for 10 minutes", is a notification, so it follows item 6; `afk run -- claude` and the `processes` row cover the rest today.
 - **Accounts and a server-side session list.** The unguessable id (docs/PROTOCOL.md) is the whole auth model and keeps time-to-first-value at one command. Item 9 covers the second day locally.
 - **A client rewrite or Linux port.** docs/CLIENT.md names the triggers (a Linux port, a second contributor, a thousand lines, a quoting bug); none has fired at 550 lines. The contract test makes a later port safe.
+
+## Implemented
+
+- **2026-09-15, item 2 (put the URL on the phone without typing it).**
+  `GET /api/sessions/:id/qr` renders the dashboard URL as a half-block QR behind the
+  ingest token (`packages/server/src/utils/qr.ts`); `afk start`, and an `afk run` that
+  created the session, print it under the URL when stdout is a terminal (`--no-qr` or
+  `AFK_NO_QR=1` to skip), and `afk qr` reprints it. The session page has a Share panel
+  with the URL, a copy button, and a QR rendered in the browser. `pbcopy` was left out:
+  the QR is the phone path and the dashboard's copy button covers the clipboard.
