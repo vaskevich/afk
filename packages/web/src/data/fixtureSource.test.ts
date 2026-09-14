@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FramesResponse } from "@afk/shared";
-import type { RunFrame } from "@afk/shared";
+import type { AgentsFrame, RunFrame } from "@afk/shared";
 import { generateDemoSession } from "./fixtureSource.ts";
 
 describe("generateDemoSession", () => {
@@ -53,6 +53,41 @@ describe("generateDemoSession", () => {
     expect(processes).toHaveLength(180 - 18);
     expect(processes.every((f) => (f.frame.timestamp - startSeconds) % 5 === 0)).toBe(true);
     expect(processes.map((f) => f.frame.sequence)).toEqual(processes.map((_, i) => i + 1));
+  });
+
+  it("samples the agents stream every 5 s with two sessions that partition into states", () => {
+    const data = generateDemoSession("demo");
+
+    const agents = data.frames
+      .map((f) => f.frame)
+      .filter((frame): frame is AgentsFrame => frame.collector === "agents");
+
+    expect(agents).toHaveLength(180 - 18);
+    expect(agents.map((frame) => frame.sequence)).toEqual(agents.map((_, i) => i + 1));
+    expect(agents.every((frame) => frame.data.available)).toBe(true);
+    expect(
+      agents.every(({ data: { claude } }) => {
+        return claude.working + claude.waitingOnInput + claude.idle === claude.sessions;
+      }),
+    ).toBe(true);
+    expect(agents.some((frame) => frame.data.claude.waitingOnInput > 0)).toBe(true);
+    expect(agents.some((frame) => frame.data.claude.subagentsWorking > 0)).toBe(true);
+  });
+
+  it("opens agents.waiting at the first sample that has a session waiting on input", () => {
+    const data = generateDemoSession("demo");
+    const waiting = data.events.find((event) => event.kind === "agents.waiting")!;
+
+    const firstWaiting = data.frames.find(
+      (f) => f.frame.collector === "agents" && f.frame.data.claude.waitingOnInput > 0,
+    )!;
+
+    expect(waiting).toMatchObject({
+      stream: "agents",
+      severity: "warning",
+      startedAt: firstWaiting.frame.timestamp * 1000,
+      message: "1 agent has been waiting on you for over 2m",
+    });
   });
 
   it("wraps a failing migration in a run stream whose final frame alone carries the output tail", () => {
