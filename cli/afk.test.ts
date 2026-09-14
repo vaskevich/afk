@@ -65,12 +65,16 @@ interface BashResult {
 }
 
 /** Sources cli/afk and runs `snippet` under bash 3.2 (/bin/bash on macOS), with `env` merged in. */
-async function runBash(snippet: string, env: NodeJS.ProcessEnv = {}): Promise<BashResult> {
+async function runBash(
+  snippet: string,
+  env: NodeJS.ProcessEnv = {},
+  timeoutMs = 5000,
+): Promise<BashResult> {
   const script = `source "${AFK_SCRIPT}"\n${snippet}`;
   try {
     const { stdout, stderr } = await execFileAsync("/bin/bash", ["-c", script], {
       env: { ...process.env, AFK_SOURCED: "1", ...env },
-      timeout: 5000,
+      timeout: timeoutMs,
     });
     return { stdout, stderr, code: 0 };
   } catch (error) {
@@ -2725,6 +2729,87 @@ describe("cmd_run", () => {
       expect(final?.data.exitCode).toBe(2);
       expect(final?.data.output.tail).toBeUndefined();
       expect(server.requests.some((req) => req.body.includes("secret"))).toBe(false);
+    },
+  );
+});
+
+describe("cmd_run owning a session that reaches its cap", () => {
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  /** The cap of the first session: the client chains a quarter of it (2 s) before. */
+  const CAP_SECONDS = 4;
+  /** The successor's cap, long enough that it is not chained from in turn during the test. */
+  const SUCCESSOR_CAP_SECONDS = 3600;
+  /** Long enough for the command to outlive the chain, so its last frames land in the successor. */
+  const RUN_SECONDS = 4;
+  const RUN_TIMEOUT_MS = 15_000;
+
+  /** The run frames a session received, in the order they arrived, with their sequence. */
+  function runFrames(server: TestServer, sessionId: string): RunFrame[] {
+    return server.requests
+      .filter((req) => req.url === `/api/sessions/${sessionId}/frames`)
+      .flatMap((req) => req.body.split("\n").filter((line) => line !== ""))
+      .map((line) => Frame.parse(JSON.parse(line)))
+      .filter((frame): frame is RunFrame => frame.collector === "run");
+  }
+
+  // Regression: the owning run's sampler stopped at the cap and its remaining frames
+  // stayed in the old session's queue. Runs the real collectors, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "chains to a successor before the cap and sends the rest of the run there, final frame included, with its sequences continuing",
+    { timeout: RUN_TIMEOUT_MS },
+    async () => {
+      const afkHome = await makeTempDir();
+      let creates = 0;
+      const server = await startServer((req) => {
+        if (req.url === "/api/sessions") {
+          creates += 1;
+          const id = creates === 1 ? "first" : "second";
+          const cap = creates === 1 ? CAP_SECONDS : SUCCESSOR_CAP_SECONDS;
+          return {
+            status: 201,
+            body: `{"sessionId":"${id}","ingestToken":"tok-${id}","dashboardUrl":"http://example.test/s/${id}","maxDurationSeconds":${cap}}`,
+          };
+        }
+        // The server ends the first session the moment its successor exists.
+        if (req.url.startsWith("/api/sessions/first/") && creates > 1) {
+          return { status: 410, body: '{"error":"session ended"}' };
+        }
+        return { status: 200, body: accepted };
+      });
+
+      const { code, stderr } = await runBash(
+        `cmd_run -- sleep ${RUN_SECONDS}`,
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+        RUN_TIMEOUT_MS,
+      );
+
+      expect(code, stderr).toBe(0);
+      const creations = server.requests.filter((req) => req.url === "/api/sessions");
+      expect(creations.map((req) => req.headers.authorization)).toEqual([
+        undefined,
+        "Bearer tok-first",
+      ]);
+      expect(JSON.parse(creations[1]!.body)).toMatchObject({ previousSessionId: "first" });
+      expect(stderr).toContain(
+        `session first reached its ${CAP_SECONDS}s cap; continuing in session second`,
+      );
+      // The run stream spans both sessions and keeps counting; its exit lands in the successor.
+      const inFirst = runFrames(server, "first");
+      const inSecond = runFrames(server, "second");
+      expect(inFirst.length).toBeGreaterThan(0);
+      expect(inSecond.at(-1)?.data).toMatchObject({ state: "exited", exitCode: 0 });
+      expect(new Set([...inFirst, ...inSecond].map((frame) => frame.stream)).size).toBe(1);
+      const sequences = [...inFirst, ...inSecond].map((frame) => frame.sequence);
+      expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+      expect(new Set(sequences).size).toBe(sequences.length);
+      expect(inSecond[0]!.sequence).toBeGreaterThan(inFirst.at(-1)!.sequence);
+      // The successor is the session the run ends; the first was ended by the chain.
+      const ends = server.requests.filter((req) => req.url.endsWith("/end")).map((req) => req.url);
+      expect(ends).toEqual(["/api/sessions/second/end"]);
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+      expect(await exists(join(afkHome, "sessions", "first", "done"))).toBe(true);
+      expect(await queueFiles(join(afkHome, "sessions", "first"))).toEqual([]);
+      expect(await queueFiles(join(afkHome, "sessions", "second"))).toEqual([]);
     },
   );
 });
