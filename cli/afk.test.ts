@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,24 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** The queue's frame files in name order, which is the order the sender ships them in. */
+async function queueFiles(sessionDir: string): Promise<string[]> {
+  const names = await readdir(join(sessionDir, "queue"));
+  return names.filter((name) => name.endsWith(".ndjson")).sort();
+}
+
+/** Every queued frame, parsed, in the order the sender ships them. */
+async function queuedFrames(sessionDir: string): Promise<Frame[]> {
+  const frames: Frame[] = [];
+  for (const name of await queueFiles(sessionDir)) {
+    const content = await readFile(join(sessionDir, "queue", name), "utf8");
+    for (const line of content.split("\n").filter((entry) => entry !== "")) {
+      frames.push(Frame.parse(JSON.parse(line)));
+    }
+  }
+  return frames;
 }
 
 /**
@@ -234,6 +252,7 @@ describe("sample_once", () => {
     "emits a processes frame on the first tick and then only every PROCESSES_INTERVAL_SECONDS",
     async () => {
       const sessionDir = await makeTempDir();
+      await mkdir(join(sessionDir, "queue"));
 
       const { code, stderr } = await runBash(
         "gather_host_info\nPROCESSES_INTERVAL_SECONDS=3\nsample_once; sample_once; sample_once; sample_once",
@@ -241,26 +260,19 @@ describe("sample_once", () => {
       );
 
       expect(code, stderr).toBe(0);
-      const content = await readFile(join(sessionDir, "current.ndjson"), "utf8");
-      const frames = content
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line) => Frame.parse(JSON.parse(line)));
-      expect(frames.map((frame) => `${frame.stream}#${frame.sequence}`)).toEqual([
-        "system#1",
-        "processes#1",
-        "system#2",
-        "system#3",
-        "system#4",
-        "processes#2",
-      ]);
+      const frames = await queuedFrames(sessionDir);
+      const byStream = (stream: string) =>
+        frames.filter((frame) => frame.stream === stream).map((frame) => frame.sequence);
+      expect(byStream("system")).toEqual([1, 2, 3, 4]);
+      expect(byStream("processes")).toEqual([1, 2]);
     },
   );
 });
 
 describe("emit_frame", () => {
-  it("writes one compact JSON line that validates as a Frame", async () => {
+  it("writes the frame as its own queue file, named by sequence and stream, that validates as a Frame", async () => {
     const sessionDir = await makeTempDir();
+    await mkdir(join(sessionDir, "queue"));
     const data: SystemCollectorData = {
       cpu: { percent: 12.3 },
       loadAverage: { oneMinute: 1, fiveMinutes: 1.5, fifteenMinutes: 2 },
@@ -283,7 +295,8 @@ describe("emit_frame", () => {
     });
 
     expect(code, stderr).toBe(0);
-    const content = await readFile(join(sessionDir, "current.ndjson"), "utf8");
+    expect(await queueFiles(sessionDir)).toEqual(["0000000003-system.ndjson"]);
+    const content = await readFile(join(sessionDir, "queue", "0000000003-system.ndjson"), "utf8");
     const lines = content.split("\n").filter((line) => line !== "");
     expect(lines).toHaveLength(1);
     const parsed: unknown = JSON.parse(lines[0]!);
@@ -291,49 +304,23 @@ describe("emit_frame", () => {
     expect(result.success, JSON.stringify(result.success ? null : result.error.issues)).toBe(true);
     expect(parsed).toMatchObject({ stream: "system", collector: "system", sequence: 3, data });
   });
-});
 
-describe("rotate_current", () => {
-  it("moves a non-empty current.ndjson into queue/ with a zero-padded name", async () => {
-    const sessionDir = await makeTempDir();
-    await mkdir(join(sessionDir, "queue"));
-    await writeFile(join(sessionDir, "current.ndjson"), "line1\n");
-
-    const { stdout, stderr } = await runBash('rotate_current; printf "RC=%d" "$?"', {
-      SESSION_DIR: sessionDir,
-    });
-
-    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
-    await expect(readFile(join(sessionDir, "current.ndjson"), "utf8")).rejects.toThrow();
-    const rotated = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8");
-    expect(rotated).toBe("line1\n");
-  });
-
-  it("does nothing when current.ndjson is empty", async () => {
-    const sessionDir = await makeTempDir();
-    await mkdir(join(sessionDir, "queue"));
-    await writeFile(join(sessionDir, "current.ndjson"), "");
-
-    const { stdout, stderr } = await runBash('rotate_current; printf "RC=%d" "$?"', {
-      SESSION_DIR: sessionDir,
-    });
-
-    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
-    const remaining = await readFile(join(sessionDir, "current.ndjson"), "utf8");
-    expect(remaining).toBe("");
-    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
-  });
-
-  it("does nothing when current.ndjson is missing", async () => {
+  it("leaves no temp file behind, so the sender only ever sees whole frames", async () => {
     const sessionDir = await makeTempDir();
     await mkdir(join(sessionDir, "queue"));
 
-    const { stdout, stderr } = await runBash('rotate_current; printf "RC=%d" "$?"', {
-      SESSION_DIR: sessionDir,
-    });
+    const { code, stderr } = await runBash(
+      'emit_frame system system 1 "{}"; emit_frame system system 2 "{}"',
+      {
+        SESSION_DIR: sessionDir,
+      },
+    );
 
-    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
-    expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
+    expect(code, stderr).toBe(0);
+    expect((await readdir(join(sessionDir, "queue"))).sort()).toEqual([
+      "0000000001-system.ndjson",
+      "0000000002-system.ndjson",
+    ]);
   });
 });
 
@@ -433,6 +420,49 @@ describe("send_oldest_batch", () => {
     const rejected = await readFile(join(sessionDir, "rejected", "0000000001.ndjson"), "utf8");
     expect(rejected).toBe("AAA\n");
     expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
+  });
+
+  it("ships frames emitted by two streams in sequence order within each stream", async () => {
+    const sessionDir = await makeQueue();
+    const server = await startServer(() => ({ status: 200 }));
+
+    const { stdout, stderr } = await runBash(
+      [
+        'emit_frame system system 1 "{}"',
+        'emit_frame run:ab12cd34 run 1 "{}"',
+        'emit_frame system system 2 "{}"',
+        'emit_frame run:ab12cd34 run 2 "{}"',
+        'emit_frame system system 3 "{}"',
+        'send_oldest_batch; printf "RC=%d" "$?"',
+      ].join("\n"),
+      { ...baseEnv, SESSION_DIR: sessionDir, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
+    expect(server.requests).toHaveLength(1);
+    const sent = server.requests[0]!.body.split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as { stream: string; sequence: number })
+      .map((frame) => `${frame.stream}#${frame.sequence}`);
+    expect(sent).toEqual(["run:ab12cd34#1", "system#1", "run:ab12cd34#2", "system#2", "system#3"]);
+    expect(await queueFiles(sessionDir)).toEqual([]);
+  });
+
+  it("sends at most SEND_MAX_FILES_PER_BATCH of the oldest files per request", async () => {
+    const sessionDir = await makeQueue();
+    await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "AAA\n");
+    await writeFile(join(sessionDir, "queue", "0000000002-system.ndjson"), "BBB\n");
+    await writeFile(join(sessionDir, "queue", "0000000003-system.ndjson"), "CCC\n");
+    const server = await startServer(() => ({ status: 200 }));
+
+    const { stdout, stderr } = await runBash(
+      'SEND_MAX_FILES_PER_BATCH=2\nsend_oldest_batch; printf "RC=%d" "$?"',
+      { ...baseEnv, SESSION_DIR: sessionDir, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
+    expect(server.requests.map((request) => request.body)).toEqual(["AAA\nBBB\n"]);
+    expect(await queueFiles(sessionDir)).toEqual(["0000000003-system.ndjson"]);
   });
 });
 

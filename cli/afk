@@ -22,10 +22,11 @@
 # Layout of ~/.afk:
 #   current                        the active session (id, token, server) so other
 #                                  afk processes can join it
-#   sessions/<id>/current.ndjson   frames sampled but not yet handed to the sender
-#   sessions/<id>/queue/*.ndjson   rotated batches waiting to be sent; deleted on 2xx
+#   sessions/<id>/queue/<seq>-<stream>.ndjson
+#                                  one sampled frame per file, waiting to be sent; a
+#                                  batch is the oldest files concatenated, deleted on 2xx
 #   sessions/<id>/runs/<runId>/    an `afk run`: captured stdout/stderr, pid, and (when it
-#                                  joined an existing session) its own spool and queue
+#                                  joined an existing session) its own queue
 #
 # The client is deliberately dumb: it ships raw measurements and lets the server
 # decide what is normal. That way the server can improve without anyone re-downloading
@@ -79,6 +80,14 @@ now_seconds() { date +%s; }
 random_id() { head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
 file_size() { stat -f %z "$1" 2>/dev/null || echo 0; }
+
+# The queue holds one frame per file (see emit_frame); these size it up for the
+# sender's log, `afk status`, and the disk cap.
+queue_count() { find "$SESSION_DIR/queue" -name '*.ndjson' -type f 2>/dev/null | wc -l | tr -d ' '; }
+queue_bytes() {
+  find "$SESSION_DIR/queue" -name '*.ndjson' -type f -exec stat -f %z {} + 2>/dev/null \
+    | awk '{ s += $1 } END { print s + 0 }'
+}
 
 check_platform() {
   [ "$(uname -s)" = "Darwin" ] || die "only macOS is supported right now (TODO: linux)"
@@ -295,7 +304,7 @@ end_session() {
 }
 
 # ---------------------------------------------------------------------------
-# sampler: runs collectors on their interval, appends frames to current.ndjson
+# sampler: runs collectors on their interval, writes one file per frame into queue/
 # ---------------------------------------------------------------------------
 
 SEQ_SYSTEM=0
@@ -304,9 +313,19 @@ SEQ_PROCESSES=0
 # every Nth tick; the first tick runs every collector so a session starts with each stream.
 SAMPLE_TICK=0
 
-emit_frame() { # stream collector data-json
+# One frame per file, named `<sequence>-<stream>.ndjson` so that `queue/*.ndjson` in
+# name order is sequence order within every stream, which is the only order the server
+# cares about (it de-duplicates per stream by sequence; a frame arriving after a higher
+# sequence of its stream would be dropped). The frame is written to a hidden temp file
+# and renamed into place: rename is atomic, so the sender never sees a partial file,
+# and with no shared spool file there is nothing for the sampler and sender to race
+# on (macOS has no flock).
+emit_frame() { # stream collector sequence data-json
+  local name temp
+  name=$(printf '%010d-%s.ndjson' "$3" "$1")
+  temp="$SESSION_DIR/queue/.$name.tmp"
   printf '{"stream":"%s","collector":"%s","sequence":%d,"timestamp":%d,"data":%s}\n' \
-    "$1" "$2" "$3" "$(now_seconds)" "$4" >> "$SESSION_DIR/current.ndjson"
+    "$1" "$2" "$3" "$(now_seconds)" "$4" > "$temp" && mv "$temp" "$SESSION_DIR/queue/$name"
 }
 
 # True on the ticks a collector with this interval (in seconds) is due.
@@ -325,24 +344,11 @@ sample_once() {
 }
 
 # ---------------------------------------------------------------------------
-# sender: rotates current.ndjson into the queue, ships the oldest batches,
-# deletes them on success, backs off and retries forever on failure
+# sender: ships the oldest queued frames as one batch per request, deletes them
+# on success, backs off and retries forever on failure
 # ---------------------------------------------------------------------------
 
-ROTATE_COUNTER=0
-
-rotate_current() {
-  local current="$SESSION_DIR/current.ndjson"
-  [ -s "$current" ] || return 0
-  ROTATE_COUNTER=$((ROTATE_COUNTER + 1))
-  # mv is atomic; the sampler's next append recreates current.ndjson.
-  # TODO(resilience): a printf that straddles the rename is theoretically possible
-  # (macOS has no flock); a short pause before reading makes it practically impossible.
-  mv "$current" "$SESSION_DIR/queue/$(printf '%010d' "$ROTATE_COUNTER").ndjson"
-  sleep 0.1
-}
-
-# Sends up to SEND_MAX_FILES_PER_BATCH oldest queue files as one request.
+# Sends up to SEND_MAX_FILES_PER_BATCH oldest queue files (one frame each) as one request.
 # Returns 0 on success (files deleted), 1 on retryable failure, 2 on permanent failure (session over).
 send_oldest_batch() {
   local batch="$SESSION_DIR/batch.ndjson" files="" count=0 f status
@@ -386,11 +392,10 @@ send_oldest_batch() {
 sender_loop() {
   local backoff=1 rc
   while true; do
-    rotate_current
     send_oldest_batch; rc=$?
     case "$rc" in
       0) backoff=1; sleep "$SEND_INTERVAL_SECONDS" ;;
-      1) log "send failed, retrying in ${backoff}s (queued: $(ls "$SESSION_DIR/queue" | wc -l | tr -d ' ') batches)"
+      1) log "send failed, retrying in ${backoff}s (queued: $(queue_count) frames)"
          sleep "$backoff"
          backoff=$((backoff * 2)); [ "$backoff" -gt "$SEND_MAX_BACKOFF_SECONDS" ] && backoff=$SEND_MAX_BACKOFF_SECONDS ;;
       2) touch "$SESSION_DIR/stop"; return ;;
@@ -400,8 +405,7 @@ sender_loop() {
 
 # Final attempt to drain the queue when the session ends. Best effort, short timeout.
 flush_queue() {
-  rotate_current
-  while [ -n "$(ls "$SESSION_DIR/queue" 2>/dev/null)" ]; do
+  while [ "$(queue_count)" -gt 0 ]; do
     send_oldest_batch || break
   done
 }
