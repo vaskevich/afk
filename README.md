@@ -3,7 +3,9 @@
 Away-from-keyboard telemetry. Run `afk start` on a machine you are about to walk away
 from and get a shareable dashboard URL that shows whether everything is still fine.
 
-Status: early prototype. See [BACKLOG.md](BACKLOG.md).
+Status: early prototype. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/EXTENDING.md](docs/EXTENDING.md), and
+[BACKLOG.md](BACKLOG.md).
 
 ## Layout
 
@@ -12,6 +14,7 @@ Status: early prototype. See [BACKLOG.md](BACKLOG.md).
 - `packages/server` – Node + Hono ingest and dashboard API.
 - `packages/web` – Vite + React + TanStack dashboard.
 - `infra` – OpenTofu config and deploy script for the `afk.osv.im` deployment.
+- `docs` – architecture, protocol, and extension guides.
 
 ## Dev
 
