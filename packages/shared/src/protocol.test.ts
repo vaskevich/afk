@@ -24,7 +24,12 @@ import {
   PROTOCOL_VERSION,
   RUN_TAIL_MAX_LINE_CHARS,
   RUN_TAIL_MAX_LINES,
+  SessionSummary,
+  DEMO_SESSION_ID,
+  DeleteSessionResponse,
+  DeletedSessionDetails,
   StoredFrame,
+  StreamEndEvent,
   StreamEventName,
   UpgradeRequiredDetails,
   VersionResponse,
@@ -460,5 +465,71 @@ describe("StreamEventName", () => {
     expect(Object.values(StreamEventName).sort()).toEqual(
       ["session", "event", "frame", "end"].sort(),
     );
+  });
+});
+
+describe("StreamEndEvent", () => {
+  it("is the session summary plus the reason the stream closed", () => {
+    const result = StreamEndEvent.safeParse({ ...makeSessionSummary(), reason: "deleted" });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.reason).toBe("deleted");
+    }
+  });
+
+  it("rejects a reason outside ended and deleted, naming the field", () => {
+    const result = StreamEndEvent.safeParse({ ...makeSessionSummary(), reason: "swept" });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["reason"]);
+    }
+  });
+
+  it("still parses as a plain SessionSummary, so an older dashboard ignores the reason", () => {
+    const result = SessionSummary.safeParse({ ...makeSessionSummary(), reason: "deleted" });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).not.toHaveProperty("reason");
+    }
+  });
+});
+
+describe("DeleteSessionResponse", () => {
+  it("names the deleted session and how many frames went with it", () => {
+    const result = DeleteSessionResponse.safeParse({
+      sessionId: "D3FzMqK8qOLVva9LoHF9uc",
+      frames: 12,
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { sessionId: "D3FzMqK8qOLVva9LoHF9uc", frames: 12 },
+    });
+  });
+
+  it("rejects a negative frame count, naming the field", () => {
+    const result = DeleteSessionResponse.safeParse({ sessionId: "x", frames: -1 });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["frames"]);
+    }
+  });
+});
+
+describe("DeletedSessionDetails", () => {
+  it("accepts only the deleted reason", () => {
+    expect(DeletedSessionDetails.safeParse({ reason: "deleted" }).success).toBe(true);
+    expect(DeletedSessionDetails.safeParse({ reason: "unknown" }).success).toBe(false);
+  });
+});
+
+describe("DEMO_SESSION_ID", () => {
+  it("is the id the dashboard serves from its fixture, never one the server would issue", () => {
+    expect(DEMO_SESSION_ID).toBe("demo");
+    expect(DEMO_SESSION_ID).not.toMatch(/^[A-Za-z0-9]{22}$/);
   });
 });

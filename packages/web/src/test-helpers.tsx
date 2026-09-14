@@ -3,6 +3,7 @@
  * render a router `Link` need a router, and the header's theme toggle needs the theme
  * context. Import only from tests.
  */
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   RouterProvider,
   createMemoryHistory,
@@ -13,30 +14,47 @@ import {
 import { render } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { vi } from "vitest";
+import { validateLandingSearch } from "./router.tsx";
 import { ThemeProvider } from "./useTheme.tsx";
 
 /**
  * Renders `element` as the component of a `/s/$sessionId` route in a router that
- * lives in memory, at `path`. Links resolve to real hrefs without a browser history.
+ * lives in memory, at `path`, with the same two routes the app has (the landing page
+ * renders `landing`, nothing by default) so navigation between them works. Links
+ * resolve to real hrefs without a browser history. A query client is provided too,
+ * for pages and hooks that load data; `retry` is off so a failing load fails at once.
  */
-export async function renderOnSessionRoute(element: ReactNode, path = "/s/current") {
+export async function renderOnSessionRoute(
+  element: ReactNode,
+  path = "/s/current",
+  landing: ReactNode = null,
+) {
   const rootRoute = createRootRoute();
+  const indexRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
+    validateSearch: validateLandingSearch,
+    component: () => landing,
+  });
   const sessionRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/s/$sessionId",
     component: () => element,
   });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([sessionRoute]),
+    routeTree: rootRoute.addChildren([indexRoute, sessionRoute]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const rendered = render(
     <ThemeProvider>
-      <RouterProvider router={router} />
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
     </ThemeProvider>,
   );
   await router.load();
-  return rendered;
+  return { ...rendered, router };
 }
 
 /**

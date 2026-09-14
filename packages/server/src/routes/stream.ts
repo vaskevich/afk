@@ -2,9 +2,15 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { SSEStreamingApi } from "hono/streaming";
 import { StreamEventName } from "@afk/shared";
-import type { AnomalyEvent, FramesResponse, StoredFrame } from "@afk/shared";
+import type {
+  AnomalyEvent,
+  FramesResponse,
+  StoredFrame,
+  StreamEndEvent,
+  StreamEndReason,
+} from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
-import { errorResponse } from "../http/errors.ts";
+import { sessionNotFound } from "../http/errors.ts";
 import type { Session, SessionEvent } from "../store/sessions.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
 
@@ -24,9 +30,10 @@ export function streamRoutes(deps: AppDeps) {
 
   return new Hono<AppEnv>()
     .get("/:sessionId/frames", async (c) => {
-      const session = await store.get(c.req.param("sessionId"));
+      const sessionId = c.req.param("sessionId");
+      const session = await store.get(sessionId);
       if (!session) {
-        return errorResponse(c, 404, "unknown session");
+        return sessionNotFound(c, store.wasDeleted(sessionId));
       }
       const after = resumeIndex(undefined, c.req.query("after"));
       const body: FramesResponse = {
@@ -37,9 +44,10 @@ export function streamRoutes(deps: AppDeps) {
       return c.json(body);
     })
     .get("/:sessionId/stream", async (c) => {
-      const session = await store.get(c.req.param("sessionId"));
+      const sessionId = c.req.param("sessionId");
+      const session = await store.get(sessionId);
       if (!session) {
-        return errorResponse(c, 404, "unknown session");
+        return sessionNotFound(c, store.wasDeleted(sessionId));
       }
       const after = resumeIndex(c.req.header("last-event-id"), c.req.query("after"));
       return streamSSE(c, (stream) => serveSession(stream, session, after));
@@ -52,12 +60,20 @@ export function streamRoutes(deps: AppDeps) {
         id: String(f.index),
         data: JSON.stringify(f),
       });
-    const writeSummary = (event: string) =>
-      stream.writeSSE({ event, data: JSON.stringify(store.summary(session)) });
+    const writeSession = () =>
+      stream.writeSSE({
+        event: StreamEventName.Session,
+        data: JSON.stringify(store.summary(session)),
+      });
+    // The last thing the stream says: the final summary and why it is closing.
+    const writeEnd = (reason: StreamEndReason) => {
+      const data: StreamEndEvent = { ...store.summary(session), reason };
+      return stream.writeSSE({ event: StreamEventName.End, data: JSON.stringify(data) });
+    };
     const writeEvent = (e: AnomalyEvent) =>
       stream.writeSSE({ event: StreamEventName.Event, data: JSON.stringify(e) });
 
-    await writeSummary(StreamEventName.Session);
+    await writeSession();
     // Events are few and consumers upsert by id, so the full set is sent every time.
     for (const e of session.engine.events) {
       await writeEvent(e);
@@ -90,7 +106,7 @@ export function streamRoutes(deps: AppDeps) {
                 await writeEvent(e);
               }
             } else {
-              await writeSummary(StreamEventName.End);
+              await writeEnd(event.reason);
               finish();
             }
           });
@@ -129,7 +145,7 @@ export function streamRoutes(deps: AppDeps) {
         // stays open until the client disconnects. A session that goes quiet is ended by
         // the store's tick and does emit one.
         await queue.drain();
-        await writeSummary(StreamEventName.End);
+        await writeEnd("ended");
         return;
       }
       await done;

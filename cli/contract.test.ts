@@ -72,6 +72,11 @@ const CHAIN_RUN_SECONDS = 11;
 const CHAIN_DEADLINE_MS = 15_000;
 /** The chain scenario needs the whole cap plus shutdown, more than the default. */
 const CHAIN_TEST_TIMEOUT_MS = 40_000;
+/**
+ * The delete scenario's command prints once a second for this long: enough for the
+ * session to collect frames, be deleted under it, and still have lines left to print.
+ */
+const DELETED_RUN_SECONDS = 4;
 
 const SINGLE_SESSION_LIMITS: AdmissionLimits = {
   maxActiveSessions: 1,
@@ -120,6 +125,8 @@ async function waitUntil(
 
 interface TestServer {
   url: string;
+  /** Every request the app has seen, in arrival order: `METHOD /path` and when. */
+  requests: { line: string; at: number }[];
   /** Closes the listener but keeps the store, like a server outage or restart. */
   stop(): Promise<void>;
   /** Listens again on the same port after `stop`. */
@@ -137,6 +144,7 @@ async function startServer(
   // The app is built once the port is known, since dashboard URLs embed it. No request
   // can arrive before then because nobody knows the port either.
   const wiring: { app?: ReturnType<typeof createApp> } = {};
+  const requests: TestServer["requests"] = [];
   let listener: Server | undefined;
 
   async function listen(port: number): Promise<number> {
@@ -145,6 +153,10 @@ async function startServer(
         if (!wiring.app) {
           throw new Error("request arrived before the app was wired");
         }
+        requests.push({
+          line: `${request.method} ${new URL(request.url).pathname}`,
+          at: Date.now(),
+        });
         return wiring.app.fetch(request);
       },
       port,
@@ -178,6 +190,7 @@ async function startServer(
 
   return {
     url,
+    requests,
     stop,
     resume: async () => {
       await listen(port);
@@ -656,5 +669,38 @@ describe.skipIf(process.platform !== "darwin")(
         expect(await readdir(join(afkHome, "sessions", second, "queue"))).toEqual([]);
       },
     );
+
+    it("deleting a session from the dashboard side stops the client's telemetry, leaves its command running, and makes the session a 404", async () => {
+      const command = `for i in 1 2 3 ${DELETED_RUN_SECONDS}; do echo out $i; sleep 1; done`;
+      const run = spawnAfk(["run", "--", "sh", "-c", command], afkHome);
+      const sessionId = await dashboardSessionId(run);
+      await waitForSystemFrames(sessionId, MIN_SYSTEM_FRAMES);
+
+      // The dashboard's call: no token, no client header, just the link.
+      const deleted = await fetch(`${server.url}/api/sessions/${sessionId}`, { method: "DELETE" });
+      const deletedAt = Date.now();
+      const exitCode = await run.exited;
+
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toMatchObject({ sessionId });
+      expect(exitCode).toBe(0);
+      expect(run.stdout()).toContain(`out 1\nout 2\nout 3\nout ${DELETED_RUN_SECONDS}\n`);
+      expect(run.stderr()).toContain(
+        `afk: session ${sessionId} was deleted on the server; telemetry stopped`,
+      );
+      // The client learned of the deletion from one 404 and sent nothing after it: no
+      // more batches, no end, and no successor session.
+      const afterDelete = server.requests
+        .filter((req) => req.at >= deletedAt)
+        .map((req) => req.line);
+      expect(afterDelete.filter((line) => line.endsWith("/frames"))).toHaveLength(1);
+      expect(afterDelete.filter((line) => line.endsWith("/end"))).toEqual([]);
+      expect(afterDelete.filter((line) => line === "POST /api/sessions")).toEqual([]);
+      const summary = await fetch(`${server.url}/api/sessions/${sessionId}`);
+      expect(summary.status).toBe(404);
+      expect(await summary.json()).toMatchObject({ details: { reason: "deleted" } });
+      expect(await readStats()).toMatchObject({ activeSessions: 0 });
+      expect(await readdir(join(afkHome, "sessions", sessionId, "queue"))).toEqual([]);
+    });
   },
 );

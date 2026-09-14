@@ -8,10 +8,49 @@ import { MemorySessionStorage } from "../store/storage.ts";
 import {
   chainTestSession,
   createTestSession,
+  deleteTestSession,
   endTestSession as endSession,
   makeAppConfig,
   postFrames,
 } from "./test-helpers.ts";
+
+/** How long a live stream test waits for the next message before giving up. */
+const STREAM_READ_TIMEOUT_MS = 2_000;
+
+/**
+ * Reads an open SSE response message by message. `next` resolves with the next parsed
+ * message, or undefined once the server has closed the stream.
+ */
+function openStream(res: Response) {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  const queued: ParsedSSE[] = [];
+  let closed = false;
+
+  async function next(): Promise<ParsedSSE | undefined> {
+    while (queued.length === 0 && !closed) {
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("no SSE message arrived in time")),
+          STREAM_READ_TIMEOUT_MS,
+        ),
+      );
+      const { value, done } = await Promise.race([reader.read(), timeout]);
+      if (done) {
+        closed = true;
+        break;
+      }
+      buffered += decoder.decode(value, { stream: true });
+      const messages = buffered.split("\n\n");
+      buffered = messages.pop() ?? "";
+      queued.push(...parseSSE(messages.join("\n\n") + "\n\n"));
+    }
+    return queued.shift();
+  }
+
+  return { next };
+}
 
 /** Builds a fresh app and creates one active session in it. */
 async function startSession(limits: AdmissionLimits = DEFAULT_LIMITS) {
@@ -83,9 +122,9 @@ describe("GET /api/sessions/:id/frames", () => {
 });
 
 describe("GET /api/sessions/:id/stream", () => {
-  // The live-follow path (subscribing to an active session and reading frames as they
-  // arrive) is not exercised here since it needs an open connection; it is covered by
-  // the manual smoke test described in CLAUDE.md.
+  // The live-follow path (frames arriving on an open connection) is covered by the
+  // contract test and the manual smoke test in CLAUDE.md; `openStream` below reads an
+  // open connection only far enough to see the session deleted under it.
 
   it("replays session, event, frame, and end messages in order for an ended session", async () => {
     const { app, sessionId, ingestToken } = await startSession();
@@ -104,7 +143,7 @@ describe("GET /api/sessions/:id/stream", () => {
     expect(messages[1]!.data).toMatchObject({ kind: "run.exited", severity: "critical" });
     expect(messages[2]!.id).toBe("1");
     expect(messages[3]!.id).toBe("2");
-    expect(messages[4]!.data).toMatchObject({ sessionId, status: "ended" });
+    expect(messages[4]!.data).toMatchObject({ sessionId, status: "ended", reason: "ended" });
   });
 
   it("replays only frames with index greater than Last-Event-ID, which overrides ?after=", async () => {
@@ -135,8 +174,26 @@ describe("GET /api/sessions/:id/stream", () => {
     const messages = parseSSE(await res.text());
     expect(messages.at(-1)).toMatchObject({
       event: "end",
-      data: { sessionId, status: "ended", nextSessionId: next.sessionId },
+      data: { sessionId, status: "ended", nextSessionId: next.sessionId, reason: "ended" },
     });
+  });
+
+  it("sends end with reason deleted to an open stream when the session is deleted, then closes it", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    const res = await app.request(`/api/sessions/${sessionId}/stream`);
+    const stream = openStream(res);
+    expect(await stream.next()).toMatchObject({ event: "session", data: { status: "active" } });
+    expect(await stream.next()).toMatchObject({ event: "frame", id: "1" });
+
+    const deleted = await deleteTestSession(app, sessionId);
+
+    expect(deleted.status).toBe(200);
+    expect(await stream.next()).toMatchObject({
+      event: "end",
+      data: { sessionId, status: "ended", reason: "deleted" },
+    });
+    expect(await stream.next()).toBeUndefined();
   });
 
   it("returns 404 for an unknown session id", async () => {

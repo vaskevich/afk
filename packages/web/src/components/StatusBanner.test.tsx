@@ -12,7 +12,13 @@ afterEach(() => {
 describe("StatusBanner continuation", () => {
   it("offers the next session once an ended session names one, without navigating", async () => {
     await renderOnSessionRoute(
-      <StatusBanner status="ended" events={[]} nextSessionId="later" onSelectEvent={() => {}} />,
+      <StatusBanner
+        status="ended"
+        events={[]}
+        nextSessionId="later"
+        deleted={false}
+        onSelectEvent={() => {}}
+      />,
     );
 
     const link = await screen.findByRole("link", { name: "open the next one" });
@@ -27,6 +33,7 @@ describe("StatusBanner continuation", () => {
         status="ended"
         events={[makeEvent({ endedAt: makeEvent().startedAt + 5_000 })]}
         nextSessionId="later"
+        deleted={false}
         onSelectEvent={() => {}}
       />,
     );
@@ -37,10 +44,35 @@ describe("StatusBanner continuation", () => {
 
   it("shows no continuation for an ended session without a successor", async () => {
     await renderOnSessionRoute(
-      <StatusBanner status="ended" events={[]} nextSessionId={null} onSelectEvent={() => {}} />,
+      <StatusBanner
+        status="ended"
+        events={[]}
+        nextSessionId={null}
+        deleted={false}
+        onSelectEvent={() => {}}
+      />,
     );
 
     await screen.findByRole("status");
+    expect(screen.queryByRole("link", { name: "open the next one" })).toBeNull();
+  });
+});
+
+describe("StatusBanner for a deleted session", () => {
+  it("says the session was deleted instead of any verdict, even with anomalies and a successor", async () => {
+    await renderOnSessionRoute(
+      <StatusBanner
+        status="ended"
+        events={[makeEvent()]}
+        nextSessionId="later"
+        deleted={true}
+        onSelectEvent={() => {}}
+      />,
+    );
+
+    const banner = await screen.findByRole("status");
+    expect(banner.textContent).toContain("This session was deleted");
+    expect(banner.textContent).not.toContain("anomaly");
     expect(screen.queryByRole("link", { name: "open the next one" })).toBeNull();
   });
 });

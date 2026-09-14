@@ -5,7 +5,7 @@ import type { SessionStore } from "./store/sessions.ts";
 import { healthRoutes } from "./routes/health.ts";
 import { statsRoutes } from "./routes/stats.ts";
 import { versionRoutes } from "./routes/version.ts";
-import { sessionRoutes } from "./routes/sessions.ts";
+import { demoSessionRoutes, sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
 import { installRoutes } from "./routes/install.ts";
@@ -32,9 +32,10 @@ export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
   // Request timing goes first so everything below is inside the measurement. The
   // session id check sits in front of every route with a :sessionId (the `/*` also
-  // matches the bare path) so no route module can forget it. The installer routes go
-  // before the dashboard, whose catch-all would otherwise answer /install with
-  // index.html.
+  // matches the bare path) so no route module can forget it; the one route ahead of it
+  // is the refusal to delete the demo session, whose id is not one the check would
+  // pass. The installer routes go before the dashboard, whose catch-all would
+  // otherwise answer /install with index.html.
   return (
     new Hono()
       .use("*", requestTiming())
@@ -44,6 +45,7 @@ export function createApp(config: AppConfig, store: SessionStore) {
       // compressed. Hono skips text/event-stream, so the SSE stream is untouched.
       // TODO(perf): brotli would be smaller still but needs zlib rather than CompressionStream.
       .use("*", compress())
+      .route("/api/sessions", demoSessionRoutes())
       .use("/api/sessions/:sessionId/*", sessionIdParam())
       .route("/api/health", healthRoutes)
       .route("/versionz", versionRoutes(deps))

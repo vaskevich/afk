@@ -2,12 +2,20 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, screen } from "@testing-library/react";
 import { makeSessionSummary } from "@afk/shared/testing";
+import { DEMO_SESSION_ID } from "../data/source.ts";
 import { renderOnSessionRoute } from "../test-helpers.tsx";
 import { SessionHeader } from "./SessionHeader.tsx";
 
 afterEach(() => {
   cleanup();
 });
+
+/** The header with nothing deleted and a deletion nobody expects. */
+function header(session = makeSessionSummary({ sessionId: "current" }), deleted = false) {
+  return (
+    <SessionHeader session={session} connection={null} deleted={deleted} onDeleted={() => {}} />
+  );
+}
 
 describe("SessionHeader chain links", () => {
   it("links to the previous and the next session when the summary names them", async () => {
@@ -18,7 +26,7 @@ describe("SessionHeader chain links", () => {
       nextSessionId: "later",
     });
 
-    await renderOnSessionRoute(<SessionHeader session={session} connection={null} />);
+    await renderOnSessionRoute(header(session));
 
     const previous = await screen.findByRole("link", { name: "← previous session" });
     const next = await screen.findByRole("link", { name: "next session →" });
@@ -29,9 +37,7 @@ describe("SessionHeader chain links", () => {
   });
 
   it("shows neither link for a session that stands on its own", async () => {
-    await renderOnSessionRoute(
-      <SessionHeader session={makeSessionSummary({ sessionId: "current" })} connection="live" />,
-    );
+    await renderOnSessionRoute(header());
 
     await screen.findByText("test-host");
     expect(screen.queryByRole("link", { name: "← previous session" })).toBeNull();
@@ -45,9 +51,44 @@ describe("SessionHeader chain links", () => {
       previousSessionId: "earlier",
     });
 
-    await renderOnSessionRoute(<SessionHeader session={session} connection="live" />);
+    await renderOnSessionRoute(header(session));
 
     expect(await screen.findByRole("link", { name: "← previous session" })).toBeDefined();
     expect(screen.queryByRole("link", { name: "next session →" })).toBeNull();
+  });
+});
+
+describe("SessionHeader delete control", () => {
+  it("offers Delete next to Share for an ordinary session", async () => {
+    await renderOnSessionRoute(header());
+
+    const remove = await screen.findByRole("button", { name: "Delete this session" });
+    const share = screen.getByRole("button", { name: "Share" });
+    expect(remove.parentElement?.parentElement).toBe(share.parentElement?.parentElement);
+  });
+
+  it("offers it for an ended session too, since retention is otherwise the only way out", async () => {
+    await renderOnSessionRoute(
+      header(makeSessionSummary({ sessionId: "current", status: "ended" })),
+    );
+
+    expect(await screen.findByRole("button", { name: "Delete this session" })).toBeDefined();
+  });
+
+  it("hides it for the demo session, which the server refuses to delete anyway", async () => {
+    await renderOnSessionRoute(
+      header(makeSessionSummary({ sessionId: DEMO_SESSION_ID, status: "ended" })),
+      `/s/${DEMO_SESSION_ID}`,
+    );
+
+    await screen.findByRole("button", { name: "Share" });
+    expect(screen.queryByRole("button", { name: "Delete this session" })).toBeNull();
+  });
+
+  it("hides it once the session has been deleted under the viewer", async () => {
+    await renderOnSessionRoute(header(makeSessionSummary({ sessionId: "current" }), true));
+
+    await screen.findByRole("button", { name: "Share" });
+    expect(screen.queryByRole("button", { name: "Delete this session" })).toBeNull();
   });
 });

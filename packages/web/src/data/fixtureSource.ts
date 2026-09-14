@@ -28,6 +28,9 @@ import type { SessionSource } from "./source.ts";
  * would derive from these frames.
  */
 
+/** What `deleteSession` rejects with; the same words the server answers `DELETE /api/sessions/demo` with. */
+export const DEMO_DELETE_REFUSAL = "the demo session cannot be deleted";
+
 const DURATION_SECONDS = 15 * 60;
 const BURN_START = 6 * 60;
 const BURN_END = 9 * 60;
@@ -523,5 +526,10 @@ export const fixtureSource: SessionSource = {
   subscribe(_sessionId, _afterIndex, handlers) {
     handlers.onConnection("closed");
     return () => {};
+  },
+  // The page never offers it for the demo (SessionHeader hides the control), and the
+  // server refuses it by name too; this is the same answer for anything that asks.
+  deleteSession() {
+    return Promise.reject(new Error(DEMO_DELETE_REFUSAL));
   },
 };

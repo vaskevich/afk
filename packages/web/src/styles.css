@@ -563,6 +563,58 @@ button:focus-visible {
   text-align: center;
 }
 
+/* ---- delete control -------------------------------------------------- */
+
+/* Sits next to Share at the same size; the second click's wording and colour are the
+   only warning, so the confirming state is unmistakably red. */
+.delete {
+  position: relative;
+  display: inline-flex;
+}
+.delete button {
+  white-space: nowrap;
+}
+.delete .delete-confirm {
+  color: var(--critical);
+  border-color: color-mix(in srgb, var(--critical) 60%, transparent);
+  background: var(--critical-soft);
+}
+.delete button:disabled {
+  color: var(--fg-muted);
+  cursor: default;
+}
+/* The server's refusal, dropped under the button so the header does not reflow. */
+.delete-error {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  margin: 0;
+  padding: 8px 10px;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--critical);
+  background: var(--bg-elevated);
+  border: 1px solid color-mix(in srgb, var(--critical) 40%, transparent);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* "Session … was deleted" on the landing page after a delete from the session page. */
+.notice {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  color: var(--fg);
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: var(--radius);
+}
+.notice code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 /* ---- status banner --------------------------------------------------- */
 
 .banner {

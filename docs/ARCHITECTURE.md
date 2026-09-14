@@ -72,7 +72,11 @@ with a live owner, continues its `run:<runId>` stream there. A 410 the server se
 early (frame cap, or the session ended after the machine slept) is chained at once
 through a `gone` marker from the sender. The server, for its part, ends a session that
 has sent nothing for `AFK_END_AFTER_SILENT_SECONDS` (10 minutes) in the same tick that
-runs `client.stale`, at the moment the silence began plus that.
+runs `client.stale`, at the moment the silence began plus that. A 404 from the sender
+is the other way a session stops, for good: the session was deleted (`DELETE
+/api/sessions/:id`, from the dashboard or `afk delete`), so a `deleted` marker stops
+the samplers, the queue is dropped, one line says so, and nothing chains; `afk run`'s
+command is not touched (see [CLIENT.md](CLIENT.md)).
 
 The dashboard URL is printed once: under a QR code when stdout is a terminal, so a
 phone can scan it off the screen, and on a line of its own otherwise. The code comes
@@ -109,11 +113,9 @@ it.
 
 Hono on Node. Layout is documented at the top of `src/app.ts`:
 
-- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end, the
-  dashboard URL as a QR code), `frames` (ingest), `stream` (history + SSE), `web` (built
-  dashboard).
-- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end),
-  `frames` (ingest), `stream` (history + SSE), `install` (the `/install` one-liner and
+- `routes/` one Hono sub-app per resource: `sessions` (create, inspect, end, delete,
+  the dashboard URL as a QR code, and the refusal to delete the demo), `frames`
+  (ingest), `stream` (history + SSE), `install` (the `/install` one-liner and
   `/cli/afk`, the client itself), `web` (built dashboard).
 - `middleware/session-id.ts` answers 404 for a `:sessionId` that is not the 22 base62
   characters the server issues, before any route or storage backend sees it.
@@ -133,7 +135,11 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   S3-compatible one used against Lightsail object storage in production.
   `store/create-storage.ts` builds whichever `AFK_STORAGE=disk|s3` asks for.
 - `store/sweeper.ts` is retention: it deletes sessions `AFK_RETENTION_DAYS` after they
-  end and evicts them from the store's cache, on every backend.
+  end and evicts them from the store's cache, on every backend. `SessionStore.delete`
+  is the on-demand version behind `DELETE /api/sessions/:id`: the same storage call,
+  plus stopping a session that is still running (its streams get `end` with `reason:
+"deleted"`) and a tombstone in the negative id cache so the client's next request and
+  a dashboard reload get a 404 that says why.
 - `config.ts` parses every `AFK_*` variable once at startup into a validated
   `ServerConfig` (see [CONFIGURATION.md](CONFIGURATION.md)); `index.ts` turns that into
   the in-process shapes (`AppConfig` in `env.ts`, the store's options, the sweeper's).
@@ -315,6 +321,21 @@ span comes within a radius of the current cursor, falling back to the full list 
 nothing is nearby. Neither interprets raw measurements — they only render what the
 server's `AnomalyEvent`s already say.
 
+The session header's Delete control (`components/DeleteSession.tsx`, next to Share
+and the same size) asks once more on the button itself ("Really delete?"; Escape or a
+press elsewhere backs out) and then calls `DELETE /api/sessions/:id` through the
+`SessionSource` with no token, since the dashboard never has one and the link is
+enough. On success it navigates to the landing page with `?deleted=<id>`, which says so
+once; a refusal is shown under the button. It is hidden for the demo session, whose
+source refuses anyway and which the server refuses by name, and once the session has
+been deleted. A viewer whose session is deleted under them learns from the stream's
+`end` event (`StreamEndEvent.reason`, kept in `useSession` as `endReason`): the
+`StatusBanner` says "This session was deleted" in place of any verdict, and the frames
+already on the page stay, since they are all that is left. A link to a deleted
+session (a chain neighbour's `previousSessionId`, a stale bookmark) loads to "Could not
+load session: … was deleted" while the server remembers the deletion and "not found"
+after.
+
 The dashboard has a dark and a light theme. Every colour is a custom property on
 `:root` in `styles.css`, redefined under `:root[data-theme="light"]`; `theme.ts` is
 the pure model (`system` | `dark` | `light`, stored under `afk.theme` in
@@ -435,6 +456,21 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   single-writer assumptions in the SRE review's data item are unchanged: slabs and the
   compacted object are keyed the same way the parts were, and one server per bucket is
   still required.
+- **2026-09-14** Anyone holding a session's link may delete it. `DELETE
+/api/sessions/:id` takes the ingest token when the caller has one (`afk delete`) and
+  nothing at all when it does not (the dashboard's Delete control), because the id is
+  already the secret: 22 characters of base62, unguessable, and whoever has it sees
+  everything the session recorded, which is the greater power. There are no accounts to
+  tie ownership to, and a delete-only token in the URL would leak the same way the URL
+  does. Same trust model as viewing, written down here so it is not re-litigated as a
+  hardening item. The push-back to a client still sending is a 404 on ingest (the
+  session no longer exists; the server never forgets a live session for any other
+  reason), kept apart from the 410 the client answers by chaining; a tombstone in the
+  negative id cache makes that 404 cheap and lets it say "deleted" for a minute. The
+  demo session, which lives only in the dashboard's fixture, is refused by name (403)
+  so the one link everybody has cannot be used to make the landing page's example
+  vanish. Chain links are left dangling rather than rewritten: the neighbour already
+  renders a link, and a link to a 404 is the truth.
 - **2026-09-14** A cold dashboard load costs round trips, not bytes. The first visit to
   `/s/DbTEUHkKfXpo7biKEmk7XC` after the cache had let the session go took 40 s on the
   hosted instance, every reload after it milliseconds: the session was 4,320 frames in

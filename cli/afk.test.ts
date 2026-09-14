@@ -337,6 +337,54 @@ describe("json_get_number", () => {
   });
 });
 
+describe("log", () => {
+  /** The test process has no tty; a snippet that wants the terminal path says so. */
+  const AT_A_TERMINAL = "stderr_is_terminal() { return 0; }";
+  const TAG = "[1;33mafk ▸[0m ";
+
+  it("prefixes its messages with the plain afk: on stderr when stderr is not a terminal", async () => {
+    const { stdout, stderr } = await runBash("log hello world");
+
+    expect(stderr).toBe("afk: hello world\n");
+    expect(stdout).toBe("");
+  });
+
+  it("tags its messages in bold yellow on a terminal, so they stand apart from a command's output", async () => {
+    const { stderr } = await runBash(`${AT_A_TERMINAL}; log hello world`);
+
+    expect(stderr).toBe(`${TAG}hello world\n`);
+  });
+
+  it("keeps the plain prefix on a terminal when NO_COLOR is set", async () => {
+    const { stderr } = await runBash(`${AT_A_TERMINAL}; log hello world`, { NO_COLOR: "1" });
+
+    expect(stderr).toBe("afk: hello world\n");
+  });
+
+  it("ignores an empty NO_COLOR, as the convention says", async () => {
+    const { stderr } = await runBash(`${AT_A_TERMINAL}; log hello`, { NO_COLOR: "" });
+
+    expect(stderr).toBe(`${TAG}hello\n`);
+  });
+
+  it("puts the same tag on die and on the update question", async () => {
+    const { stderr, code } = await runBash(
+      [
+        AT_A_TERMINAL,
+        "can_prompt() { return 0; }",
+        "AFK_VERSION=0.1.0; LATEST_CLIENT_VERSION=0.2.0; UPDATE_PROMPT_TIMEOUT_SECONDS=1",
+        "check_client_update prompt </dev/null",
+        "die boom",
+      ].join("\n"),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(`${TAG}update now? [y/N] `);
+    expect(stderr).toContain(`${TAG}error: boom\n`);
+    expect(stderr).not.toContain("afk: ");
+  });
+});
+
 describe("collect_system", () => {
   // Uses ps, sysctl, and vm_stat, which only exist on macOS.
   it.skipIf(process.platform !== "darwin")(
@@ -561,6 +609,25 @@ describe("send_oldest_batch", () => {
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "2" });
     const kept = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8");
     expect(kept).toBe("AAA\n");
+  });
+
+  it("returns 4 and keeps the queued files, without parking them, on a 404 response", async () => {
+    const sessionDir = await makeQueue();
+    await writeFile(join(sessionDir, "queue", "0000000001.ndjson"), "AAA\n");
+    const server = await startServer(() => ({
+      status: 404,
+      body: '{"error":"session deleted","details":{"reason":"deleted"}}',
+    }));
+
+    const { stdout, stderr } = await runBash('send_oldest_batch; printf "RC=%d" "$?"', {
+      ...baseEnv,
+      SESSION_DIR: sessionDir,
+      AFK_SERVER: server.url,
+    });
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "4" });
+    expect(await queueFiles(sessionDir)).toEqual(["0000000001.ndjson"]);
+    expect(await exists(join(sessionDir, "rejected"))).toBe(false);
   });
 
   it("returns 3, keeps the queued files, and prints the upgrade hint on a 426 response", async () => {
@@ -1546,6 +1613,167 @@ describe("sender_loop when the session is over on the server", () => {
   });
 });
 
+describe("sender_loop when the session was deleted on the server", () => {
+  const baseEnv = { INGEST_TOKEN: "tok-old", SESSION_ID: "oldSession", AFK_VERSION: "0.1.0" };
+  const DELETED_LINE = "afk: session oldSession was deleted on the server; telemetry stopped";
+
+  /** A server that has forgotten every session: 404 to everything. */
+  function deletedServer(): Promise<TestServer> {
+    return startServer(() => ({
+      status: 404,
+      body: '{"error":"session deleted","details":{"reason":"deleted"}}',
+    }));
+  }
+
+  async function makeOwnerQueue(afkHome: string): Promise<string> {
+    const sessionDir = join(afkHome, "sessions", "oldSession");
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "SYS\n");
+    await writeFile(join(sessionDir, "queue", "0000000002-system.ndjson"), "SYS\n");
+    return sessionDir;
+  }
+
+  it("stops, drops the queue, leaves deleted and stop markers, and says so once, even for a chaining owner", async () => {
+    const afkHome = await makeTempDir();
+    const server = await deletedServer();
+    const sessionDir = await makeOwnerQueue(afkHome);
+
+    const { code, stderr } = await runBash("sender_loop", {
+      ...baseEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      SESSION_DIR: sessionDir,
+      SESSION_CHAINING: "1",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stderr.split("\n").filter((line) => line === DELETED_LINE)).toHaveLength(1);
+    expect(server.requests.map((req) => req.url)).toEqual(["/api/sessions/oldSession/frames"]);
+    expect(await queueFiles(sessionDir)).toEqual([]);
+    expect(await exists(join(sessionDir, "deleted"))).toBe(true);
+    expect(await exists(join(sessionDir, "stop"))).toBe(true);
+    // Not a `gone` marker: that is what makes the sampler loop open a successor.
+    expect(await exists(join(sessionDir, "gone"))).toBe(false);
+  });
+
+  it("does not chain from the sampler loop, even when the session is old enough to", async () => {
+    const afkHome = await makeTempDir();
+    const server = await deletedServer();
+    const sessionDir = await makeOwnerQueue(afkHome);
+
+    // The sampler loop with a sender under it, the way afk start runs; the sender's 404
+    // must stop the loop rather than leave it chaining at the cap.
+    const { code, stderr } = await runBash(
+      [
+        "collect_system() { echo '{}'; }; collect_processes() { echo '{}'; }",
+        "sender_loop & SENDER_PID=$!",
+        "SESSION_CHAINING=1 MAX_DURATION_SECONDS=4 system_sampler_loop",
+        'printf "QUEUE=%s\\n" "$(queue_count)"',
+      ].join("\n"),
+      { ...baseEnv, AFK_HOME: afkHome, AFK_SERVER: server.url, SESSION_DIR: sessionDir },
+      10_000,
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stderr).toContain(DELETED_LINE);
+    expect(server.requests.filter((req) => req.url === "/api/sessions")).toEqual([]);
+    expect(await exists(join(sessionDir, "deleted"))).toBe(true);
+  });
+
+  it("stops a joiner too, in its own run directory, leaving the owner's files alone", async () => {
+    const afkHome = await makeTempDir();
+    const server = await deletedServer();
+    const runDir = join(afkHome, "sessions", "oldSession", "runs", "ab12cd34");
+    await mkdir(join(runDir, "queue"), { recursive: true });
+    await writeFile(join(runDir, "queue", "0000000003-run:ab12cd34.ndjson"), "RUN\n");
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=oldSession\ningestToken=tok-old\nserver=${server.url}\ndashboardUrl=http://example.test/s/oldSession\n`,
+    );
+
+    const { code, stderr } = await runBash('echo "$$" > "$AFK_HOME/owner.pid"; sender_loop', {
+      ...baseEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      SESSION_DIR: runDir,
+      SESSION_ROLE: "joiner",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stderr).toContain(DELETED_LINE);
+    expect(await queueFiles(runDir)).toEqual([]);
+    expect(await exists(join(runDir, "deleted"))).toBe(true);
+    expect(await exists(join(afkHome, "current"))).toBe(true);
+  });
+
+  it("follows a joiner to the successor named in current when only the old session was deleted", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer((req) =>
+      req.url.startsWith("/api/sessions/oldSession/")
+        ? { status: 404, body: '{"error":"session deleted","details":{"reason":"deleted"}}' }
+        : { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' },
+    );
+    const runDir = join(afkHome, "sessions", "oldSession", "runs", "ab12cd34");
+    await mkdir(join(runDir, "queue"), { recursive: true });
+    await writeFile(join(runDir, "queue", "0000000003-run:ab12cd34.ndjson"), "RUN\n");
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=newSession\ningestToken=tok-new\nserver=${server.url}\ndashboardUrl=http://example.test/s/newSession\n`,
+    );
+
+    const { stdout, stderr } = await runBash(
+      [
+        'echo "$$" > "$AFK_HOME/owner.pid"',
+        'sender_loop 2>"$AFK_HOME/sender.log" & SENDER=$!',
+        "sleep 3",
+        'kill "$SENDER"; wait "$SENDER" 2>/dev/null',
+        'cat "$AFK_HOME/sender.log"',
+      ].join("\n"),
+      {
+        ...baseEnv,
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+        SESSION_DIR: runDir,
+        SESSION_ROLE: "joiner",
+      },
+    );
+
+    expect(stdout, stderr).toContain(
+      "session oldSession was deleted; continuing in session newSession",
+    );
+    expect(server.requests.map((req) => [req.url, req.headers.authorization])).toEqual([
+      ["/api/sessions/oldSession/frames", "Bearer tok-old"],
+      ["/api/sessions/newSession/frames", "Bearer tok-new"],
+    ]);
+    expect(await exists(join(runDir, "deleted"))).toBe(false);
+  });
+});
+
+describe("flush_queue when the session was deleted on the server", () => {
+  it("drops the rest of the queue, leaves the markers, and prints the deleted line once", async () => {
+    const afkHome = await makeTempDir();
+    const sessionDir = join(afkHome, "sessions", "oldSession");
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(sessionDir, "queue", "0000000001-system.ndjson"), "SYS\n");
+    await writeFile(join(sessionDir, "queue", "0000000002-system.ndjson"), "SYS\n");
+    const server = await startServer(() => ({ status: 404, body: '{"error":"unknown session"}' }));
+
+    const { code, stderr } = await runBash("flush_queue; flush_queue", {
+      INGEST_TOKEN: "tok-old",
+      SESSION_ID: "oldSession",
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      SESSION_DIR: sessionDir,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stderr.split("\n").filter((line) => line.includes("was deleted"))).toHaveLength(1);
+    expect(server.requests).toHaveLength(1);
+    expect(await queueFiles(sessionDir)).toEqual([]);
+    expect(await exists(join(sessionDir, "deleted"))).toBe(true);
+  });
+});
+
 describe("owner exit", () => {
   const hostEnv = {
     HOST_NAME: "test-host",
@@ -1717,6 +1945,31 @@ describe("end_session", () => {
     expect(server.requests).toMatchObject([{ method: "POST", url: "/api/sessions/abc123/end" }]);
     expect(await exists(join(afkHome, "current"))).toBe(false);
     expect(await exists(join(afkHome, "owner.pid"))).toBe(false);
+    expect(await exists(join(sessionDir, "done"))).toBe(true);
+  });
+
+  it("returns 1 and says the session was deleted when the server answers 404, still clearing the state", async () => {
+    const afkHome = await makeTempDir();
+    const sessionDir = join(afkHome, "sessions", "abc123");
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(join(afkHome, "current"), "sessionId=abc123\ningestToken=tok-abc\n");
+    const server = await startServer(() => ({
+      status: 404,
+      body: '{"error":"session deleted","details":{"reason":"deleted"}}',
+    }));
+
+    const { stdout, stderr } = await runBash('end_session; printf "RC=%d\\n" "$?"', {
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      SESSION_ID: "abc123",
+      INGEST_TOKEN: "tok-abc",
+      SESSION_DIR: sessionDir,
+    });
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "1" });
+    expect(stderr).toContain("afk: session abc123 was deleted on the server; telemetry stopped");
+    expect(await exists(join(afkHome, "current"))).toBe(false);
+    expect(await exists(join(sessionDir, "deleted"))).toBe(true);
     expect(await exists(join(sessionDir, "done"))).toBe(true);
   });
 });
@@ -2797,6 +3050,30 @@ describe("cmd_run", () => {
   );
 
   it.skipIf(process.platform !== "darwin")(
+    "passes the command's stdout and stderr through on their own descriptors, in order, and exits with its status",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+      const command = "for i in 1 2 3; do echo out $i; echo err $i >&2; done; exit 7";
+
+      const { code, stdout, stderr } = await runBash(`cmd_run -- sh -c '${command}'`, {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+      });
+
+      expect(code).toBe(7);
+      // stdout is the dashboard URL block, then the command's lines exactly as written.
+      expect(stdout).toMatch(/^\n {2}http:\/\/example\.test\/s\/sess123\n\nout 1\nout 2\nout 3\n$/);
+      // stderr has the command's lines in order, and only afk's own lines around them.
+      const commandLines = stderr.split("\n").filter((line) => line.startsWith("err "));
+      expect(commandLines).toEqual(["err 1", "err 2", "err 3"]);
+      const afkLines = stderr.split("\n").filter((line) => line !== "" && !line.startsWith("err "));
+      expect(afkLines.every((line) => line.startsWith("afk: "))).toBe(true);
+      expect(stderr).not.toContain("out ");
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
     "runs the command with the caller's umask, not the client's private one",
     async () => {
       const afkHome = await makeTempDir();
@@ -2853,6 +3130,282 @@ describe("cmd_run", () => {
       expect(server.requests.some((req) => req.body.includes("secret"))).toBe(false);
     },
   );
+});
+
+describe("cmd_run when the session is deleted on the server mid-command", () => {
+  const created =
+    '{"sessionId":"abc123","ingestToken":"tok-abc","dashboardUrl":"http://example.test/s/abc123","maxDurationSeconds":3600}';
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  const deleted = '{"error":"session deleted","details":{"reason":"deleted"}}';
+  const DELETED_LINE = "afk: session abc123 was deleted on the server; telemetry stopped";
+  /** Long enough for the deletion to land in the middle: a batch a second, deleted after the first. */
+  const RUN_SECONDS = 4;
+  const RUN_TIMEOUT_MS = 15_000;
+
+  /** Accepts the session and its first batch, then has forgotten the session for good. */
+  async function deletingServer(): Promise<TestServer> {
+    let batches = 0;
+    return startServer((req) => {
+      if (req.url === "/api/sessions") {
+        return { status: 201, body: created };
+      }
+      if (req.url.endsWith("/frames") && batches === 0) {
+        batches += 1;
+        return { status: 200, body: accepted };
+      }
+      return { status: 404, body: deleted };
+    });
+  }
+
+  // Runs the real collectors for the session it owns, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "keeps the command running with its output flowing and its exit code, stops the telemetry, and never chains or ends",
+    { timeout: RUN_TIMEOUT_MS },
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await deletingServer();
+      const command = `for i in 1 2 3 ${RUN_SECONDS}; do echo out $i; echo err $i >&2; sleep 1; done; exit 5`;
+
+      const { code, stdout, stderr } = await runBash(
+        `cmd_run -- sh -c '${command}'`,
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+        RUN_TIMEOUT_MS,
+      );
+
+      expect(code).toBe(5);
+      expect(stdout).toContain("out 1\nout 2\nout 3\nout 4\n");
+      expect(stderr).toContain("err 1\n");
+      expect(stderr).toContain("err 4\n");
+      expect(stderr.split("\n").filter((line) => line === DELETED_LINE)).toHaveLength(1);
+      expect(stderr).toContain("command exited with status 5");
+      expect(stderr).not.toContain("Dashboard stays available");
+      const urls = server.requests.map((req) => req.url);
+      expect(urls.filter((url) => url === "/api/sessions")).toHaveLength(1);
+      expect(urls.filter((url) => url.endsWith("/end"))).toEqual([]);
+      // The batch that learned of the deletion was the last one sent.
+      expect(urls.filter((url) => url.endsWith("/frames"))).toHaveLength(2);
+      const sessionDir = join(afkHome, "sessions", "abc123");
+      expect(await exists(join(sessionDir, "deleted"))).toBe(true);
+      expect(await exists(join(sessionDir, "done"))).toBe(true);
+      expect(await queueFiles(sessionDir)).toEqual([]);
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "stops a joiner's telemetry when the owner's session is deleted, and the command still runs to the end",
+    { timeout: RUN_TIMEOUT_MS },
+    async () => {
+      const afkHome = await makeTempDir();
+      let batches = 0;
+      const server = await startServer((req) => {
+        if (req.url === "/api/sessions/abc123" && batches === 0) {
+          return { status: 200, body: '{"status":"active","maxDurationSeconds":3600}' };
+        }
+        if (req.url.endsWith("/frames") && batches === 0) {
+          batches += 1;
+          return { status: 200, body: accepted };
+        }
+        return { status: 404, body: deleted };
+      });
+      await mkdir(join(afkHome, "sessions", "abc123"), { recursive: true });
+      await writeFile(
+        join(afkHome, "current"),
+        `sessionId=abc123\ningestToken=tok-abc\nserver=${server.url}\ndashboardUrl=http://example.test/s/abc123\n`,
+      );
+      // This test process stands in for the owner, alive for the whole run.
+      await writeFile(join(afkHome, "owner.pid"), `${process.pid}\n`);
+
+      const { code, stdout, stderr } = await runBash(
+        `cmd_run -- sh -c 'for i in 1 2 3; do echo out $i; sleep 1; done'`,
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+        RUN_TIMEOUT_MS,
+      );
+
+      expect(code, stderr).toBe(0);
+      expect(stdout).toContain("out 1\nout 2\nout 3\n");
+      expect(stderr).toContain("joining session abc123");
+      expect(stderr.split("\n").filter((line) => line === DELETED_LINE)).toHaveLength(1);
+      const urls = server.requests.map((req) => req.url);
+      expect(urls.filter((url) => url === "/api/sessions")).toEqual([]);
+      expect(urls.filter((url) => url.endsWith("/end"))).toEqual([]);
+      expect(urls.filter((url) => url.endsWith("/frames"))).toHaveLength(2);
+      // The owner's files are the owner's to remove.
+      expect(await exists(join(afkHome, "current"))).toBe(true);
+    },
+  );
+});
+
+describe("afk start when the session is deleted on the server", () => {
+  const created =
+    '{"sessionId":"abc123","ingestToken":"tok-abc","dashboardUrl":"http://example.test/s/abc123","maxDurationSeconds":3600}';
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  const deleted = '{"error":"session deleted","details":{"reason":"deleted"}}';
+  const EXIT_DEADLINE_MS = 10_000;
+
+  // Runs the real collectors, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "exits 0 with the deleted line, without chaining, ending, or sending anything more",
+    { timeout: 20_000 },
+    async () => {
+      const afkHome = await makeTempDir();
+      let batches = 0;
+      const server = await startServer((req) => {
+        if (req.url === "/api/sessions") {
+          return { status: 201, body: created };
+        }
+        if (req.url.endsWith("/frames") && batches === 0) {
+          batches += 1;
+          return { status: 200, body: accepted };
+        }
+        return { status: 404, body: deleted };
+      });
+      const owner = spawnAfk(["start", "--no-qr"], { AFK_HOME: afkHome, AFK_SERVER: server.url });
+
+      await waitUntil(
+        "the owner to exit on its own",
+        () => owner.child.exitCode !== null,
+        EXIT_DEADLINE_MS,
+      );
+      const exitCode = await owner.exited;
+
+      expect(exitCode, owner.stderr()).toBe(0);
+      expect(owner.stderr()).toContain(
+        "afk: session abc123 was deleted on the server; telemetry stopped",
+      );
+      expect(owner.stderr()).not.toContain("ending session");
+      expect(server.requests.map((req) => req.url)).toEqual([
+        "/api/sessions",
+        "/api/sessions/abc123/frames",
+        "/api/sessions/abc123/frames",
+      ]);
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+      expect(await exists(join(afkHome, "sessions", "abc123", "done"))).toBe(true);
+      expect(await queueFiles(join(afkHome, "sessions", "abc123"))).toEqual([]);
+    },
+  );
+});
+
+describe("afk delete", () => {
+  const deletedBody = '{"sessionId":"abc123","frames":42}';
+
+  async function writeCurrent(afkHome: string, serverUrl: string): Promise<void> {
+    await writeFile(
+      join(afkHome, "current"),
+      `sessionId=abc123\ningestToken=tok-abc\nserver=${serverUrl}\ndashboardUrl=http://example.test/s/abc123\n`,
+    );
+  }
+
+  it("deletes the current session with its token and reports the frame count", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: deletedBody }));
+    await writeCurrent(afkHome, server.url);
+
+    const { code, stderr } = await runAfk(["delete"], { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toMatchObject([
+      {
+        method: "DELETE",
+        url: "/api/sessions/abc123",
+        headers: { authorization: "Bearer tok-abc" },
+      },
+    ]);
+    expect(stderr).toContain(`afk: deleted session abc123 from ${server.url} (42 frames)`);
+  });
+
+  it("deletes the named session with the token its own record holds", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: deletedBody }));
+    const sessionDir = join(afkHome, "sessions", "abc123");
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, "session.json"),
+      `{"sessionId":"abc123","ingestToken":"tok-abc","server":"${server.url}","dashboardUrl":"http://example.test/s/abc123"}\n`,
+    );
+
+    const { code, stderr } = await runAfk(["delete", "abc123"], {
+      AFK_HOME: afkHome,
+      AFK_SERVER: "http://127.0.0.1:1",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toMatchObject([
+      {
+        method: "DELETE",
+        url: "/api/sessions/abc123",
+        headers: { authorization: "Bearer tok-abc" },
+      },
+    ]);
+  });
+
+  it("deletes a session this machine has no record of without a bearer, since the id is enough", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: deletedBody }));
+
+    const { code, stderr } = await runAfk(["delete", "abc123"], {
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0]!.headers.authorization).toBeUndefined();
+  });
+
+  it("exits 1 naming the session when there is nothing to delete on the server", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 404, body: '{"error":"unknown session"}' }));
+
+    const { code, stderr } = await runAfk(["delete", "abc123"], {
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(`session abc123 is not on ${server.url} (unknown session)`);
+  });
+
+  it("reports the server's refusal to delete the demo session and exits 1", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({
+      status: 403,
+      body: '{"error":"the demo session cannot be deleted"}',
+    }));
+
+    const { code, stderr } = await runAfk(["delete", "demo"], {
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(
+      `${server.url} refused to delete session demo (HTTP 403): the demo session cannot be deleted`,
+    );
+  });
+
+  it("exits 1 with a message when there is no current session and no id", async () => {
+    const afkHome = await makeTempDir();
+
+    const { code, stderr } = await runAfk(["delete"], { AFK_HOME: afkHome });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(
+      "no session running on this machine; name one: afk delete <session-id>",
+    );
+  });
+
+  it("exits 1 with curl's reason when the server cannot be reached", async () => {
+    const afkHome = await makeTempDir();
+
+    const { code, stderr } = await runAfk(["delete", "abc123"], {
+      AFK_HOME: afkHome,
+      AFK_SERVER: "http://127.0.0.1:1",
+    });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("could not reach http://127.0.0.1:1");
+  });
 });
 
 describe("cmd_run owning a session that reaches its cap", () => {
