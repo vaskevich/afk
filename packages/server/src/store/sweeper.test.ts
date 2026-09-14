@@ -34,6 +34,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     startedAt: T0_MS,
     endedAt: T0_MS + 60_000,
     maxDurationSeconds: MAX_DURATION_SECONDS,
+    previousSessionId: null,
+    nextSessionId: null,
     ...overrides,
   };
 }

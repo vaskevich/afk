@@ -3,7 +3,8 @@ import { HostInfo, StoredFrame } from "@afk/shared";
 
 /**
  * What the server persists about a session, independent of where. The live per-stream
- * sequence bookkeeping is not stored; it is rebuilt from the frames on load.
+ * sequence bookkeeping is not stored; it is rebuilt from the frames on load. The chain
+ * links default to null so records written before chaining existed still parse.
  */
 export const SessionRecord = z.object({
   sessionId: z.string(),
@@ -13,6 +14,10 @@ export const SessionRecord = z.object({
   startedAt: z.number().int(),
   endedAt: z.number().int().nullable(),
   maxDurationSeconds: z.number().int().positive(),
+  /** The session this one continues (the client chained past the cap), or null. */
+  previousSessionId: z.string().nullable().default(null),
+  /** The session that continues this one, or null. Set when the successor is created. */
+  nextSessionId: z.string().nullable().default(null),
 });
 export type SessionRecord = z.infer<typeof SessionRecord>;
 

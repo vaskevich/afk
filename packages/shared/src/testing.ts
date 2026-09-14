@@ -205,6 +205,8 @@ export function makeSessionSummary(overrides: Partial<SessionSummary> = {}): Ses
     maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
     streamCount: 1,
     maxStreams: 10,
+    previousSessionId: null,
+    nextSessionId: null,
     ...overrides,
   };
 }

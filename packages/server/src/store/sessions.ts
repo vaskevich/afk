@@ -76,7 +76,6 @@ export interface IngestResult {
   duplicates: number;
 }
 
-/** Thrown by `ingest` when a batch would add an eleventh (etc.) stream to a session. */
 /** Thrown by `ingest` when a batch would push a session past `maxFramesPerSession`. */
 export class TooManyFramesError extends Error {
   constructor(readonly limit: number) {
@@ -84,6 +83,17 @@ export class TooManyFramesError extends Error {
   }
 }
 
+/** Thrown by `create` when the session to chain from already has a successor. */
+export class AlreadyContinuedError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly nextSessionId: string,
+  ) {
+    super(`session ${sessionId} already continues in ${nextSessionId}`);
+  }
+}
+
+/** Thrown by `ingest` when a batch would add an eleventh (etc.) stream to a session. */
 export class TooManyStreamsError extends Error {
   constructor(
     readonly stream: string,
@@ -142,20 +152,50 @@ export class SessionStore {
     };
   }
 
-  async create(input: { host: HostInfo; clientVersion: string }): Promise<Session> {
+  /**
+   * Creates a session. With `previous` (a session this client owns, already checked by
+   * the route) the new one continues it: both records are linked, and the previous
+   * session ends at this moment if it was still running (at its cap if it had already
+   * expired), so its viewers get an `ended` event naming the successor.
+   */
+  async create(input: {
+    host: HostInfo;
+    clientVersion: string;
+    previous?: Session;
+  }): Promise<Session> {
+    const { previous } = input;
+    if (previous && previous.nextSessionId !== null) {
+      throw new AlreadyContinuedError(previous.sessionId, previous.nextSessionId);
+    }
+    const now = Date.now();
     const record: SessionRecord = {
       sessionId: randomId(),
       ingestToken: randomToken(),
       host: input.host,
       clientVersion: input.clientVersion,
-      startedAt: Date.now(),
+      startedAt: now,
       endedAt: null,
       maxDurationSeconds: this.options.maxSessionDurationSeconds,
+      previousSessionId: previous?.sessionId ?? null,
+      nextSessionId: null,
     };
     await this.storage.putSession(record);
     const session = this.hydrate(record, []);
     this.sessions.set(session.sessionId, session);
+    if (previous) {
+      await this.continueIn(previous, session, now);
+    }
     return session;
+  }
+
+  /** Links `previous` to its successor and ends it (persisting either way). */
+  private async continueIn(previous: Session, next: Session, now: number): Promise<void> {
+    previous.nextSessionId = next.sessionId;
+    if (previous.endedAt === null) {
+      await this.end(previous, Math.min(now, sessionEndMs(previous)));
+    } else {
+      await this.storage.putSession(this.record(previous));
+    }
   }
 
   async get(sessionId: string): Promise<Session | undefined> {
@@ -219,9 +259,28 @@ export class SessionStore {
   }
 
   private record(session: Session): SessionRecord {
-    const { sessionId, ingestToken, host, clientVersion, startedAt, endedAt, maxDurationSeconds } =
-      session;
-    return { sessionId, ingestToken, host, clientVersion, startedAt, endedAt, maxDurationSeconds };
+    const {
+      sessionId,
+      ingestToken,
+      host,
+      clientVersion,
+      startedAt,
+      endedAt,
+      maxDurationSeconds,
+      previousSessionId,
+      nextSessionId,
+    } = session;
+    return {
+      sessionId,
+      ingestToken,
+      host,
+      clientVersion,
+      startedAt,
+      endedAt,
+      maxDurationSeconds,
+      previousSessionId,
+      nextSessionId,
+    };
   }
 
   status(session: Session, now = Date.now()): SessionStatus {
@@ -239,14 +298,21 @@ export class SessionStore {
       maxDurationSeconds: session.maxDurationSeconds,
       streamCount: session.latestSequence.size,
       maxStreams: this.options.limits.maxStreamsPerSession,
+      previousSessionId: session.previousSessionId,
+      nextSessionId: session.nextSessionId,
     };
   }
 
-  async end(session: Session): Promise<void> {
+  /**
+   * Ends a session at `endedAt` (now by default; a chain or the silence rule pass the
+   * moment they decided on), persists it, closes its open events, and tells subscribers.
+   * Does nothing to a session that has already ended.
+   */
+  async end(session: Session, endedAt = Date.now()): Promise<void> {
     if (session.endedAt !== null) {
       return;
     }
-    session.endedAt = Date.now();
+    session.endedAt = endedAt;
     await this.storage.putSession(this.record(session));
     this.emitEvents(session, session.engine.closeAll(session.endedAt));
     this.emit(session, { type: "ended", summary: this.summary(session) });

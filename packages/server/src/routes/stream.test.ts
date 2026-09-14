@@ -6,6 +6,7 @@ import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 import {
+  chainTestSession,
   createTestSession,
   endTestSession as endSession,
   makeAppConfig,
@@ -122,6 +123,20 @@ describe("GET /api/sessions/:id/stream", () => {
     const messages = parseSSE(await res.text());
     const frameIds = messages.filter((m) => m.event === "frame").map((m) => m.id);
     expect(frameIds).toEqual(["3"]);
+  });
+
+  it("ends the stream of a chained session with a summary naming its successor", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    const next = await chainTestSession(app, sessionId, ingestToken);
+
+    const res = await app.request(`/api/sessions/${sessionId}/stream`);
+
+    const messages = parseSSE(await res.text());
+    expect(messages.at(-1)).toMatchObject({
+      event: "end",
+      data: { sessionId, status: "ended", nextSessionId: next.sessionId },
+    });
   });
 
   it("returns 404 for an unknown session id", async () => {

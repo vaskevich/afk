@@ -225,6 +225,14 @@ export const CreateSessionRequest = z.object({
     }),
   clientVersion: z.string().min(1).max(64),
   host: HostInfo,
+  /**
+   * Chains this session onto one the same client owns, so a trace that outgrows the
+   * cap continues under a new id. The request must also carry the previous session's
+   * ingest token as `Authorization: Bearer <token>`; the server ends the previous
+   * session at that moment and links the two (`previousSessionId` / `nextSessionId`
+   * on both summaries). See "Chaining" in docs/PROTOCOL.md.
+   */
+  previousSessionId: z.string().min(1).max(64).optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
@@ -263,6 +271,10 @@ export const SessionSummary = z.object({
   /** Distinct streams seen so far, and the server's cap. A client checks this before joining. */
   streamCount: z.number().int().nonnegative(),
   maxStreams: z.number().int().positive(),
+  /** The session this one continues, when the client chained past the cap; null otherwise. */
+  previousSessionId: z.string().nullable(),
+  /** The session that continues this one; set (and the session ended) the moment the chain happens. */
+  nextSessionId: z.string().nullable(),
 });
 export type SessionSummary = z.infer<typeof SessionSummary>;
 

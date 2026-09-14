@@ -394,6 +394,8 @@ export function generateDemoSession(sessionId: string): FramesResponse {
     maxDurationSeconds: 60 * 60,
     streamCount: 3,
     maxStreams: 10,
+    previousSessionId: null,
+    nextSessionId: null,
   };
 
   const frames: StoredFrame[] = [];
