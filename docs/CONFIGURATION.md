@@ -20,12 +20,12 @@ so the numbers below are the numbers the code uses.
 
 ## Server
 
-| Variable              | Default                   | Meaning                                                                    | Notes                                                                                                                                                                 |
-| --------------------- | ------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AFK_PORT`            | `4141`                    | TCP port to listen on.                                                     | 1–65535.                                                                                                                                                              |
-| `AFK_PUBLIC_BASE_URL` | `http://localhost:<port>` | Public origin used to build the dashboard URLs the client prints.          | Production sets `https://afk.osv.im`. For UI work against the Vite dev server, set `http://localhost:5173` so printed URLs open there.                                |
-| `AFK_WEB_DIST`        | `packages/web/dist`       | Absolute path to the built dashboard the server serves.                    | Under the repo root `paths.ts` derives from its own location when unset (the same in dev and in the image), which is why the Dockerfile keeps the `packages/` layout. |
-| `AFK_CLIENT_SCRIPT`   | `cli/afk`                 | Absolute path to the client script served at `/cli/afk` and by `/install`. | Under the same repo root when unset; the Dockerfile copies `cli/afk` to that layout. Both routes answer 404 when the file is missing.                                 |
+| Variable              | Default                   | Meaning                                                                    | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------- | ------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AFK_PORT`            | `4141`                    | TCP port to listen on.                                                     | 1–65535.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `AFK_PUBLIC_BASE_URL` | `http://localhost:<port>` | Public origin used to build the dashboard URLs the client prints.          | Production sets `https://afk.osv.im`. For UI work against the Vite dev server, set `http://localhost:5173` so printed URLs open there.                                                                                                                                                                                                                                                                                                       |
+| `AFK_WEB_DIST`        | `packages/web/dist`       | Absolute path to the built dashboard the server serves.                    | Under the repo root `paths.ts` derives from its own location when unset (the same in dev and in the image), which is why the Dockerfile keeps the `packages/` layout.                                                                                                                                                                                                                                                                        |
+| `AFK_CLIENT_SCRIPT`   | `cli/afk`                 | Absolute path to the client script served at `/cli/afk` and by `/install`. | Under the same repo root when unset; the Dockerfile copies `cli/afk` to that layout. Both routes answer 404 when the file is missing. Its `AFK_VERSION` line is read once at startup and reported as `client.version` by `/versionz` and as `latestClientVersion` on every session create (null and omitted, respectively, when the file is missing); a file that is there without that line is a startup error, since it is not the client. |
 
 ## Storage
 
@@ -107,8 +107,13 @@ repo; a copy installed with `curl -fsSL <origin>/install | sh` defaults to the `
 it was installed from, so a self-hosted server's users set nothing. Everything else the
 client needs, such as the session cap, comes from the server's create response. The
 remaining client knobs are documented in the script's own header: `AFK_SPOOL_MAX_BYTES`,
-`AFK_NO_QR`, `AFK_RUN_TAIL_LINES`, and `AFK_RUN_CAPTURE_MAX_BYTES` (the chunk size, 64 MiB
-by default, of the wrapped command's output `afk run` keeps on disk while it runs).
+`AFK_NO_QR`, `AFK_NO_UPDATE_PROMPT` (set to `1` and `afk start` never asks whether to
+install the newer client the server serves; the one-line notice still prints),
+`AFK_INSTALL_DIR` (where `afk update` and that prompt install the new copy, and where
+the installer itself installs: the running copy's own directory for the first two,
+`~/.local/bin` for a fresh `curl | sh`), `AFK_RUN_TAIL_LINES`, and
+`AFK_RUN_CAPTURE_MAX_BYTES` (the chunk size, 64 MiB by default, of the wrapped
+command's output `afk run` keeps on disk while it runs).
 
 The installer itself reads `AFK_INSTALL_DIR` (where to put `afk`, default `~/.local/bin`).
 

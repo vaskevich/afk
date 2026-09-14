@@ -21,6 +21,11 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
 - Print readable errors for capacity, version, and network problems, including curl's
   own reason when the server cannot be reached.
 - Be something a stranger can inspect before running.
+- Notice when the server it talks to serves a newer copy of itself (the create
+  response says so), tell the user, and on a terminal offer to run the server's
+  installer, without ever holding up a start nobody is watching or a wrapped command;
+  `afk update` does the same on demand and `afk version --check` just asks. See
+  "The latest client" in [VERSIONING.md](VERSIONING.md).
 - Today: macOS only. Wanted: Linux.
 
 ## Current decision
@@ -44,6 +49,20 @@ re-proposed as hardening items. Reopen one when its reason stops holding.
   every server rule works on frame timestamps in whole seconds and the dashboard
   draws at that resolution. A client that needs a real clock is the Python or Go
   client of the table above, not this one with one more tool bolted on.
+- **Not doing: re-exec into the new copy after an in-session update.** When `afk start`
+  installs an update at its prompt, the process carries on running the code it loaded
+  and the new copy is used from the next `afk start`. Re-executing would mean handing
+  a live session (its id, token, spool, sender, and the sampler's chain timer) to a
+  script whose state layout may have changed, exactly the kind of transition the
+  version bump exists to warn about; the prompt happens once, right after the session
+  is created, so the cost of waiting is one session on the old code, and the user is
+  told so on the same line. Reopen if updates start carrying fixes a running session
+  cannot wait for, which so far would be a 426 from the server, not a notice.
+- **Not doing: the update question in `afk run`.** An `afk run` that starts its own
+  session prints the notice only. Its command is about to get stdin, and a question
+  that waits ten seconds (or eats the first line the user meant for the command)
+  would make telemetry get in the way of the command, which `afk run` promises not
+  to do. `afk update` is one command away.
 - **Not doing: clock skew handling on the client.** The client stamps frames with its
   own wall clock and the server records `receivedAt`; a laptop clock minutes off puts
   frames visibly early or late on the timeline. Correcting that client-side would

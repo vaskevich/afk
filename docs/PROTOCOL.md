@@ -66,12 +66,22 @@ rather than hardcoding it:
   "sessionId": "D3FzMqK8qOLVva9LoHF9uc",
   "ingestToken": "…",
   "dashboardUrl": "https://afk.osv.im/s/D3FzMqK8qOLVva9LoHF9uc",
-  "maxDurationSeconds": 3600
+  "maxDurationSeconds": 3600,
+  "latestClientVersion": "0.3.0"
 }
 ```
 
 The response is compact JSON with no whitespace; the bash client extracts fields with
 `sed`, so keep it that way.
+
+`latestClientVersion` is the version of the client the server itself serves at
+`/cli/afk` (the same value as `client.version` in `GET /versionz`), carried here so a
+client learns it is behind without a second request. It is absent when the server has
+no client script to serve, and an older server does not send it at all; the client
+treats both as "nothing to say". What the client does with it (a notice, and on a
+terminal an offer to run the installer) is described in [CLIENT.md](CLIENT.md) and
+[VERSIONING.md](VERSIONING.md); it is advice, never a rejection, which is what 426 is
+for.
 
 At capacity (`maxActiveSessions` active sessions already, see admission control below)
 the server returns 503 with a `Retry-After` header (seconds) instead of creating a
@@ -530,6 +540,7 @@ the same body under the API prefix the dashboard's dev proxy forwards.
 {
   "server": { "version": "0.1.0", "commit": "abc1234", "builtAt": "2026-09-15T10:00:00Z" },
   "web": { "version": "0.1.0", "commit": "abc1234" },
+  "client": { "version": "0.3.0" },
   "protocolVersion": 1
 }
 ```
@@ -541,12 +552,14 @@ the same body under the API prefix the dashboard's dev proxy forwards.
 | `server.builtAt`  | when the image was built (`AFK_BUILD_TIME`, ISO 8601); null when not set                                                                                           |
 | `web`             | `packages/web`'s package.json version and the commit its build was made from, read from `dist/version.json` (written by Vite); null when no dashboard build exists |
 | `web.commit`      | `"unknown"` when the build ran outside a git checkout without `AFK_BUILD_SHA`                                                                                      |
+| `client`          | the version of the client script served at `/cli/afk` (its `AFK_VERSION` line, read at startup); null when there is no client script at `AFK_CLIENT_SCRIPT`        |
 | `protocolVersion` | `PROTOCOL_VERSION` in shared                                                                                                                                       |
 
 `infra/deploy.sh` polls this after a rollout until `server.commit` equals the commit it
 built, so a deployment Lightsail accepted but that never served the new code fails
-the deploy instead of passing silently. Schemas: `VersionResponse`, `ServerBuildInfo`,
-`WebBuildInfo` in `packages/shared/src/protocol.ts`.
+the deploy instead of passing silently. `afk version --check` prints `client.version`
+next to the running copy's own. Schemas: `VersionResponse`, `ServerBuildInfo`,
+`WebBuildInfo`, `ClientBuildInfo` in `packages/shared/src/protocol.ts`.
 
 ## Versioning
 
