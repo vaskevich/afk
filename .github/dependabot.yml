@@ -1,0 +1,33 @@
+# Keeps the three things CI and the image pull pinned in this repo current: the
+# commit-SHA-pinned GitHub Actions in .github/workflows/, the pnpm workspace's npm
+# dependencies, and the digest-pinned node base image in the Dockerfile. Weekly, all
+# on the same morning, so the PRs arrive as one batch rather than trickling in.
+version: 2
+updates:
+  # Bumps the SHA and the trailing `# vX.Y.Z` comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
+
+  # The pnpm workspace is one lockfile at the root, so a single entry covers every
+  # package. Minor and patch bumps arrive as one grouped PR; a major bump gets its own.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # Tracks the digest behind node:22-alpine; a new digest for the same tag is a PR.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
