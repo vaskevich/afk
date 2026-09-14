@@ -13,8 +13,6 @@
  * schema.
  */
 import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { MinimumVersions } from "./env.ts";
 import {
@@ -26,27 +24,27 @@ import {
 import { parseSemver } from "./utils/semver.ts";
 import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS, type AdmissionLimits } from "./env.ts";
 import { DEFAULT_LOG_LEVEL, LOG_LEVELS, type LogLevel } from "./log/logger.ts";
+import { REPO_ROOT, repoPaths } from "./paths.ts";
 import { DEFAULT_STORE_OPTIONS, DEFAULT_TICK_INTERVAL_MS } from "./store/sessions.ts";
 import { DEFAULT_RETENTION_DAYS, DEFAULT_SWEEP_INTERVAL_MS } from "./store/sweeper.ts";
-
-const here = path.dirname(fileURLToPath(import.meta.url));
 
 const MS_PER_SECOND = 1000;
 const MAX_TCP_PORT = 65535;
 
 /**
- * Where the server looks for the built dashboard, the client script, and its data
- * directory when not told otherwise. Resolved from this file, so the Docker image keeps
- * the repo's `packages/` and `cli/` layout.
+ * Where the server looks for the built dashboard, the client script, its data
+ * directory, and its own package.json when not told otherwise: the repo layout under
+ * the root `paths.ts` derives from its own location, in dev and in the image alike.
  */
+const paths = repoPaths(REPO_ROOT);
 export const DEFAULT_PATHS = {
-  webDistDir: path.resolve(here, "../../web/dist"),
-  clientScriptPath: path.resolve(here, "../../../cli/afk"),
-  dataDir: path.resolve(here, "../data"),
+  webDistDir: paths.webDistDir,
+  clientScriptPath: paths.clientScriptPath,
+  dataDir: paths.dataDir,
 };
 
 /** The server's own manifest, whose `version` is what /versionz and /api/stats report. */
-export const SERVER_PACKAGE_JSON = path.resolve(here, "../package.json");
+export const SERVER_PACKAGE_JSON = paths.serverPackageJson;
 
 /** What `loadConfig` falls back to when the environment does not say: the paths, and the version. */
 export interface ConfigDefaults {
