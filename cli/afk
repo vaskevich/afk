@@ -51,6 +51,9 @@
 #                                  afk processes can join it
 #   owner.pid                      pid of the process that created it; a dead owner
 #                                  marks `current` stale without asking the server
+#   sessions/<id>/session.json     the same record, kept with the session's files so a
+#                                  later `afk start` can send what was left in its queue
+#                                  (a session that ended while the server was unreachable)
 #   sessions/<id>/auth             the ingest token as a curl config file (`header = ...`),
 #                                  so curl reads it with -K instead of showing it in `ps`
 #   sessions/<id>/queue/<seq>-<stream>.ndjson
@@ -612,9 +615,7 @@ create_session() { # [previous-session-id previous-ingest-token]
 
   SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
   mkdir -p "$SESSION_DIR/queue"
-  # Lets a later `afk run` join this session, and `afk status`/`afk stop` find its owner.
-  printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
-    "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$AFK_HOME/current"
+  write_session_records
   echo "$$" > "$AFK_HOME/owner.pid"
   # Whatever way this process ends (Ctrl-C, `afk stop`, a die), the files that let
   # others join it must not outlive it. Bash resets traps in subshells, so the sender
@@ -625,6 +626,35 @@ create_session() { # [previous-session-id previous-ingest-token]
 remove_owner_state() {
   remove_current_session_files
   rm -f "$AFK_HOME/create-response.json"
+}
+
+# Two records of the session just created. `current` lets a later `afk run` join it
+# and `afk status`/`afk stop` find its owner; it goes through a temp file and a rename
+# so a process re-reading it during a chain never sees half of it. The session's own
+# `session.json` stays with its queue after `current` is gone, so a later `afk start`
+# can still send what this one could not (resend_leftover_queues).
+SESSION_RECORD_NAME=session.json
+write_session_records() {
+  local temp="$AFK_HOME/.current.tmp"
+  printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
+    "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$temp" \
+    && mv "$temp" "$AFK_HOME/current"
+  printf '{"sessionId":"%s","ingestToken":"%s","server":"%s","dashboardUrl":"%s"}\n' \
+    "$(json_string "$SESSION_ID")" "$(json_string "$INGEST_TOKEN")" \
+    "$(json_string "$AFK_SERVER")" "$(json_string "$DASHBOARD_URL")" > "$SESSION_DIR/$SESSION_RECORD_NAME"
+}
+
+# Loads a session's own record (see write_session_records) into the session variables.
+# Returns 1 when there is none or it is incomplete.
+read_session_record() { # session-dir
+  local record
+  record=$(cat "$1/$SESSION_RECORD_NAME" 2>/dev/null) || return 1
+  SESSION_ID=$(json_get_string "$record" sessionId)
+  INGEST_TOKEN=$(json_get_string "$record" ingestToken)
+  AFK_SERVER=$(json_get_string "$record" server)
+  DASHBOARD_URL=$(json_get_string "$record" dashboardUrl)
+  [ -n "$SESSION_ID" ] && [ -n "$INGEST_TOKEN" ] && [ -n "$AFK_SERVER" ] || return 1
+  SESSION_DIR=$1
 }
 
 # For `afk start`: a machine you are about to leave should get a session eventually,
@@ -793,6 +823,48 @@ cleanup_old_sessions() {
       [ "$(file_age_seconds "$dir")" -gt "$SESSION_ORPHAN_RETENTION_SECONDS" ] && rm -rf "$dir"
     fi
   done
+  return 0
+}
+
+# Frames a previous session could not send before its owner exited (the server was
+# unreachable, or the owner was killed) are still in its queue, and the server accepts
+# them until that session expires. Before a new session is created, every old queue
+# whose session.json is still there is sent once, with the sender's batching: what the
+# server accepts is deleted, a 410 or 404 means the session is over and its queue is
+# dropped, and anything else leaves the rest for the next start or the sweep. One
+# line is logged per session touched. A server that cannot be reached ends the whole
+# pass, since the next queue would fail the same way and `afk start` is waiting.
+resend_leftover_queues() {
+  local dir count left rc server=$AFK_SERVER
+  for dir in "$AFK_HOME"/sessions/*; do
+    [ -d "$dir/queue" ] || continue
+    read_session_record "$dir" || continue
+    count=$(queue_count)
+    [ "$count" -gt 0 ] || continue
+    rc=0
+    while [ "$(queue_count)" -gt 0 ]; do
+      send_oldest_batch; rc=$?
+      # An unknown session is parked as a rejection by the sender; here it means the
+      # server has forgotten the session, the same as a 410.
+      if [ "$rc" = 0 ] && [ "$HTTP_STATUS" = 404 ]; then
+        rc=2
+      fi
+      [ "$rc" = 0 ] || break
+    done
+    left=$(queue_count)
+    case "$rc" in
+      0)
+        log "sent $count frames left over from session $SESSION_ID" ;;
+      2)
+        rm -rf "$dir/queue"
+        touch "$dir/done"
+        log "session $SESSION_ID is over on the server; dropped its $left unsent frames" ;;
+      *)
+        log "could not send the $left frames left over from session $SESSION_ID (${HTTP_ERROR:-HTTP $HTTP_STATUS}); they stay for the next start"
+        break ;;
+    esac
+  done
+  AFK_SERVER=$server
   return 0
 }
 
@@ -1103,6 +1175,7 @@ cmd_start() {
   check_platform
   guard_running_session "$force"
   cleanup_old_sessions
+  resend_leftover_queues
   gather_host_info
   create_session_or_wait
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."

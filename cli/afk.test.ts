@@ -1039,6 +1039,7 @@ describe("create_session", () => {
         // The owner removes both files when it exits, so read them while it is alive.
         'printf "CURRENT_FILE=%s\\n" "$(tr "\\n" "|" < "$AFK_HOME/current")"',
         'printf "OWNER_PID_FILE=%s\\n" "$(cat "$AFK_HOME/owner.pid")"',
+        'printf "SESSION_RECORD=%s\\n" "$(cat "$SESSION_DIR/session.json")"',
       ].join("\n"),
       { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
     );
@@ -1058,6 +1059,13 @@ describe("create_session", () => {
         "dashboardUrl=http://example.test/s/D3FzMqK8qOLVva9LoHF9uc|",
       // The creating process is the owner; afk status/stop and joiners check it is alive.
       OWNER_PID_FILE: values.PID,
+      // Stays with the session's queue after current is gone, for resend_leftover_queues.
+      SESSION_RECORD: JSON.stringify({
+        sessionId: "D3FzMqK8qOLVva9LoHF9uc",
+        ingestToken: "tok-abc",
+        server: server.url,
+        dashboardUrl: "http://example.test/s/D3FzMqK8qOLVva9LoHF9uc",
+      }),
     });
     const queueStat = await stat(join(afkHome, "sessions", "D3FzMqK8qOLVva9LoHF9uc", "queue"));
     expect(queueStat.isDirectory()).toBe(true);
@@ -1690,6 +1698,166 @@ describe("cleanup_old_sessions", () => {
 
     expect(code, stderr).toBe(0);
   });
+});
+
+describe("resend_leftover_queues", () => {
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+
+  /** A session whose owner exited with frames still queued: its record and queue, no `current`. */
+  async function makeLeftoverSession(
+    afkHome: string,
+    serverUrl: string,
+    id = "oldSession",
+  ): Promise<string> {
+    const sessionDir = join(afkHome, "sessions", id);
+    await mkdir(join(sessionDir, "queue"), { recursive: true });
+    await writeFile(
+      join(sessionDir, "session.json"),
+      JSON.stringify({
+        sessionId: id,
+        ingestToken: `tok-${id}`,
+        server: serverUrl,
+        dashboardUrl: `http://example.test/s/${id}`,
+      }),
+    );
+    await writeFile(join(sessionDir, "queue", "0000000007-system.ndjson"), "SEVEN\n");
+    await writeFile(join(sessionDir, "queue", "0000000008-system.ndjson"), "EIGHT\n");
+    return sessionDir;
+  }
+
+  it("sends an old session's queue with its own token and server, deletes what was accepted, and logs it", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: accepted }));
+    const oldDir = await makeLeftoverSession(afkHome, server.url);
+
+    const { code, stderr } = await runBash("resend_leftover_queues", {
+      AFK_HOME: afkHome,
+      AFK_SERVER: "http://the-new-server.test",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toMatchObject([
+      {
+        url: "/api/sessions/oldSession/frames",
+        headers: expect.objectContaining({ authorization: "Bearer tok-oldSession" }),
+        body: "SEVEN\nEIGHT\n",
+      },
+    ]);
+    expect(await queueFiles(oldDir)).toEqual([]);
+    expect(stderr).toContain("sent 2 frames left over from session oldSession");
+  });
+
+  it("goes back to the server afk start was given once the old queues are done", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: accepted }));
+    await makeLeftoverSession(afkHome, server.url);
+
+    const { stdout, stderr } = await runBash(
+      'resend_leftover_queues; printf "AFK_SERVER=%s\\n" "$AFK_SERVER"',
+      { AFK_HOME: afkHome, AFK_SERVER: "http://the-new-server.test" },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({
+      AFK_SERVER: "http://the-new-server.test",
+    });
+  });
+
+  it.each([410, 404])(
+    "drops the queue and marks the session done when the server answers %i, since the session is over",
+    async (status) => {
+      const afkHome = await makeTempDir();
+      const server = await startServer(() => ({ status, body: '{"error":"gone"}' }));
+      const oldDir = await makeLeftoverSession(afkHome, server.url);
+
+      const { code, stderr } = await runBash("resend_leftover_queues", { AFK_HOME: afkHome });
+
+      expect(code, stderr).toBe(0);
+      expect(server.requests).toHaveLength(1);
+      expect(await exists(join(oldDir, "queue"))).toBe(false);
+      expect(await exists(join(oldDir, "done"))).toBe(true);
+      expect(stderr).toContain("session oldSession is over on the server");
+    },
+  );
+
+  it("keeps the queue for the next start when the server cannot be reached", async () => {
+    const afkHome = await makeTempDir();
+    const oldDir = await makeLeftoverSession(afkHome, "http://127.0.0.1:1");
+
+    const { code, stderr } = await runBash("resend_leftover_queues", { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(oldDir)).toEqual([
+      "0000000007-system.ndjson",
+      "0000000008-system.ndjson",
+    ]);
+    expect(stderr).toMatch(/could not send the 2 frames left over from session oldSession/);
+  });
+
+  it("keeps the rest of the queue when a batch fails part way", async () => {
+    const afkHome = await makeTempDir();
+    let batches = 0;
+    const server = await startServer(() => {
+      batches += 1;
+      return batches === 1 ? { status: 200, body: accepted } : { status: 500, body: "{}" };
+    });
+    const oldDir = await makeLeftoverSession(afkHome, server.url);
+
+    const { code, stderr } = await runBash("SEND_MAX_FILES_PER_BATCH=1\nresend_leftover_queues", {
+      AFK_HOME: afkHome,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(oldDir)).toEqual(["0000000008-system.ndjson"]);
+    expect(stderr).toContain("could not send the 1 frames left over");
+  });
+
+  it("leaves a queue without a session record alone, since it has no token to send it with", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({ status: 200, body: accepted }));
+    const oldDir = await makeLeftoverSession(afkHome, server.url);
+    await rm(join(oldDir, "session.json"));
+
+    const { code, stderr } = await runBash("resend_leftover_queues", { AFK_HOME: afkHome });
+
+    expect(code, stderr).toBe(0);
+    expect(server.requests).toHaveLength(0);
+    expect(await queueFiles(oldDir)).toHaveLength(2);
+  });
+
+  // check_platform runs first and only passes on macOS.
+  it.skipIf(process.platform !== "darwin")(
+    "afk start sends the leftovers before it creates its own session",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startServer((req) =>
+        req.url === "/api/sessions"
+          ? {
+              status: 201,
+              body: '{"sessionId":"newSession","ingestToken":"tok-new","dashboardUrl":"http://example.test/s/newSession","maxDurationSeconds":3600}',
+            }
+          : { status: 200, body: accepted },
+      );
+      await makeLeftoverSession(afkHome, server.url);
+
+      const { stdout, stderr } = await runBash(
+        [
+          'main start --no-qr > "$AFK_HOME/out.txt" 2> "$AFK_HOME/err.txt" & START=$!',
+          'for _ in $(seq 1 40); do grep -q "/s/newSession" "$AFK_HOME/out.txt" 2>/dev/null && break; sleep 0.1; done',
+          'kill -TERM "$START"; wait "$START"; printf "START_RC=%d\\n" "$?"',
+          'printf "LEFTOVER_LOG=%s\\n" "$(grep -c "left over from session oldSession" "$AFK_HOME/err.txt")"',
+        ].join("\n"),
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+      );
+
+      expect(parseKeyValueLines(stdout), stderr).toEqual({ START_RC: "0", LEFTOVER_LOG: "1" });
+      expect(
+        server.requests.slice(0, 2).map((req) => [req.url, req.headers.authorization]),
+      ).toEqual([
+        ["/api/sessions/oldSession/frames", "Bearer tok-oldSession"],
+        ["/api/sessions", undefined],
+      ]);
+    },
+  );
 });
 
 describe("afk status", () => {
