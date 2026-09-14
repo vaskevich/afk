@@ -21,25 +21,35 @@ jobs:
     name: Typecheck, lint, format, test, build
     runs-on: ubuntu-latest
     steps:
+      # Every third-party action here and in deploy.yml is pinned to a full commit
+      # SHA rather than a tag: a tag can be moved to different code, a commit cannot.
+      # The trailing comment is the release that SHA corresponds to; Dependabot
+      # (.github/dependabot.yml) bumps both together.
       - name: Check out the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # No version pinned here: this reads the `packageManager` field in
       # package.json (currently pnpm@10.13.1) itself, so the pnpm version only
       # has to change in one place -- same idea as the Dockerfile's pnpm pin.
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
 
       # Must come after pnpm/action-setup: `cache: pnpm` shells out to
       # `pnpm store path` to find what to cache, which needs pnpm on PATH already.
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Production dependencies only (what ships in the image), high and critical
+      # advisories only, so a dev-only or low-severity advisory does not block a
+      # merge. Clean as of 2026-09-14.
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
 
       - name: Typecheck
         run: pnpm typecheck
@@ -69,10 +79,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up OpenTofu
-        uses: opentofu/setup-opentofu@v1
+        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1.0.8
 
       - name: tofu fmt -check
         run: tofu -chdir=infra fmt -check

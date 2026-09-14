@@ -1,12 +1,13 @@
 /**
- * The installer end to end: the real server serving `/install` and `/cli/afk` on a
- * random loopback port, and the real one-liner (`curl ... | sh`) installing the real
- * `cli/afk` into a temp directory. Runs under the contract config (`pnpm test:contract`)
- * because it spawns curl and sh; skipped off macOS, where the installer refuses to run.
+ * The installer end to end: the real server serving `/install`, `/cli/afk`, and
+ * `/cli/afk.sha256` on a random loopback port, and the real one-liner (`curl ... | sh`)
+ * installing the real `cli/afk` into a temp directory. Runs under the contract config
+ * (`pnpm test:contract`) because it spawns curl and sh; skipped off macOS, where the
+ * installer refuses to run.
  */
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -31,14 +32,22 @@ const LOOPBACK = "127.0.0.1";
 const NO_DIST_DIR = "/nonexistent/afk-install-test-dist";
 /** The owner-executable bit, which `chmod +x` must have set. */
 const OWNER_EXECUTE_BIT = 0o100;
+/** A well-formed checksum line that matches no script. */
+const WRONG_CHECKSUM_LINE = `${"0".repeat(64)}  afk\n`;
+
+/** Answers a request in place of the app, or undefined to let the app handle it. */
+type Intercept = (request: Request) => Response | undefined;
 
 interface TestServer {
   url: string;
   close(): Promise<void>;
 }
 
-/** The real app on a random loopback port, serving the repo's own cli/afk. */
-async function startServer(): Promise<TestServer> {
+/**
+ * The real app on a random loopback port, serving the repo's own cli/afk. `intercept`
+ * stands in for a broken transfer: it answers chosen requests instead of the app.
+ */
+async function startServer(intercept: Intercept = () => undefined): Promise<TestServer> {
   const store = new SessionStore(new MemorySessionStorage(), { limits: DEFAULT_LIMITS });
   // Built once the port is known, since the installer embeds the origin.
   const wiring: { app?: ReturnType<typeof createApp> } = {};
@@ -47,7 +56,7 @@ async function startServer(): Promise<TestServer> {
       if (!wiring.app) {
         throw new Error("request arrived before the app was wired");
       }
-      return wiring.app.fetch(request);
+      return intercept(request) ?? wiring.app.fetch(request);
     },
     port: 0,
     hostname: LOOPBACK,
@@ -84,6 +93,14 @@ async function runInstaller(url: string, dir: string): Promise<{ stdout: string;
   return execFileAsync("/bin/sh", ["-c", `curl -fsSL "${url}/install" | sh`], {
     env: { ...process.env, AFK_INSTALL_DIR: dir, HOME: dir },
   });
+}
+
+/** Serves `body` for `pathname` and leaves every other request to the app. */
+function serveInstead(pathname: string, body: string): Intercept {
+  return (request) =>
+    new URL(request.url).pathname === pathname
+      ? new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } })
+      : undefined;
 }
 
 describe.skipIf(process.platform !== "darwin")("curl <origin>/install | sh", () => {
@@ -125,5 +142,27 @@ describe.skipIf(process.platform !== "darwin")("curl <origin>/install | sh", () 
     expect(stdout).toContain(`export PATH="${installDir}:$PATH"`);
     expect(stdout).toContain("afk start");
     expect(stdout).toContain("afk run -- <command>");
+  });
+
+  it("refuses a download that does not match the served checksum and installs nothing", async () => {
+    await server.close();
+    server = await startServer(serveInstead("/cli/afk.sha256", WRONG_CHECKSUM_LINE));
+
+    await expect(runInstaller(server.url, installDir)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        `does not match ${server.url}/cli/afk.sha256; nothing was installed`,
+      ),
+    });
+    expect(await readdir(installDir)).toEqual([]);
+  });
+
+  it("refuses a corrupted script even when the checksum itself arrives intact", async () => {
+    await server.close();
+    const repoScript = await readFile(AFK_SCRIPT, "utf8");
+    server = await startServer(serveInstead("/cli/afk", `${repoScript}\ntrue # one more line\n`));
+
+    await expect(runInstaller(server.url, installDir)).rejects.toMatchObject({ code: 1 });
+    expect(await readdir(installDir)).toEqual([]);
   });
 });

@@ -449,7 +449,7 @@ describe("send_oldest_batch", () => {
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "2" });
     expect(stderr).toContain("below the minimum 0.3.0");
     expect(stderr).toContain("client 0.3.0 and protocol 2 or newer");
-    expect(stderr).toContain("curl -fsSL");
+    expect(stderr).toContain(`update with: curl -fsSL ${server.url}/install | sh`);
     const kept = await readFile(join(sessionDir, "queue", "0000000001.ndjson"), "utf8");
     expect(kept).toBe("AAA\n");
     expect(await exists(join(sessionDir, "rejected"))).toBe(false);
@@ -775,7 +775,7 @@ describe("create_session", () => {
     expect(server.requests).toHaveLength(1);
     expect(stderr).toContain("below the minimum 0.3.0");
     expect(stderr).toContain("client 0.3.0 and protocol 2 or newer");
-    expect(stderr).toContain("curl -fsSL");
+    expect(stderr).toContain(`update with: curl -fsSL ${server.url}/install | sh`);
     expect(await exists(join(afkHome, "current"))).toBe(false);
   });
 });

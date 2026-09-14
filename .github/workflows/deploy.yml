@@ -52,7 +52,7 @@ jobs:
       contents: read
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # No long-lived AWS access keys: this exchanges the job's OIDC token for
       # short-lived credentials by assuming afk-github-deploy (infra/ci.tf),
@@ -60,7 +60,7 @@ jobs:
       # environment. AWS_DEPLOY_ROLE_ARN is a repository *variable* (not a
       # secret) since a role ARN isn't sensitive on its own.
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-west-2
@@ -68,10 +68,26 @@ jobs:
       # `aws lightsail push-container-image` shells out to this separate binary
       # (not bundled with the AWS CLI, not preinstalled on GitHub's runners).
       # See https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-install-software.html.
+      #
+      # Pinned, not `latest`: this binary runs with the deploy role's credentials,
+      # so it is fetched from the versioned S3 path (same bucket the docs point at,
+      # `v<version>/` in place of `latest/`) and checked against a SHA-256 taken
+      # when the pin was set. On 2026-09-14 the same bytes were served by
+      # `latest/`, by `v1.0.8/`, and inside the v1.0.8 GitHub release tarball
+      # (https://github.com/aws/lightsailctl/releases, verified against its
+      # checksums.txt). To bump: pick the new release, `curl -fsSL <url> | sha256sum`
+      # and compare with the release's checksums.txt, then update both values.
       - name: Install the lightsailctl plugin
+        env:
+          LIGHTSAILCTL_VERSION: v1.0.8
+          LIGHTSAILCTL_SHA256: d0b7659b8c8832e2d5a6e36ddb2e78e66d9be27859088c2799b50d62e8575aed
         run: |
-          curl -fsSL "https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl" -o /usr/local/bin/lightsailctl
-          chmod +x /usr/local/bin/lightsailctl
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://s3.us-west-2.amazonaws.com/lightsailctl/${LIGHTSAILCTL_VERSION}/linux-amd64/lightsailctl" \
+            -o lightsailctl
+          echo "${LIGHTSAILCTL_SHA256}  lightsailctl" | sha256sum -c -
+          sudo install -m 0755 lightsailctl /usr/local/bin/lightsailctl
+          rm -f lightsailctl
 
       # infra/deploy.sh does the actual build/push/deploy -- the same script a
       # laptop runs through aws-vault, so the container/env/public-endpoint spec

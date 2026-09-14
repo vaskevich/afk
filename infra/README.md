@@ -46,7 +46,8 @@ create-container-service-deployment`, driven by `deploy.sh`, so shipping a new
 - **State backend**: local state (no `backend` block), matching osv.im's repo --
   `infra/terraform.tfstate` is gitignored, applied from a single operator's
   machine. Migrating to an S3+DynamoDB backend later is a small, mechanical
-  change if that ever stops being enough.
+  change if that ever stops being enough; see [State file](#state-file) for
+  what to do about the single copy meanwhile.
 - **aws-vault profile**: `osv_im_admin` (present in `~/.aws/config`), the same
   profile and account osv.im's infra uses. The profile is named only on the
   command line, never in `providers.tf` -- `aws-vault exec` handles the MFA
@@ -88,12 +89,11 @@ This repo used to provision a Lightsail **instance** (Ubuntu + Caddy + systemd,
 rsync deploys over SSH) with an S3 bucket wired up separately. That design is
 gone:
 
-- `infra/.ssh/` (the deploy SSH key pair) and `infra/terraform.tfvars` (which held
-  `ssh_public_key`, etc.) are no longer read by anything here. Both are
-  gitignored and were left on disk rather than deleted, but there's nothing left
-  to `ssh` into -- the container service has no SSH access at all. Delete them
-  whenever you like, or repurpose `terraform.tfvars` for `bucket_name` (see
-  below).
+- The deploy SSH key pair that lived in `infra/.ssh/` is deleted: there is nothing
+  left to `ssh` into, the container service has no SSH access at all. (The
+  `.ssh/` ignore rule stays so key material can never be committed by accident.)
+  `infra/terraform.tfvars` (which held `ssh_public_key`, etc.) is gitignored and
+  no longer read for those; repurpose it for `bucket_name` (see below).
 - `files/user_data.sh.tpl` (cloud-init bootstrap), the instance/static-IP/firewall
   resources, and the plain S3 bucket resource (no bucket access key, since
   instances get bucket access via Lightsail's "resource access" feature instead)
@@ -136,7 +136,8 @@ aws-vault exec osv_im_admin -- infra/deploy.sh
    (e.g. `:afk.server.3`) from its output. This needs the `lightsailctl` plugin
    on `PATH` (not bundled with the AWS CLI) -- see [the AWS
    docs](https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-install-software.html)
-   to install it locally; `deploy.yml` installs it fresh on every CI run.
+   to install it locally; `deploy.yml` installs a pinned release (the versioned
+   S3 path, checked against a SHA-256 recorded in the workflow) on every run.
 3. Reads the bucket name/access key from the `AFK_S3_BUCKET` /
    `AFK_S3_ACCESS_KEY_ID` / `AFK_S3_SECRET_ACCESS_KEY` environment variables when
    set, falling back to `tofu output` for whichever is unset (never stored in a
@@ -158,8 +159,9 @@ deploys" above.
 
 GitHub Actions runs two workflows (`.github/workflows/`):
 
-- **`ci.yml`** -- on every pull request and push to main: `pnpm typecheck`,
-  `pnpm lint`, `pnpm format:check`, `pnpm test`, `pnpm build` in one job, and
+- **`ci.yml`** -- on every pull request and push to main: `pnpm audit --prod
+--audit-level=high`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:sh`,
+  `pnpm format:check`, `pnpm test`, `pnpm build` in one job, and
   `tofu fmt -check` + `tofu validate` for `infra/` (no credentials, no state) in
   another.
 - **`deploy.yml`** -- on `workflow_dispatch` or a push to main, after `ci.yml`'s
@@ -169,6 +171,12 @@ GitHub Actions runs two workflows (`.github/workflows/`):
   described in [Deploys](#deploys) below, with the bucket credentials supplied
   as environment variables instead of `tofu output` (a GitHub-hosted runner has
   no local tofu state).
+
+What the workflows pull in is pinned: every third-party action by full commit
+SHA (the release it corresponds to is the trailing comment), `lightsailctl` by
+versioned URL and SHA-256, and the Dockerfile's `node:22-alpine` by its
+multi-arch manifest digest. `.github/dependabot.yml` opens weekly PRs to move
+all three.
 
 ### One-time setup
 
@@ -203,10 +211,72 @@ GitHub Actions runs two workflows (`.github/workflows/`):
    ```
 
    (Or set the same four under the repo's Settings UI, pasting each `tofu
-output -raw ...` value by hand.) If the bucket access key is ever rotated
-   (`tofu apply` after a change to `storage.tf`, or a manual key rotation in the
-   Lightsail console), re-run the two `gh secret set` commands -- GitHub secrets
-   don't track tofu state and won't update themselves.
+output -raw ...` value by hand.) GitHub secrets don't track tofu state and
+   won't update themselves: whenever the bucket access key changes, re-run the
+   two `gh secret set` commands -- see [Rotating the bucket
+   key](#rotating-the-bucket-key).
+
+## Rotating the bucket key
+
+The bucket access key (`aws_lightsail_bucket_access_key.sessions` in
+`storage.tf`) is a long-lived credential, and it is visible in more places than
+the state file:
+
+- `tofu output -raw bucket_secret_access_key` on any machine holding
+  `infra/terraform.tfstate` (the state stores it in plain text);
+- the GitHub secrets `AFK_S3_ACCESS_KEY_ID` / `AFK_S3_SECRET_ACCESS_KEY`
+  (readable by anything that runs in the `production` environment);
+- the deployment spec, since `deploy.sh` passes it as container environment
+  variables: `aws lightsail get-container-services` and
+  `get-container-service-deployments` print it to anyone with
+  `lightsail:GetContainerServices` / `GetContainerServiceDeployments`, which
+  includes the `afk-github-deploy` role (`ci.tf`) and the Lightsail console.
+
+Rotate it whenever one of those may have leaked, or on a schedule. The old key
+stops working the moment `apply` deletes it, so run the four steps back to back:
+the running container still holds the old key until step 4 and cannot reach the
+bucket in between, so ingest fails for those minutes (clients spool and retry).
+
+```sh
+# 1. Mark the key for replacement and apply: destroys the old key, creates a new one.
+#    (`tofu apply -replace=aws_lightsail_bucket_access_key.sessions` does both in one step.)
+aws-vault exec osv_im_admin -- tofu -chdir=infra taint aws_lightsail_bucket_access_key.sessions
+aws-vault exec osv_im_admin -- tofu -chdir=infra apply
+
+# 2. Put the new values where deploy.yml reads them.
+gh secret set AFK_S3_ACCESS_KEY_ID --body "$(aws-vault exec osv_im_admin -- tofu -chdir=infra output -raw bucket_access_key_id)"
+gh secret set AFK_S3_SECRET_ACCESS_KEY --body "$(aws-vault exec osv_im_admin -- tofu -chdir=infra output -raw bucket_secret_access_key)"
+
+# 3. Confirm the old key id is gone (Lightsail allows two per bucket, so a stray one is easy to miss).
+aws-vault exec osv_im_admin -- aws lightsail get-bucket-access-keys --region us-west-2 --bucket-name "$(tofu -chdir=infra output -raw bucket_name)"
+
+# 4. Redeploy so the container picks the new key up: from CI (uses the secrets just set) ...
+gh workflow run deploy.yml
+# ... or from the laptop (reads the new key from tofu output).
+aws-vault exec osv_im_admin -- infra/deploy.sh
+```
+
+Every deployment spec Lightsail keeps in its history still shows the old key
+(`get-container-service-deployments` lists past deployments); that is why a
+rotation, not deleting the spec, is the fix for a leak.
+
+## State file
+
+`infra/terraform.tfstate` is local (see "State backend" above) and is the only
+copy of the infrastructure's identity outside AWS itself: lose it and the next
+`apply` wants to recreate everything, including the bucket. It also holds the
+bucket key in plain text. Two ways to stop depending on one laptop, pick one:
+
+- **Encrypted backup.** After every `apply`, copy the state somewhere encrypted
+  at rest that is not this repo, e.g.
+  `age -o ~/backups/afk.tfstate.age -r <recipient> infra/terraform.tfstate`, or
+  the password manager's file attachment. Cheap, manual, easy to forget.
+- **S3 backend.** Add a `backend "s3"` block to `versions.tf` (a bucket in the
+  same account, versioning and default encryption on, DynamoDB or S3 lock file
+  for locking) and run `tofu init -migrate-state`. The `-backend=false` init in
+  `ci.yml` keeps validating without credentials. Then the state is encrypted,
+  versioned, and shared by every operator machine, and the laptop copy can be
+  deleted.
 
 ## Files
 

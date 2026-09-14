@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { AppDeps } from "../env.ts";
@@ -9,11 +10,17 @@ import type { AppDeps } from "../env.ts";
  * same server and installs a client whose default `AFK_SERVER` is that origin. The
  * installer is the shell template next to this file with the public origin filled in;
  * the client is the `cli/afk` file at `config.clientScriptPath` (see docs/CONFIGURATION.md).
+ * `<origin>/cli/afk.sha256` is the client's SHA-256 in `sha256sum` format, which the
+ * installer checks the download against before installing it. Same origin as the script,
+ * so it catches a corrupted transfer or a stale cached copy, not a compromised server.
  */
 
 const INSTALLER_TEMPLATE_PATH = fileURLToPath(new URL("./install.sh", import.meta.url));
 /** The line `AFK_ORIGIN="__AFK_ORIGIN__"` in the template; replaced with `publicBaseUrl`. */
 const ORIGIN_PLACEHOLDER = "__AFK_ORIGIN__";
+
+/** The file name in the checksum line; the installer downloads the script under this name. */
+const CLIENT_FILE_NAME = "afk";
 
 const SHELL_SCRIPT_CONTENT_TYPE = "text/x-shellscript; charset=utf-8";
 const PLAIN_TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
@@ -34,6 +41,12 @@ async function readClientScript(clientScriptPath: string): Promise<string | unde
     }
     throw err;
   }
+}
+
+/** `<hex>  afk`, the line `sha256sum -c` and `shasum -a 256 -c` accept, over the script's UTF-8 bytes. */
+export function checksumLine(script: string): string {
+  const hex = createHash("sha256").update(script, "utf8").digest("hex");
+  return `${hex}  ${CLIENT_FILE_NAME}\n`;
 }
 
 /** The installer with the origin filled in. Rendered per request; the template is a few KB. */
@@ -63,5 +76,14 @@ export function installRoutes({ config }: AppDeps) {
       c.header("Content-Type", PLAIN_TEXT_CONTENT_TYPE);
       c.header("Cache-Control", CACHE_CONTROL);
       return c.body(script);
+    })
+    .get("/cli/afk.sha256", async (c) => {
+      const script = await readClientScript(config.clientScriptPath);
+      if (script === undefined) {
+        return c.text(notFound, 404);
+      }
+      c.header("Content-Type", PLAIN_TEXT_CONTENT_TYPE);
+      c.header("Cache-Control", CACHE_CONTROL);
+      return c.body(checksumLine(script));
     });
 }
