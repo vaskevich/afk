@@ -271,15 +271,28 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Reads a session from storage and hydrates it. Logged with its cost because this is
+   * the one expensive read the server does: on the bucket backend it is thousands of
+   * small objects, and the first dashboard visit after a restart or eviction pays it.
+   */
   private async load(sessionId: string, now: number): Promise<Session | undefined> {
+    const started = performance.now();
     const record = await this.storage.getSession(sessionId);
     if (!record) {
       this.rememberUnknown(sessionId, now);
       return undefined;
     }
     const frames = await this.storage.readFrames(sessionId);
+    const storageMs = Math.round(performance.now() - started);
     const session = this.hydrate(record, frames);
     this.sessions.set(sessionId, session);
+    log.info("session loaded from storage", {
+      session: sessionId,
+      frames: frames.length,
+      storageMs,
+      ms: Math.round(performance.now() - started),
+    });
     return session;
   }
 

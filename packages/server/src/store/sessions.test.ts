@@ -7,6 +7,7 @@ import {
   makeSystemFrame,
 } from "@afk/shared/testing";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS, type StoredFrame } from "@afk/shared";
+import { log } from "../log/logger.ts";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
 import {
   AlreadyContinuedError,
@@ -265,6 +266,37 @@ describe("SessionStore", () => {
       // per-stream sequence map was rebuilt from storage, not left empty.
       const result = await store.ingest(loaded!, [makeSystemFrame(30, { cpuPercent: 95 })]);
       expect(result).toEqual({ accepted: [], duplicates: 1 });
+    });
+
+    it("logs one line with the frame count and the time taken when a session is loaded from storage", async () => {
+      const storage = new MemorySessionStorage();
+      const record: SessionRecord = {
+        sessionId: "existingSession",
+        ingestToken: "existingToken",
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        startedAt: T0_MS,
+        endedAt: null,
+        maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+        previousSessionId: null,
+        nextSessionId: null,
+      };
+      await storage.putSession(record);
+      await storage.appendFrames(record.sessionId, makeStoredFrames(highCpuFrames(3)));
+      const store = new SessionStore(storage);
+      const info = vi.spyOn(log, "info").mockImplementation(() => {});
+
+      await store.get(record.sessionId);
+      await store.get(record.sessionId);
+
+      // Once: the second get is served from memory.
+      expect(info).toHaveBeenCalledTimes(1);
+      expect(info).toHaveBeenCalledWith("session loaded from storage", {
+        session: record.sessionId,
+        frames: 3,
+        storageMs: expect.any(Number),
+        ms: expect.any(Number),
+      });
     });
 
     it("returns undefined for an id that exists nowhere", async () => {

@@ -119,9 +119,10 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   `middleware/ingest-auth.ts` resolves the session, checks the bearer ingest token,
   rejects non-active sessions with 410. `middleware/client-version.ts` checks the
   `X-Afk-Client` header on the client-facing routes (426 below the minimum),
-  `middleware/body-limit.ts` caps request bodies (413), and
+  `middleware/body-limit.ts` caps request bodies (413),
   `middleware/security-headers.ts` sets the CSP and the rest of the security headers
-  on every response. See "Hardening" below.
+  on every response, and `middleware/request-timing.ts`, mounted first, logs how long
+  each response took to produce. See "Hardening" below.
 - `store/sessions.ts` is the in-memory working set: active sessions, per-stream
   sequence bookkeeping, SSE listeners. It writes through to `store/storage.ts`, the
   `SessionStorage` interface, and lazily loads sessions it does not have in memory.
