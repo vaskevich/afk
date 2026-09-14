@@ -5,6 +5,7 @@ import {
   RUN_TAIL_MAX_LINES,
 } from "@afk/shared";
 import type {
+  AgentsCollectorData,
   AnomalyEvent,
   AnomalyEventDetails,
   FramesResponse,
@@ -24,8 +25,10 @@ import type { SessionSource } from "./source.ts";
  * A second stream, `processes`, samples the busiest processes every 5 s and shows a
  * `cpu-burn` node process dominating during the burn. A third, `run:…`, is a short
  * `afk run` of a fake migration that crashes with exit code 3; its final frame carries
- * the last lines it printed. The anomaly events below are what the server's rules
- * would derive from these frames.
+ * the last lines it printed. A fourth, `agents`, counts two Claude Code sessions every
+ * 5 s: one works (with two subagents for a while), asks a question at 6:30 that goes
+ * unanswered until 10:00, then sits idle like the other. The anomaly events below are
+ * what the server's rules would derive from these frames.
  */
 
 /** What `deleteSession` rejects with; the same words the server answers `DELETE /api/sessions/demo` with. */
@@ -66,6 +69,22 @@ const RUN_LINES_PER_SECOND = 20;
 const RUN_CRASH_ITEM = 300;
 const RUN_HEADER_LINE = `migration-hang: migrating ${RUN_TOTAL_ITEMS} items at ${RUN_LINES_PER_SECOND}/s, will exit ${RUN_EXIT_CODE} after item ${RUN_CRASH_ITEM} (pid ${RUN_PID})`;
 const RUN_FATAL_LINE = `migration-hang: fatal: lost connection to database after item ${RUN_CRASH_ITEM}`;
+/** The client samples agents every 5 s (AGENTS_INTERVAL_SECONDS in cli/afk). */
+const AGENTS_STREAM = "agents";
+const AGENTS_INTERVAL_SECONDS = 5;
+/** Two Claude Code sessions all along: one busy, one idle. */
+const AGENT_SESSIONS = 2;
+/** The busy session fans out two subagents for a while. */
+const AGENT_SUBAGENTS_START = 2 * 60;
+const AGENT_SUBAGENTS_END = 5 * 60;
+const AGENT_SUBAGENTS = 2;
+/** Then asks a question nobody answers until 10:00, after which it is idle too. */
+const AGENT_WAITING_START = 6 * 60 + 30;
+const AGENT_WAITING_END = 10 * 60;
+/** How long the server waits before calling a waiting agent an anomaly (AGENT_WAITING_AFTER_MS). */
+const AGENT_WAITING_DELAY_SECONDS = 120;
+/** How long every agent has to be idle before the server says so (AGENTS_ALL_IDLE_AFTER_MS). */
+const AGENTS_ALL_IDLE_DELAY_SECONDS = 60;
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 
@@ -257,6 +276,23 @@ function migrationTail(): RunOutputTail {
   };
 }
 
+/** The agents on the machine at second `i`: see the AGENT_* constants for the story. */
+function agentsAt(i: number): AgentsCollectorData {
+  const waiting = i >= AGENT_WAITING_START && i < AGENT_WAITING_END;
+  const working = i < AGENT_WAITING_START;
+  const subagents = i >= AGENT_SUBAGENTS_START && i < AGENT_SUBAGENTS_END ? AGENT_SUBAGENTS : 0;
+  return {
+    available: true,
+    claude: {
+      sessions: AGENT_SESSIONS,
+      working: working ? 1 : 0,
+      waitingOnInput: waiting ? 1 : 0,
+      idle: AGENT_SESSIONS - (working || waiting ? 1 : 0),
+      subagentsWorking: subagents,
+    },
+  };
+}
+
 /** One frame of the run stream at `elapsed` seconds in; the last one is the exit. */
 function runFrameData(elapsed: number): StoredFrame["frame"] {
   const exited = elapsed >= RUN_DURATION_SECONDS;
@@ -367,6 +403,24 @@ function demoEvents(
       STALE_END,
       `no frames received for ${describeSeconds(STALE_END - STALE_START)}`,
     ),
+    // Backdated to when the question was asked, though the rule only fires 2 m later.
+    event(
+      AGENTS_STREAM,
+      "agents.waiting",
+      "warning",
+      AGENT_WAITING_START,
+      AGENT_WAITING_END,
+      `1 agent has been waiting on you for over ${AGENT_WAITING_DELAY_SECONDS / 60}m`,
+    ),
+    // Once the question is answered nothing is working any more; open until the end.
+    event(
+      AGENTS_STREAM,
+      "agents.all-idle",
+      "info",
+      AGENT_WAITING_END,
+      DURATION_SECONDS,
+      `all ${AGENT_SESSIONS} agents idle for over ${AGENTS_ALL_IDLE_DELAY_SECONDS}s`,
+    ),
   ];
   events.sort((a, b) => a.startedAt - b.startedAt);
   return events;
@@ -395,7 +449,7 @@ export function generateDemoSession(sessionId: string): FramesResponse {
     startedAt,
     endedAt: startedAt + DURATION_SECONDS * 1000,
     maxDurationSeconds: 60 * 60,
-    streamCount: 3,
+    streamCount: 4,
     maxStreams: 10,
     previousSessionId: null,
     nextSessionId: null,
@@ -406,6 +460,7 @@ export function generateDemoSession(sessionId: string): FramesResponse {
   const processRand = prng(0xbadcafe);
   let systemSequence = 0;
   let processesSequence = 0;
+  let agentsSequence = 0;
   /** The busiest processes as of the last processes sample at or before cpu.high opened. */
   let processesWhenCpuHighOpened: ProcessEntry[] = [];
   // Low-pass filtered noise so the cpu line wobbles instead of looking like static.
@@ -501,6 +556,21 @@ export function generateDemoSession(sessionId: string): FramesResponse {
             sampledCount: 400 + Math.round(processRand() * 30),
             top,
           },
+        },
+      });
+    }
+
+    if (i % AGENTS_INTERVAL_SECONDS === 0) {
+      agentsSequence += 1;
+      frames.push({
+        index: frames.length + 1,
+        receivedAt: timestamp * 1000 + 70 + Math.round(processRand() * 120),
+        frame: {
+          stream: AGENTS_STREAM,
+          collector: "agents",
+          sequence: agentsSequence,
+          timestamp,
+          data: agentsAt(i),
         },
       });
     }

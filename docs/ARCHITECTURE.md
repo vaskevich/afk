@@ -36,7 +36,7 @@ A single bash 3.2 script (what macOS ships) with only curl and stock tools as
 dependencies, so it can be downloaded, read, and run. Two loops:
 
 - **Sampler**: ticks once a second and runs each collector on its own interval
-  (`system` every tick, `processes` every 5 s), scheduling ticks against a deadline so
+  (`system` every tick, `processes` and `agents` every 5 s), scheduling ticks against a deadline so
   collector runtime does not drift the rate, and writes each frame as its own file, `~/.afk/sessions/<id>/queue/<sequence>-<stream>.ndjson`, through a temp
   file and an atomic rename (macOS has no `flock`, so a shared spool file would race).
 - **Sender** (background subshell): concatenates the oldest queued files into one
@@ -433,6 +433,28 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** The agents collector ships counts, not names. The wishlist shape was
+  one entry per agent (tool, pid, name, cwd, status); what landed is five integers per
+  tool (`sessions`, `working`, `waitingOnInput`, `idle`, `subagentsWorking`), Claude
+  Code only. The question the dashboard answers from a phone is "is something waiting
+  on me, and is anything still running", and counts answer it; a session's name is
+  the name of the project it is in, and a working directory is a path on someone's
+  disk, and a hosted server should not hold either by default. Names (or directory
+  basenames) return as an opt-in flag if the counts prove too coarse, see BACKLOG.md.
+  The states are the client's reading of Claude Code's own `status` (`busy` / `idle`)
+  crossed with transcript activity: busy and a transcript (its own or a subagent's)
+  changed within 120 s is `working`, busy and quieter than that is `waitingOnInput`, a
+  subagent transcript changed within 30 s is a working subagent. That is a departure
+  from "dumb client": the thresholds sit in `cli/afk`, because what they classify are
+  file mtimes the server never sees, and shipping the mtimes would ship a per-session
+  activity trace for no gain. The server keeps the thresholds that matter to the
+  person (`agents.waiting` after 120 s, `agents.all-idle` after 60 s). Everything the
+  collector reads is undocumented Claude Code internals (the session records under
+  `~/.claude/sessions/`, the transcript layout under `~/.claude/projects/`), accepted
+  because there is no supported interface for this at all, the collector never opens
+  anything it does not need (the `.key` files beside the records in particular), and
+  the failure mode is `available: false`, or a busy session read as `working`, never a
+  broken client or a false "waiting on you".
 - **2026-09-14** Slabs on write, one object at end; a one-minute durability window is
   accepted. The follow-up to the cold-load entry below: one bucket object per ingested
   batch was the wrong layout, not just a slow read. `S3SessionStorage.appendFrames` now

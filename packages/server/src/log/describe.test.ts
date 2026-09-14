@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MemoryPressureLevel } from "@afk/shared";
 import {
+  makeAgentsFrame,
   makeProcessesFrame,
   makeRunFrame,
   makeRunTail,
@@ -92,6 +93,32 @@ describe("describeFrame", () => {
       const frame = makeProcessesFrame(0, { top: [], sampledCount: 0 });
 
       expect(describeFrame(frame)).toContain("top=none");
+    });
+  });
+
+  describe("agents frame", () => {
+    it("lists the Claude Code session count by state and the working subagents", () => {
+      const frame = makeAgentsFrame(0, {
+        sessions: 3,
+        working: 1,
+        idle: 1,
+        waitingOnInput: 1,
+        subagentsWorking: 2,
+      });
+
+      const description = describeFrame(frame);
+
+      expect(description).toBe(
+        `${frame.stream} #${frame.sequence} claude=3 working=1 waiting=1 idle=1 subagents=2`,
+      );
+    });
+
+    it("says claude=unavailable, with no counts, when Claude Code is not on the machine", () => {
+      const frame = makeAgentsFrame(0, { available: false, sessions: 0, working: 0, idle: 0 });
+
+      const description = describeFrame(frame);
+
+      expect(description).toBe(`${frame.stream} #${frame.sequence} claude=unavailable`);
     });
   });
 });

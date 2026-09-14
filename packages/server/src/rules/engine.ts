@@ -1,4 +1,5 @@
 import type { AnomalyEvent, CollectorName, StoredFrame } from "@afk/shared";
+import { agentsAllIdle, agentsWaiting } from "./agents.ts";
 import { runExited, runStalled } from "./run.ts";
 import { clientStale } from "./stale.ts";
 import { cpuHigh, memoryPressure } from "./system.ts";
@@ -17,6 +18,8 @@ export const RULES: readonly RegisteredRule[] = [
   register(clientStale),
   register(runExited),
   register(runStalled),
+  register(agentsWaiting),
+  register(agentsAllIdle),
 ];
 
 const frameTimeMs = (frame: StoredFrame) => frame.frame.timestamp * 1000;

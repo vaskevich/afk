@@ -1,5 +1,6 @@
 import type { CollectorName, Frame } from "@afk/shared";
 import type { ComponentType } from "react";
+import { agentsCollector } from "./collectors/agents.tsx";
 import { processesCollector } from "./collectors/processes.tsx";
 import { runCollector } from "./collectors/run.tsx";
 import { systemCollector } from "./collectors/system.tsx";
@@ -37,6 +38,7 @@ export const collectors: { [C in CollectorName]: CollectorUi<C> } = {
   system: systemCollector,
   run: runCollector,
   processes: processesCollector,
+  agents: agentsCollector,
 };
 
 /** Looks up the UI for a collector without the per-member narrowing. */

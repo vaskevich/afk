@@ -7,6 +7,17 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
 ## What the client must do
 
 - Sample the machine once a second (cpu, memory pressure, processes) with stock tools.
+- Count the coding agents on the machine without saying who they are. `collect_agents`
+  reads Claude Code's per-session records (`~/.claude/sessions/<pid>.json`: the pid is
+  checked with `kill -0`, and only `status`, `cwd`, and `sessionId` are looked at, the
+  last two just to find the transcript) and the mtimes of the session's transcript and
+  its subagents' transcripts under `~/.claude/projects/`; it never opens a transcript,
+  never opens the `.key` files beside the records, and never runs anything. What goes
+  on the wire is `available` plus five counts (sessions, working, waiting on input,
+  idle, working subagents); no name, id, directory, or timestamp of any session leaves
+  the machine, which is a decision, not an omission (see the decision log in
+  [ARCHITECTURE.md](ARCHITECTURE.md)). A machine without `~/.claude/sessions` sends one
+  `available: false` frame per session and nothing more on that stream.
 - Spool to disk, retry forever with backoff, never lose or duplicate a frame. Without
   `flock` on macOS the only safe handoff between a sampler and a sender is one file
   per frame and an atomic rename; a shared append-only file races.

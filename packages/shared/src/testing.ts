@@ -4,6 +4,8 @@
  * to it. Import from "@afk/shared/testing"; never from app code.
  */
 import type {
+  AgentsCollectorData,
+  AgentsFrame,
   AnomalyEvent,
   HostInfo,
   ProcessesCollectorData,
@@ -18,7 +20,7 @@ import type {
 } from "./protocol.ts";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS, MemoryPressureLevel } from "./protocol.ts";
 
-type Frame = SystemFrame | RunFrame | ProcessesFrame;
+type Frame = SystemFrame | RunFrame | ProcessesFrame | AgentsFrame;
 
 /** A fixed, readable origin for timestamps: 2026-01-01T00:00:00Z. */
 export const T0_SECONDS = 1_767_225_600;
@@ -182,6 +184,43 @@ export function makeProcessesFrame(
     sequence: sequence ?? atSeconds + 1,
     timestamp: T0_SECONDS + atSeconds,
     data: makeProcessesData(data),
+  };
+}
+
+/**
+ * A machine with Claude Code on it: two sessions, one working and one idle, and no
+ * subagents. Override the counts the test is about; `available: false` for a machine
+ * without Claude Code (the counts are then zero).
+ */
+export function makeAgentsData(
+  overrides: Partial<AgentsCollectorData["claude"]> & { available?: boolean } = {},
+): AgentsCollectorData {
+  const { available, ...claude } = overrides;
+  return {
+    available: available ?? true,
+    claude: {
+      sessions: 2,
+      working: 1,
+      idle: 1,
+      waitingOnInput: 0,
+      subagentsWorking: 0,
+      ...claude,
+    },
+  };
+}
+
+/** An agents frame `atSeconds` after T0. Sequence defaults to the offset plus one. */
+export function makeAgentsFrame(
+  atSeconds: number,
+  overrides: Parameters<typeof makeAgentsData>[0] & { sequence?: number } = {},
+): AgentsFrame {
+  const { sequence, ...data } = overrides;
+  return {
+    stream: "agents",
+    collector: "agents",
+    sequence: sequence ?? atSeconds + 1,
+    timestamp: T0_SECONDS + atSeconds,
+    data: makeAgentsData(data),
   };
 }
 

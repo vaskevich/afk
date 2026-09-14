@@ -156,7 +156,44 @@ export const ProcessesCollectorData = z.object({
 });
 export type ProcessesCollectorData = z.infer<typeof ProcessesCollectorData>;
 
-// TODO(collectors): agents (claude/codex counts).
+/**
+ * A Claude Code session whose status is busy and whose transcript (its own or a
+ * subagent's) changed within this many seconds is `working`; busy but quieter than
+ * that is `waitingOnInput` (a permission prompt or a question nobody has answered). A client-side threshold,
+ * mirrored in cli/afk as AGENT_ACTIVE_SECONDS; here so the docs and the dashboard
+ * can say what the counts mean.
+ */
+export const AGENT_ACTIVE_SECONDS = 120;
+/** A subagent whose transcript changed within this many seconds is working (AGENT_SUBAGENT_ACTIVE_SECONDS in cli/afk). */
+export const AGENT_SUBAGENT_ACTIVE_SECONDS = 30;
+
+/**
+ * How many of one tool's agents are on the machine. Counts only: no names, ids, or
+ * paths leave the machine (see the 2026-09-14 entry in docs/ARCHITECTURE.md's
+ * decision log). `working`, `waitingOnInput`, and `idle` partition `sessions`;
+ * `subagentsWorking` is counted on its own and can exceed `sessions`.
+ */
+export const AgentCounts = z.object({
+  sessions: z.number().int().nonnegative(),
+  working: z.number().int().nonnegative(),
+  idle: z.number().int().nonnegative(),
+  waitingOnInput: z.number().int().nonnegative(),
+  subagentsWorking: z.number().int().nonnegative(),
+});
+export type AgentCounts = z.infer<typeof AgentCounts>;
+
+/**
+ * Coding agents running on the machine, sampled every few seconds. `available` is
+ * false when the tool's state directory does not exist or cannot be read; the counts
+ * are then zero and mean nothing. The collector reads undocumented Claude Code
+ * internals, so a layout change shows up as `available: false`, never as a failure.
+ * TODO(agents): Codex counts, see BACKLOG.md.
+ */
+export const AgentsCollectorData = z.object({
+  available: z.boolean(),
+  claude: AgentCounts,
+});
+export type AgentsCollectorData = z.infer<typeof AgentsCollectorData>;
 
 // ---------------------------------------------------------------------------
 // Frames
@@ -194,8 +231,19 @@ export const ProcessesFrame = FrameBase.extend({
 });
 export type ProcessesFrame = z.infer<typeof ProcessesFrame>;
 
+export const AgentsFrame = FrameBase.extend({
+  collector: z.literal("agents"),
+  data: AgentsCollectorData,
+});
+export type AgentsFrame = z.infer<typeof AgentsFrame>;
+
 /** Every frame the server accepts. Add new collectors to this union. */
-export const Frame = z.discriminatedUnion("collector", [SystemFrame, RunFrame, ProcessesFrame]);
+export const Frame = z.discriminatedUnion("collector", [
+  SystemFrame,
+  RunFrame,
+  ProcessesFrame,
+  AgentsFrame,
+]);
 export type Frame = z.infer<typeof Frame>;
 export type CollectorName = Frame["collector"];
 

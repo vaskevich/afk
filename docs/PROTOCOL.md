@@ -429,6 +429,59 @@ per-process `%cpu` from ps, so a process using several cores reports several hun
 percent; the `system` collector's `cpu.percent` is the same numbers summed and divided
 by core count.
 
+### Collector: `agents`
+
+How many coding agents are running on the machine and what they are doing, sampled
+every 5 s (the client's `AGENTS_INTERVAL_SECONDS`) on its own `agents` stream. Counts
+only: no session names, ids, working directories, or transcript contents ever leave
+the machine (see the 2026-09-14 entry in [ARCHITECTURE.md](ARCHITECTURE.md)'s decision
+log). Claude Code is the one tool counted today; Codex is on the backlog.
+
+```json
+{
+  "available": true,
+  "claude": {
+    "sessions": 3,
+    "working": 1,
+    "waitingOnInput": 1,
+    "idle": 1,
+    "subagentsWorking": 2
+  }
+}
+```
+
+| field                     | meaning                                                                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `available`               | `false` when `~/.claude/sessions` does not exist or cannot be read; every count is then `0` and means nothing ("no Claude Code here") |
+| `claude.sessions`         | live Claude Code sessions (a terminal `claude` or the desktop app), each confirmed by a live pid                                      |
+| `claude.working`          | sessions whose status is busy and whose transcript (its own or a subagent's) changed within the last 120 s (`AGENT_ACTIVE_SECONDS`)   |
+| `claude.waitingOnInput`   | sessions whose status is busy but whose transcripts are all older than that: a permission prompt or a question nobody has answered    |
+| `claude.idle`             | sessions whose status is idle: the turn is over and the agent waits for the next message                                              |
+| `claude.subagentsWorking` | subagent transcripts, across every session, modified within the last 30 s (`AGENT_SUBAGENT_ACTIVE_SECONDS`)                           |
+
+`working`, `waitingOnInput`, and `idle` partition `sessions`. `subagentsWorking` is
+counted on its own (a subagent has no process and no session file) and can exceed
+`sessions`. All five are non-negative integers.
+
+The collector reads undocumented Claude Code internals (2.1.x): one single-line JSON
+file per live session under `~/.claude/sessions/<pid>.json` (its `status` field, its
+`cwd` and `sessionId` only to find the transcript), the main transcript's mtime under
+`~/.claude/projects/<cwd with every character outside A-Za-z0-9 as ->/<sessionId>.jsonl`,
+and the mtimes of `<sessionId>/subagents/agent-*.jsonl` next to it. A session file
+whose pid is dead (a crash left it behind) is not counted. A session that has
+delegated to a subagent writes nothing to its own transcript until the subagent
+returns, which is why a subagent's activity counts as the session's. When the layout
+changes the collector reports `available: false` (no sessions directory) or reads a
+missing transcript as changed just now, so a busy session becomes `working`, never a
+false `waitingOnInput`; a `status` outside `busy` / `idle` goes by transcript age
+alone (`working` or `idle`). The states are the client's reading of those files with
+the thresholds above; the server counts them and never re-derives them.
+
+When the directory is missing the client emits the `available: false` frame once, at
+the start of the session (or of each chained successor), and nothing more on the
+stream; the dashboard can say "Claude Code not found" without a frame every 5 s
+repeating it.
+
 ## Reading a session
 
 ### History
@@ -541,13 +594,15 @@ by later verdicts, but `details` keeps what was running when the condition began
 
 The rule catalogue today:
 
-| kind              | collector | severity           | trigger                                                                                       | shape    |
-| ----------------- | --------- | ------------------ | --------------------------------------------------------------------------------------------- | -------- |
-| `cpu.high`        | `system`  | warning            | cpu ≥ 90% sustained 30 s; backdated to when it crossed; names the top 3 processes (see below) | spanning |
-| `memory.pressure` | `system`  | warning / critical | pressure level ≥ warn (critical if ≥ critical) sustained 5 s                                  | spanning |
-| `client.stale`    | `system`  | warning            | no frame from the stream for 60 s; opens on a tick, backdated to 60 s after the last frame    | spanning |
-| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero; ends with its last output line, see below)  | instant  |
-| `run.stalled`     | `run`     | warning            | still running but output volume unchanged for 60 s; backdated to when it stopped changing     | spanning |
+| kind              | collector | severity           | trigger                                                                                        | shape    |
+| ----------------- | --------- | ------------------ | ---------------------------------------------------------------------------------------------- | -------- |
+| `cpu.high`        | `system`  | warning            | cpu ≥ 90% sustained 30 s; backdated to when it crossed; names the top 3 processes (see below)  | spanning |
+| `memory.pressure` | `system`  | warning / critical | pressure level ≥ warn (critical if ≥ critical) sustained 5 s                                   | spanning |
+| `client.stale`    | `system`  | warning            | no frame from the stream for 60 s; opens on a tick, backdated to 60 s after the last frame     | spanning |
+| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero; ends with its last output line, see below)   | instant  |
+| `run.stalled`     | `run`     | warning            | still running but output volume unchanged for 60 s; backdated to when it stopped changing      | spanning |
+| `agents.waiting`  | `agents`  | warning            | `claude.waitingOnInput` > 0 sustained 120 s; backdated to the first waiting sample (see below) | spanning |
+| `agents.all-idle` | `agents`  | info               | sessions > 0 with nothing working or waiting (subagents included) sustained 60 s; backdated    | spanning |
 
 A spanning event opens with `endedAt: null` and later gets an `endedAt` once the
 condition clears (or the session ends, which closes everything still open). An instant
@@ -566,6 +621,14 @@ message ends with the last non-blank stderr line (stdout's if stderr is empty), 
 "command failed with exit code 3 after 12s: fatal: lost connection to database", and
 the whole tail is stored in `details.outputTail`. A run whose client sent no tail
 (exit 0, or `AFK_RUN_TAIL_LINES=0`) gets the plain message and no `details`.
+
+`agents.waiting` is the reason the `agents` collector exists: "1 agent has been
+waiting on you for over 2m" ("2 agents have been…" while more are; the message
+follows the count) means a Claude Code session has sat at a permission prompt or a
+question for 2 minutes with nobody there to answer, and the timeline shows since when.
+`agents.all-idle` ("all 3 agents idle for over 60s", "1 agent idle for over 60s") is
+the good news: everything has finished and nothing is asking. Neither fires on a
+frame with `available: false`.
 
 ## GET /api/stats
 
