@@ -25,6 +25,16 @@ REGION="us-west-2"
 SERVICE_NAME="afk"
 CONTAINER_NAME="server"
 CONTAINER_PORT=4141
+PUBLIC_BASE_URL="https://afk.osv.im"
+# Rollout polling: Lightsail takes a few minutes to pull the image, start the
+# container, pass the health check, and swap the endpoint over.
+ROLLOUT_POLL_INTERVAL_SECONDS=15
+ROLLOUT_POLL_ATTEMPTS=40 # 10 minutes
+# Live check: after the deployment is ACTIVE the endpoint can lag a little
+# before the new container answers, so allow a short retry window.
+VERIFY_POLL_INTERVAL_SECONDS=5
+VERIFY_POLL_ATTEMPTS=12 # 1 minute
+LOG_TAIL_LINES=50
 # The image tag to build and push: first CLI argument, else $IMAGE_TAG from the
 # environment, else "afk:latest". deploy.yml passes the commit SHA as the
 # argument so a pushed image can be traced back to the commit that built it.
@@ -103,7 +113,7 @@ cat >"${DEPLOYMENT_JSON}" <<EOF
       },
       "environment": {
         "AFK_PORT": "${CONTAINER_PORT}",
-        "AFK_PUBLIC_BASE_URL": "https://afk.osv.im",
+        "AFK_PUBLIC_BASE_URL": "${PUBLIC_BASE_URL}",
         "AFK_STORAGE": "s3",
         "AFK_S3_BUCKET": "${S3_BUCKET}",
         "AFK_S3_REGION": "${S3_REGION}",
@@ -122,10 +132,94 @@ cat >"${DEPLOYMENT_JSON}" <<EOF
 }
 EOF
 
-echo "==> Creating a new deployment on ${SERVICE_NAME}"
-aws lightsail create-container-service-deployment \
-  --region "${REGION}" \
-  --cli-input-json "file://${DEPLOYMENT_JSON}"
+# Prints the last LOG_TAIL_LINES lines of the container's log to stderr, for a
+# failed rollout. `[message]` (a list per event) makes --output text put one
+# event per line. Never fails the script: the log is a courtesy at this point.
+print_log_tail() {
+  echo "==> Last ${LOG_TAIL_LINES} container log lines from ${SERVICE_NAME}/${CONTAINER_NAME}:" >&2
+  if ! aws lightsail get-container-log \
+    --region "${REGION}" \
+    --service-name "${SERVICE_NAME}" \
+    --container-name "${CONTAINER_NAME}" \
+    --query "logEvents[-${LOG_TAIL_LINES}:].[message]" \
+    --output text >&2; then
+    echo "(could not fetch the container log)" >&2
+  fi
+}
 
-echo "==> Done. Watch rollout with:"
-echo "    aws lightsail get-container-services --region ${REGION} --service-name ${SERVICE_NAME}"
+# Polls the service until the deployment created above is the current one and
+# ACTIVE (success), or Lightsail marks it FAILED (the previous deployment keeps
+# running; we print the log tail and fail), or the attempts run out (also a
+# failure: a deploy that is still ACTIVATING after ten minutes is not going to
+# make it). A transient CLI error is just another attempt.
+wait_for_rollout() {
+  local attempt status current_version current_state next_version next_state
+  for ((attempt = 1; attempt <= ROLLOUT_POLL_ATTEMPTS; attempt++)); do
+    if status="$(aws lightsail get-container-services \
+      --region "${REGION}" \
+      --service-name "${SERVICE_NAME}" \
+      --query 'containerServices[0].[currentDeployment.version,currentDeployment.state,nextDeployment.version,nextDeployment.state]' \
+      --output text 2>&1)"; then
+      read -r current_version current_state next_version next_state <<<"${status}"
+      if [[ "${current_version}" == "${NEW_VERSION}" && "${current_state}" == "ACTIVE" ]]; then
+        echo "==> Deployment ${NEW_VERSION} is ACTIVE"
+        return 0
+      fi
+      if [[ "${next_version}" == "${NEW_VERSION}" && "${next_state}" == "FAILED" ]] ||
+        [[ "${current_version}" == "${NEW_VERSION}" && "${current_state}" == "FAILED" ]]; then
+        echo "error: deployment ${NEW_VERSION} FAILED; the previous deployment is still serving" >&2
+        print_log_tail
+        return 1
+      fi
+      echo "    ${attempt}/${ROLLOUT_POLL_ATTEMPTS}: current ${current_version} (${current_state}), next ${next_version} (${next_state}); waiting ${ROLLOUT_POLL_INTERVAL_SECONDS}s"
+    else
+      echo "    ${attempt}/${ROLLOUT_POLL_ATTEMPTS}: get-container-services failed (${status}); waiting ${ROLLOUT_POLL_INTERVAL_SECONDS}s"
+    fi
+    sleep "${ROLLOUT_POLL_INTERVAL_SECONDS}"
+  done
+  echo "error: deployment ${NEW_VERSION} was not ACTIVE after $((ROLLOUT_POLL_ATTEMPTS * ROLLOUT_POLL_INTERVAL_SECONDS))s" >&2
+  print_log_tail
+  return 1
+}
+
+# Asks the live server which commit it is running (GET /versionz, see
+# docs/PROTOCOL.md) and compares it with the one this script built. No jq on a
+# laptop, so the commit is cut out of the compact JSON with sed: the "server"
+# object is the only one whose "commit" key follows "server":{ with no closing
+# brace in between.
+verify_live_commit() {
+  local attempt body live_commit
+  for ((attempt = 1; attempt <= VERIFY_POLL_ATTEMPTS; attempt++)); do
+    body="$(curl -fsS --max-time 10 "${PUBLIC_BASE_URL}/versionz" 2>/dev/null)" || body=""
+    live_commit="$(printf '%s' "${body}" | sed -n 's/.*"server":{[^}]*"commit":"\([^"]*\)".*/\1/p')"
+    if [[ "${live_commit}" == "${GIT_SHA}" ]]; then
+      echo "==> ${PUBLIC_BASE_URL}/versionz reports commit ${GIT_SHA}: ${body}"
+      return 0
+    fi
+    echo "    ${attempt}/${VERIFY_POLL_ATTEMPTS}: live commit is \"${live_commit}\", want ${GIT_SHA}; waiting ${VERIFY_POLL_INTERVAL_SECONDS}s"
+    sleep "${VERIFY_POLL_INTERVAL_SECONDS}"
+  done
+  echo "error: ${PUBLIC_BASE_URL}/versionz never reported commit ${GIT_SHA} (last body: ${body:-none})" >&2
+  return 1
+}
+
+echo "==> Creating a new deployment on ${SERVICE_NAME}"
+# The deployment's version number, read from the create call's own response so
+# the polling below can tell this deployment apart from the one it replaces.
+NEW_VERSION="$(
+  aws lightsail create-container-service-deployment \
+    --region "${REGION}" \
+    --cli-input-json "file://${DEPLOYMENT_JSON}" \
+    --query 'containerService.nextDeployment.version' \
+    --output text
+)"
+if [[ -z "${NEW_VERSION}" || "${NEW_VERSION}" == "None" ]]; then
+  echo "error: create-container-service-deployment did not return a deployment version" >&2
+  exit 1
+fi
+echo "==> Deployment ${NEW_VERSION} accepted; waiting for it to become ACTIVE"
+
+wait_for_rollout
+verify_live_commit
+
+echo "==> Done: deployment ${NEW_VERSION} (commit ${GIT_SHA}) is live at ${PUBLIC_BASE_URL}"
