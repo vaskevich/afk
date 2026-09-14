@@ -48,6 +48,27 @@ describe("POST /api/sessions", () => {
     });
   });
 
+  it("tells the client the version of the client script this server serves", async () => {
+    const app = createApp(
+      makeAppConfig({ latestClientVersion: "0.3.0" }),
+      new SessionStore(new MemorySessionStorage(), { limits: DEFAULT_LIMITS }),
+    );
+
+    const { res } = await createTestSession(app);
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual(expect.objectContaining({ latestClientVersion: "0.3.0" }));
+  });
+
+  it("omits latestClientVersion when the server has no client script to serve", async () => {
+    const app = buildApp();
+
+    const { res } = await createTestSession(app);
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).not.toHaveProperty("latestClientVersion");
+  });
+
   it("rejects a request with an invalid host, naming the field in the error", async () => {
     const app = buildApp();
 

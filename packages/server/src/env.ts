@@ -21,6 +21,12 @@ export interface AppConfig {
   build: ServerBuildInfo;
   /** What the served dashboard was built from (`dist/version.json`), or null without a build. */
   webBuild: WebBuildInfo | null;
+  /**
+   * The version of the client served at /cli/afk (its `AFK_VERSION` line, read at
+   * startup), or null without a client script. Reported by /versionz and, as
+   * `latestClientVersion`, on every session create so clients can tell they are behind.
+   */
+  latestClientVersion: string | null;
 }
 
 export const DEFAULT_SSE_KEEPALIVE_MS = 15_000;

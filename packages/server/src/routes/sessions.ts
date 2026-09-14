@@ -168,6 +168,11 @@ export function sessionRoutes(deps: AppDeps) {
         ingestToken: session.ingestToken,
         dashboardUrl,
         maxDurationSeconds: session.maxDurationSeconds,
+        // Advice, not a floor (the 426 above is the floor): the client says so on stderr
+        // and, on a terminal, offers to run the installer. Omitted without a client script.
+        ...(config.latestClientVersion === null
+          ? {}
+          : { latestClientVersion: config.latestClientVersion }),
       };
       // NOTE: the bash client extracts fields from this response with sed, relying on the
       // compact (no whitespace) JSON that c.json() emits.

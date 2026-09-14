@@ -37,6 +37,7 @@ export function makeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     sseKeepaliveMs: DEFAULT_SSE_KEEPALIVE_MS,
     build: TEST_BUILD,
     webBuild: null,
+    latestClientVersion: null,
     ...overrides,
   };
 }
