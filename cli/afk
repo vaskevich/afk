@@ -1,0 +1,311 @@
+#!/bin/bash
+#
+# afk — away-from-keyboard telemetry for your machine.
+#
+# Starts a session, samples machine health once a second, and streams it to an afk
+# server so you can watch a shareable dashboard from your phone. Designed to be
+# downloaded, read, and run: plain bash 3.2 (what macOS ships), curl, and stock
+# macOS tools only. No jq, no python.
+#
+# Usage:
+#   afk start            start a session in the foreground (Ctrl-C to end it)
+#   afk run -- <cmd>     (coming soon) wrap a command and report its progress
+#   afk version
+#
+# Environment:
+#   AFK_SERVER   server origin, default https://afk.osv.im (self-hosting is the plan)
+#   AFK_HOME     state directory, default ~/.afk
+#
+# Layout of ~/.afk:
+#   current                        the active session (id, token, server) so other
+#                                  afk processes can join it
+#   sessions/<id>/current.ndjson   frames sampled but not yet handed to the sender
+#   sessions/<id>/queue/*.ndjson   rotated batches waiting to be sent; deleted on 2xx
+#
+# The client is deliberately dumb: it ships raw measurements and lets the server
+# decide what is normal. That way the server can improve without anyone re-downloading
+# this script.
+
+set -u
+
+AFK_VERSION="0.1.0"
+AFK_PROTOCOL_VERSION=1
+AFK_SERVER="${AFK_SERVER:-https://afk.osv.im}"
+AFK_HOME="${AFK_HOME:-$HOME/.afk}"
+
+SAMPLE_INTERVAL_SECONDS=1
+SEND_INTERVAL_SECONDS=1
+SEND_MAX_BACKOFF_SECONDS=30
+SEND_MAX_FILES_PER_BATCH=200
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+log()  { printf 'afk: %s\n' "$*" >&2; }
+die()  { log "error: $*"; exit 1; }
+
+# Escape a string for use inside a JSON string literal.
+json_string() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' | tr -d '\n\r'
+}
+
+# Extract a top-level string value from compact JSON (the server always emits compact JSON).
+json_get_string() { # json key
+  printf '%s' "$1" | sed -n 's/.*"'"$2"'":"\([^"]*\)".*/\1/p'
+}
+json_get_number() { # json key
+  printf '%s' "$1" | sed -n 's/.*"'"$2"'":\([0-9][0-9]*\).*/\1/p'
+}
+
+now_seconds() { date +%s; }
+
+# ---------------------------------------------------------------------------
+# collectors
+#
+# Each collector is a function that prints ONE compact JSON object describing the
+# machine right now. The sampler wraps it in a frame envelope. Keep collectors free of
+# interpretation: raw numbers in, server decides what they mean.
+#
+# TODO(collectors): processes, agents (claude/codex), run. TODO(linux): /proc equivalents.
+# TODO(plugins): allow any executable printing JSON to act as a collector.
+# ---------------------------------------------------------------------------
+
+collect_system() {
+  # %cpu per process is the kernel's recent decayed average; summed and divided by
+  # core count it gives "percent of the whole machine" and is cheap (~20 ms).
+  local cpu load1 load5 load15 pressure page_size swap_total_mb swap_used_mb
+  cpu=$(ps -A -o %cpu= | awk -v n="$HOST_CPU_COUNT" '{ s += $1 } END { printf "%.1f", s / n }')
+
+  # vm.loadavg looks like "{ 4.16 4.98 4.98 }"
+  set -- $(sysctl -n vm.loadavg | tr -d '{}')
+  load1=$1; load5=$2; load15=$3
+
+  pressure=$(sysctl -n kern.memorystatus_vm_pressure_level)
+
+  # vm.swapusage looks like "total = 10240.00M  used = 9179.50M  free = 1060.50M  (encrypted)"
+  set -- $(sysctl -n vm.swapusage | tr -d 'M')
+  swap_total_mb=$3; swap_used_mb=$6
+
+  # vm_stat prints page counts; first line carries the page size.
+  vm_stat | awk -v total="$HOST_MEMORY_BYTES" -v cpu="$cpu" \
+    -v l1="$load1" -v l5="$load5" -v l15="$load15" -v pressure="$pressure" \
+    -v swap_total_mb="$swap_total_mb" -v swap_used_mb="$swap_used_mb" '
+    /page size of/      { page = $8 }
+    /^Pages free/       { free = $3 }
+    /^Pages active/     { active = $3 }
+    /^Pages inactive/   { inactive = $3 }
+    /^Pages wired down/ { wired = $4 }
+    /^Pages occupied by compressor/ { compressed = $5 }
+    END {
+      printf "{\"cpu\":{\"percent\":%s},", cpu
+      printf "\"loadAverage\":{\"oneMinute\":%s,\"fiveMinutes\":%s,\"fifteenMinutes\":%s},", l1, l5, l15
+      printf "\"memory\":{\"pressureLevel\":%d,\"totalBytes\":%d,\"freeBytes\":%d,\"activeBytes\":%d,", pressure, total, free * page, active * page
+      printf "\"inactiveBytes\":%d,\"wiredBytes\":%d,\"compressedBytes\":%d,", inactive * page, wired * page, compressed * page
+      printf "\"swapUsedBytes\":%d,\"swapTotalBytes\":%d}}", swap_used_mb * 1048576, swap_total_mb * 1048576
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# session
+# ---------------------------------------------------------------------------
+
+gather_host_info() {
+  HOST_NAME=$(hostname -s 2>/dev/null || hostname)
+  HOST_PLATFORM=$(uname -s | tr 'A-Z' 'a-z')
+  HOST_OS_VERSION=$(sw_vers -productVersion 2>/dev/null || uname -r)
+  HOST_CPU_COUNT=$(sysctl -n hw.ncpu)
+  HOST_MEMORY_BYTES=$(sysctl -n hw.memsize)
+}
+
+create_session() {
+  local body response
+  body=$(printf '{"protocolVersion":%d,"clientVersion":"%s","host":{"hostname":"%s","platform":"%s","osVersion":"%s","cpuCount":%d,"memoryTotalBytes":%d}}' \
+    "$AFK_PROTOCOL_VERSION" "$AFK_VERSION" "$(json_string "$HOST_NAME")" "$(json_string "$HOST_PLATFORM")" \
+    "$(json_string "$HOST_OS_VERSION")" "$HOST_CPU_COUNT" "$HOST_MEMORY_BYTES")
+
+  response=$(curl -sS --connect-timeout 5 --max-time 15 \
+    -H 'Content-Type: application/json' -H "X-Afk-Client: bash/$AFK_VERSION" \
+    --data "$body" "$AFK_SERVER/api/sessions") || die "could not reach $AFK_SERVER"
+
+  SESSION_ID=$(json_get_string "$response" sessionId)
+  INGEST_TOKEN=$(json_get_string "$response" ingestToken)
+  DASHBOARD_URL=$(json_get_string "$response" dashboardUrl)
+  MAX_DURATION_SECONDS=$(json_get_number "$response" maxDurationSeconds)
+  [ -n "$SESSION_ID" ] && [ -n "$INGEST_TOKEN" ] || die "unexpected response from server: $response"
+  : "${MAX_DURATION_SECONDS:=3600}"
+
+  SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
+  mkdir -p "$SESSION_DIR/queue"
+  # Lets a later `afk run` join this session. TODO(run): implement the join side.
+  printf 'sessionId=%s\ningestToken=%s\nserver=%s\ndashboardUrl=%s\n' \
+    "$SESSION_ID" "$INGEST_TOKEN" "$AFK_SERVER" "$DASHBOARD_URL" > "$AFK_HOME/current"
+}
+
+end_session() {
+  curl -sS -o /dev/null --connect-timeout 3 --max-time 5 -X POST \
+    -H "Authorization: Bearer $INGEST_TOKEN" -H "X-Afk-Client: bash/$AFK_VERSION" \
+    "$AFK_SERVER/api/sessions/$SESSION_ID/end" 2>/dev/null || true
+  rm -f "$AFK_HOME/current" "$SESSION_DIR/response.json" "$SESSION_DIR/batch.ndjson"
+}
+
+# ---------------------------------------------------------------------------
+# sampler: runs collectors on their interval, appends frames to current.ndjson
+# ---------------------------------------------------------------------------
+
+SEQ_SYSTEM=0
+
+emit_frame() { # stream collector data-json
+  printf '{"stream":"%s","collector":"%s","sequence":%d,"timestamp":%d,"data":%s}\n' \
+    "$1" "$2" "$3" "$(now_seconds)" "$4" >> "$SESSION_DIR/current.ndjson"
+}
+
+sample_once() {
+  SEQ_SYSTEM=$((SEQ_SYSTEM + 1))
+  emit_frame system system "$SEQ_SYSTEM" "$(collect_system)"
+  # TODO(collectors): per-collector intervals; not everything needs 1 Hz.
+}
+
+# ---------------------------------------------------------------------------
+# sender: rotates current.ndjson into the queue, ships the oldest batches,
+# deletes them on success, backs off and retries forever on failure
+# ---------------------------------------------------------------------------
+
+ROTATE_COUNTER=0
+
+rotate_current() {
+  local current="$SESSION_DIR/current.ndjson"
+  [ -s "$current" ] || return 0
+  ROTATE_COUNTER=$((ROTATE_COUNTER + 1))
+  # mv is atomic; the sampler's next append recreates current.ndjson.
+  # TODO(resilience): a printf that straddles the rename is theoretically possible
+  # (macOS has no flock); a short pause before reading makes it practically impossible.
+  mv "$current" "$SESSION_DIR/queue/$(printf '%010d' "$ROTATE_COUNTER").ndjson"
+  sleep 0.1
+}
+
+# Sends up to SEND_MAX_FILES_PER_BATCH oldest queue files as one request.
+# Returns 0 on success (files deleted), 1 on retryable failure, 2 on permanent failure (session over).
+send_oldest_batch() {
+  local batch="$SESSION_DIR/batch.ndjson" files="" count=0 f status
+  for f in "$SESSION_DIR"/queue/*.ndjson; do
+    [ -e "$f" ] || break
+    files="$files $f"
+    count=$((count + 1))
+    [ "$count" -ge "$SEND_MAX_FILES_PER_BATCH" ] && break
+  done
+  [ "$count" -gt 0 ] || return 0
+
+  # shellcheck disable=SC2086
+  cat $files > "$batch"
+  status=$(curl -sS -o "$SESSION_DIR/response.json" -w '%{http_code}' \
+    --connect-timeout 5 --max-time 20 \
+    -H "Authorization: Bearer $INGEST_TOKEN" -H 'Content-Type: application/x-ndjson' \
+    -H "X-Afk-Client: bash/$AFK_VERSION" \
+    --data-binary "@$batch" "$AFK_SERVER/api/sessions/$SESSION_ID/frames" 2>/dev/null) || status=000
+
+  case "$status" in
+    2*)
+      # shellcheck disable=SC2086
+      rm -f $files "$batch"
+      return 0 ;;
+    410)
+      log "server closed the session ($(cat "$SESSION_DIR/response.json" 2>/dev/null))"
+      return 2 ;;
+    400|401|404|413)
+      # The server will never accept this batch; keep it out of the way so we don't stall.
+      # TODO(hardening): decide whether to keep these for debugging or drop them.
+      log "server rejected batch with HTTP $status: $(cat "$SESSION_DIR/response.json" 2>/dev/null)"
+      mkdir -p "$SESSION_DIR/rejected"
+      # shellcheck disable=SC2086
+      mv $files "$SESSION_DIR/rejected/"
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+sender_loop() {
+  local backoff=1 rc
+  while true; do
+    rotate_current
+    send_oldest_batch; rc=$?
+    case "$rc" in
+      0) backoff=1; sleep "$SEND_INTERVAL_SECONDS" ;;
+      1) log "send failed, retrying in ${backoff}s (queued: $(ls "$SESSION_DIR/queue" | wc -l | tr -d ' ') batches)"
+         sleep "$backoff"
+         backoff=$((backoff * 2)); [ "$backoff" -gt "$SEND_MAX_BACKOFF_SECONDS" ] && backoff=$SEND_MAX_BACKOFF_SECONDS ;;
+      2) touch "$SESSION_DIR/stop"; return ;;
+    esac
+  done
+}
+
+# Final attempt to drain the queue when the session ends. Best effort, short timeout.
+flush_queue() {
+  rotate_current
+  while [ -n "$(ls "$SESSION_DIR/queue" 2>/dev/null)" ]; do
+    send_oldest_batch || break
+  done
+}
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+
+cmd_start() {
+  [ "$(uname -s)" = "Darwin" ] || die "only macOS is supported right now (TODO: linux)"
+  command -v curl >/dev/null || die "curl is required"
+  mkdir -p "$AFK_HOME"
+
+  gather_host_info
+  create_session
+  log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
+  printf '\n  %s\n\n' "$DASHBOARD_URL"
+
+  sender_loop &
+  SENDER_PID=$!
+
+  finish() {
+    trap - INT TERM
+    log "ending session..."
+    kill "$SENDER_PID" 2>/dev/null; wait "$SENDER_PID" 2>/dev/null
+    flush_queue
+    end_session
+    log "session ended. Dashboard stays available at $DASHBOARD_URL"
+    exit 0
+  }
+  trap finish INT TERM
+
+  local started
+  started=$(now_seconds)
+  while true; do
+    if [ -e "$SESSION_DIR/stop" ]; then
+      log "server ended the session"
+      end_session; exit 0
+    fi
+    if [ $(( $(now_seconds) - started )) -ge "$MAX_DURATION_SECONDS" ]; then
+      log "reached the maximum session length"
+      # TODO(sessions): automatically start a new session and print the new URL instead.
+      finish
+    fi
+    sample_once
+    sleep "$SAMPLE_INTERVAL_SECONDS"
+    # TODO(sampling): subtract collector runtime so ticks stay closer to exactly 1 Hz.
+  done
+}
+
+usage() {
+  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+main() {
+  case "${1:-}" in
+    start)   cmd_start ;;
+    run)     die "'afk run' is not implemented yet (see BACKLOG.md)" ;;
+    version) printf 'afk %s\n' "$AFK_VERSION" ;;
+    -h|--help|help|"") usage ;;
+    *)       die "unknown command: $1 (try 'afk help')" ;;
+  esac
+}
+
+main "$@"
