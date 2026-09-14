@@ -226,8 +226,9 @@ export function LandingPage() {
         <h2>The demo</h2>
         <p>
           Fifteen recorded minutes on one machine: a three-minute cpu burn with memory pressure
-          behind it, a burst of short pressure flaps, and a stretch where the client went quiet, so
-          you can see how each shows up before you run anything yourself.
+          behind it, a burst of short pressure flaps, a stretch where the client went quiet, and two
+          Claude Code sessions and a Codex thread, one of which sits on a question for a few
+          minutes, so you can see how each shows up before you run anything yourself.
         </p>
         <h2>This server</h2>
         <Stats />
