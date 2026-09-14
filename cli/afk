@@ -50,6 +50,10 @@ PROCESS_COMMAND_MAX_LENGTH=512
 SEND_INTERVAL_SECONDS=1
 SEND_MAX_BACKOFF_SECONDS=30
 SEND_MAX_FILES_PER_BATCH=200
+# The queue is capped so a laptop that is offline overnight cannot fill its disk: past
+# this many bytes the oldest frames are dropped (and a line logged, at most this often).
+SPOOL_MAX_BYTES="${AFK_SPOOL_MAX_BYTES:-52428800}"
+SPOOL_DROP_LOG_INTERVAL_SECONDS=60
 
 # When the server is at capacity, `afk start` waits and retries this often, for at most this long.
 CAPACITY_RETRY_SECONDS=30
@@ -389,13 +393,44 @@ send_oldest_batch() {
   esac
 }
 
+# Drops the oldest queued frames until the queue is back under SPOOL_MAX_BYTES. Only
+# an outage grows the queue, so the sender calls this after every failed send. Frames
+# dropped here are gone for good; the log line is rate limited because a long outage
+# would otherwise print one per retry.
+SPOOL_DROPPED_BYTES=0
+SPOOL_DROPPED_FRAMES=0
+SPOOL_DROP_LOGGED_AT=0
+
+enforce_spool_cap() {
+  local total f size now
+  total=$(queue_bytes)
+  [ "$total" -gt "$SPOOL_MAX_BYTES" ] || return 0
+  for f in "$SESSION_DIR"/queue/*.ndjson; do
+    [ -e "$f" ] || break
+    [ "$total" -gt "$SPOOL_MAX_BYTES" ] || break
+    size=$(file_size "$f")
+    rm -f "$f"
+    total=$((total - size))
+    SPOOL_DROPPED_BYTES=$((SPOOL_DROPPED_BYTES + size))
+    SPOOL_DROPPED_FRAMES=$((SPOOL_DROPPED_FRAMES + 1))
+  done
+  now=$(now_seconds)
+  if [ $((now - SPOOL_DROP_LOGGED_AT)) -ge "$SPOOL_DROP_LOG_INTERVAL_SECONDS" ]; then
+    log "queue is over ${SPOOL_MAX_BYTES} bytes; dropped the oldest ${SPOOL_DROPPED_FRAMES} frames (${SPOOL_DROPPED_BYTES} bytes)"
+    SPOOL_DROPPED_BYTES=0
+    SPOOL_DROPPED_FRAMES=0
+    SPOOL_DROP_LOGGED_AT=$now
+  fi
+}
+
 sender_loop() {
   local backoff=1 rc
   while true; do
     send_oldest_batch; rc=$?
     case "$rc" in
       0) backoff=1; sleep "$SEND_INTERVAL_SECONDS" ;;
-      1) log "send failed, retrying in ${backoff}s (queued: $(queue_count) frames)"
+      1) enforce_spool_cap
+         log "send failed, retrying in ${backoff}s (queued: $(queue_count) frames)"
          sleep "$backoff"
          backoff=$((backoff * 2)); [ "$backoff" -gt "$SEND_MAX_BACKOFF_SECONDS" ] && backoff=$SEND_MAX_BACKOFF_SECONDS ;;
       2) touch "$SESSION_DIR/stop"; return ;;

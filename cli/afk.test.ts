@@ -466,6 +466,68 @@ describe("send_oldest_batch", () => {
   });
 });
 
+describe("enforce_spool_cap", () => {
+  /** Five 40-byte frames named in emission order. */
+  async function makeOverfullQueue(): Promise<string> {
+    const sessionDir = await makeTempDir();
+    await mkdir(join(sessionDir, "queue"));
+    for (let sequence = 1; sequence <= 5; sequence += 1) {
+      const name = `${String(sequence).padStart(10, "0")}-system.ndjson`;
+      await writeFile(join(sessionDir, "queue", name), "x".repeat(39) + "\n");
+    }
+    return sessionDir;
+  }
+
+  it("drops the oldest frames until the queue is back under the cap", async () => {
+    const sessionDir = await makeOverfullQueue();
+
+    const { code, stderr } = await runBash("enforce_spool_cap", {
+      SESSION_DIR: sessionDir,
+      AFK_SPOOL_MAX_BYTES: "100",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(sessionDir)).toEqual([
+      "0000000004-system.ndjson",
+      "0000000005-system.ndjson",
+    ]);
+  });
+
+  it("leaves a queue under the cap alone", async () => {
+    const sessionDir = await makeOverfullQueue();
+
+    const { code, stderr } = await runBash("enforce_spool_cap", {
+      SESSION_DIR: sessionDir,
+      AFK_SPOOL_MAX_BYTES: "200",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(sessionDir)).toHaveLength(5);
+    expect(stderr).toBe("");
+  });
+
+  it("reports what it dropped at most once a minute", async () => {
+    const sessionDir = await makeOverfullQueue();
+
+    const { code, stderr } = await runBash(
+      [
+        "enforce_spool_cap",
+        'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000006-system.ndjson"',
+        'head -c 40 /dev/zero > "$SESSION_DIR/queue/0000000007-system.ndjson"',
+        "enforce_spool_cap",
+      ].join("\n"),
+      { SESSION_DIR: sessionDir, AFK_SPOOL_MAX_BYTES: "100" },
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stderr.split("\n").filter((line) => line.includes("dropped"))).toHaveLength(1);
+    expect(await queueFiles(sessionDir)).toEqual([
+      "0000000006-system.ndjson",
+      "0000000007-system.ndjson",
+    ]);
+  });
+});
+
 describe("create_session", () => {
   const hostEnv = {
     HOST_NAME: "test-host",
