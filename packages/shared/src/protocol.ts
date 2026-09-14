@@ -244,6 +244,12 @@ export const CreateSessionResponse = z.object({
   dashboardUrl: z.string().url(),
   /** Server-owned policy: after this the server rejects new frames with 410 Gone. */
   maxDurationSeconds: z.number().int().positive(),
+  /**
+   * The version of the client this server serves at /cli/afk (its `AFK_VERSION` line),
+   * so a client learns whether it is behind without a second request. Absent when the
+   * server has no client script to serve.
+   */
+  latestClientVersion: z.string().optional(),
 });
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
 
@@ -314,6 +320,13 @@ export const WebBuildInfo = z.object({
 });
 export type WebBuildInfo = z.infer<typeof WebBuildInfo>;
 
+/** The client script this server serves at /cli/afk and through /install. */
+export const ClientBuildInfo = z.object({
+  /** The `AFK_VERSION` line of the served cli/afk: the latest client this server ships. */
+  version: z.string(),
+});
+export type ClientBuildInfo = z.infer<typeof ClientBuildInfo>;
+
 /**
  * GET /versionz and GET /api/version: what is running, for a deploy to verify the
  * rollout and for a bug report to say which build it is about. Unauthenticated, cheap.
@@ -322,6 +335,8 @@ export const VersionResponse = z.object({
   server: ServerBuildInfo,
   /** null when the server has no dashboard build to serve. */
   web: WebBuildInfo.nullable(),
+  /** null when the server has no client script to serve. */
+  client: ClientBuildInfo.nullable(),
   protocolVersion: z.number().int().positive(),
 });
 export type VersionResponse = z.infer<typeof VersionResponse>;

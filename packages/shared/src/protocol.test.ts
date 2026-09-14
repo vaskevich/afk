@@ -13,6 +13,7 @@ import {
 import {
   AnomalyEvent,
   CreateSessionRequest,
+  CreateSessionResponse,
   EVENT_TOP_PROCESSES_MAX,
   Frame,
   FramesResponse,
@@ -26,6 +27,7 @@ import {
   StoredFrame,
   StreamEventName,
   UpgradeRequiredDetails,
+  VersionResponse,
 } from "./protocol.ts";
 
 /**
@@ -244,6 +246,69 @@ describe("CreateSessionRequest", () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0]!.path).toEqual(["host", "hostname"]);
+    }
+  });
+});
+
+describe("CreateSessionResponse", () => {
+  const valid = () => ({
+    sessionId: "D3FzMqK8qOLVva9LoHF9uc",
+    ingestToken: "tok-abc",
+    dashboardUrl: "https://afk.test/s/D3FzMqK8qOLVva9LoHF9uc",
+    maxDurationSeconds: 3600,
+  });
+
+  it("carries the latest client version the server ships", () => {
+    const result = CreateSessionResponse.safeParse({ ...valid(), latestClientVersion: "0.3.0" });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.latestClientVersion).toBe("0.3.0");
+    }
+  });
+
+  it("parses without latestClientVersion, as an older server or one without a client script answers", () => {
+    const result = CreateSessionResponse.safeParse(valid());
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.latestClientVersion).toBeUndefined();
+    }
+  });
+});
+
+describe("VersionResponse", () => {
+  const valid = () => ({
+    server: { version: "0.1.0", commit: "abc1234", builtAt: "2026-09-15T10:00:00Z" },
+    web: { version: "0.1.0", commit: "abc1234" },
+    client: { version: "0.3.0" },
+    protocolVersion: PROTOCOL_VERSION,
+  });
+
+  it("carries the served client's version next to the server and dashboard builds", () => {
+    const result = VersionResponse.safeParse(valid());
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.client).toEqual({ version: "0.3.0" });
+    }
+  });
+
+  it("accepts null for client when the server has no client script to serve", () => {
+    const result = VersionResponse.safeParse({ ...valid(), client: null });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("requires client to be present, naming the field", () => {
+    const withoutClient: Partial<ReturnType<typeof valid>> = valid();
+    delete withoutClient.client;
+
+    const result = VersionResponse.safeParse(withoutClient);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["client"]);
     }
   });
 });
