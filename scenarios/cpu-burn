@@ -73,6 +73,7 @@ function parseArgs(argv) {
       case "--help":
         process.stdout.write(usage());
         process.exit(0);
+        break;
       case "-d":
       case "--duration":
         opts.duration = value();
