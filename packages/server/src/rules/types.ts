@@ -1,4 +1,10 @@
-import type { CollectorName, EventSeverity, Frame } from "@afk/shared";
+import type {
+  AnomalyEventDetails,
+  CollectorName,
+  EventSeverity,
+  Frame,
+  StoredFrame,
+} from "@afk/shared";
 
 export type FrameOf<C extends CollectorName> = Extract<Frame, { collector: C }>;
 
@@ -15,9 +21,21 @@ export interface Verdict {
   since?: number;
   /** A point in time rather than a condition: the event is created already closed. */
   instant?: boolean;
+  /** Structured snapshot stored on the event when it opens; ignored on later verdicts. */
+  details?: AnomalyEventDetails;
 }
 
 export const INACTIVE: Verdict = { active: false, severity: "info", message: "" };
+
+/**
+ * What a rule may consult beyond its own stream at the moment it is asked for a
+ * verdict. Everything here reflects the session as of the frame (or tick) being
+ * processed, in index order, so replay and live see the same thing.
+ */
+export interface RuleContext {
+  /** The most recent frame of `stream` so far (including the one being processed), if any. */
+  latestFrame(stream: string): StoredFrame | undefined;
+}
 
 /**
  * Per-stream rule state. Instances are created lazily, one per (stream, rule kind),
@@ -26,8 +44,8 @@ export const INACTIVE: Verdict = { active: false, severity: "info", message: "" 
  * with each frame's own timestamp so history and live produce the same events.
  */
 export interface RuleInstance<C extends CollectorName = CollectorName> {
-  onFrame(frame: FrameOf<C>, atMs: number): Verdict;
-  onTick?(nowMs: number): Verdict;
+  onFrame(frame: FrameOf<C>, atMs: number, context: RuleContext): Verdict;
+  onTick?(nowMs: number, context: RuleContext): Verdict;
 }
 
 export interface Rule<C extends CollectorName = CollectorName> {

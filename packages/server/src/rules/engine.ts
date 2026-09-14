@@ -2,7 +2,13 @@ import type { AnomalyEvent, CollectorName, StoredFrame } from "@afk/shared";
 import { runExited, runStalled } from "./run.ts";
 import { clientStale } from "./stale.ts";
 import { cpuHigh, memoryPressure } from "./system.ts";
-import { register, type RegisteredRule, type RuleInstance, type Verdict } from "./types.ts";
+import {
+  register,
+  type RegisteredRule,
+  type RuleContext,
+  type RuleInstance,
+  type Verdict,
+} from "./types.ts";
 
 /** Every rule the server knows. Add new ones here; they apply to old sessions on next load. */
 export const RULES: readonly RegisteredRule[] = [
@@ -25,6 +31,11 @@ export class RuleEngine {
   readonly events: AnomalyEvent[] = [];
   private readonly instances = new Map<string, Map<string, RuleInstance>>();
   private readonly open = new Map<string, AnomalyEvent>();
+  /** The newest frame seen per stream, so a rule can look across streams via `RuleContext`. */
+  private readonly latestByStream = new Map<string, StoredFrame>();
+  private readonly context: RuleContext = {
+    latestFrame: (stream) => this.latestByStream.get(stream),
+  };
 
   constructor(private readonly rules: readonly RegisteredRule[] = RULES) {}
 
@@ -34,12 +45,15 @@ export class RuleEngine {
     for (const stored of frames) {
       const { stream, collector } = stored.frame;
       const atMs = frameTimeMs(stored);
+      // Recorded before the rules run so a rule sees its own stream's current frame too.
+      this.latestByStream.set(stream, stored);
       for (const [kind, instance] of this.instancesFor(stream, collector)) {
         // Tick first so time-based rules see the gap before this frame closes it.
         if (instance.onTick) {
-          this.apply(stream, kind, instance.onTick(atMs), atMs, changed);
+          this.apply(stream, kind, instance.onTick(atMs, this.context), atMs, changed);
         }
-        this.apply(stream, kind, instance.onFrame(stored.frame, atMs), atMs, changed);
+        const verdict = instance.onFrame(stored.frame, atMs, this.context);
+        this.apply(stream, kind, verdict, atMs, changed);
       }
     }
     return changed;
@@ -51,7 +65,7 @@ export class RuleEngine {
     for (const [stream, byKind] of this.instances) {
       for (const [kind, instance] of byKind) {
         if (instance.onTick) {
-          this.apply(stream, kind, instance.onTick(nowMs), nowMs, changed);
+          this.apply(stream, kind, instance.onTick(nowMs, this.context), nowMs, changed);
         }
       }
     }
@@ -92,6 +106,9 @@ export class RuleEngine {
   ): void {
     const key = `${stream} ${kind}`;
     const current = this.open.get(key);
+    // `details` is a snapshot from when the event opened; only set it when the rule
+    // gave one so events without it serialize exactly as before.
+    const details = verdict.details === undefined ? {} : { details: verdict.details };
     if (verdict.active && verdict.instant) {
       const event: AnomalyEvent = {
         id: `${stream}:${kind}:${atMs}`,
@@ -101,6 +118,7 @@ export class RuleEngine {
         message: verdict.message,
         startedAt: atMs,
         endedAt: atMs,
+        ...details,
       };
       this.events.push(event);
       changed.push(event);
@@ -117,11 +135,13 @@ export class RuleEngine {
           message: verdict.message,
           startedAt,
           endedAt: null,
+          ...details,
         };
         this.open.set(key, event);
         this.events.push(event);
         changed.push(event);
       } else if (current.severity !== verdict.severity || current.message !== verdict.message) {
+        // Severity and message follow the latest verdict; `details` stays as captured at open.
         current.severity = verdict.severity;
         current.message = verdict.message;
         changed.push(current);

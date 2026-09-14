@@ -39,5 +39,20 @@ export function describeFrame(frame: Frame): string {
         `cpu=${process.cpuPercent}% rss=${kib(process.rssBytes)} (${command})`
       );
     }
+    case "processes": {
+      const { sampledCount, top } = frame.data;
+      const busiest = top[0];
+      const summary =
+        busiest === undefined
+          ? "top=none"
+          : `top=${basename(busiest.command)} cpu=${busiest.cpuPercent.toFixed(1)}% ` +
+            `rss=${kib(busiest.rssBytes)} pid=${busiest.pid}`;
+      return `${frame.stream} #${frame.sequence} processes=${sampledCount} ${summary}`;
+    }
   }
+}
+
+/** The last path segment of an executable path, for logs. */
+function basename(command: string): string {
+  return command.slice(command.lastIndexOf("/") + 1);
 }

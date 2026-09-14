@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MemoryPressureLevel } from "@afk/shared";
-import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
+import { makeProcessesFrame, makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import { describeFrame } from "./describe.ts";
 
 describe("describeFrame", () => {
@@ -57,6 +57,25 @@ describe("describeFrame", () => {
       const frame = makeRunFrame(1, { state: "exited", exitCode: 3, elapsedSeconds: 1 });
 
       expect(describeFrame(frame)).toContain("exited=3");
+    });
+  });
+
+  describe("processes frame", () => {
+    it("names the busiest process by basename with its cpu and the total count", () => {
+      const frame = makeProcessesFrame(0);
+
+      const description = describeFrame(frame);
+
+      expect(description).toContain(`${frame.stream} #${frame.sequence}`);
+      expect(description).toContain("processes=412");
+      expect(description).toContain("top=node cpu=180.0%");
+      expect(description).toContain("pid=5821");
+    });
+
+    it("says top=none when the frame lists no processes", () => {
+      const frame = makeProcessesFrame(0, { top: [], sampledCount: 0 });
+
+      expect(describeFrame(frame)).toContain("top=none");
     });
   });
 });

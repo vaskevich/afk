@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { T0_MS, makeRunFrame, makeStoredFrames, makeSystemFrame } from "@afk/shared/testing";
+import {
+  T0_MS,
+  makeProcessesData,
+  makeProcessesFrame,
+  makeRunFrame,
+  makeStoredFrames,
+  makeSystemFrame,
+} from "@afk/shared/testing";
 import { RuleEngine } from "./engine.ts";
+import { register, type Rule } from "./types.ts";
 
 /**
  * The reference test for this repo (see docs/TESTING.md). Notes on the style:
@@ -58,6 +66,195 @@ describe("RuleEngine", () => {
       expect(changed).toEqual([opened]);
       expect(opened.endedAt).toBe(seconds(31));
       expect(opened.id).toBe(`system:cpu.high:${T0_MS}`);
+    });
+
+    it("carries no details and the plain message when there is no processes stream", () => {
+      const engine = new RuleEngine();
+
+      engine.onFrames(systemSeries(Array.from({ length: 31 }, () => 95)));
+
+      expect(engine.events[0]).toEqual({
+        id: `system:cpu.high:${T0_MS}`,
+        stream: "system",
+        kind: "cpu.high",
+        severity: "warning",
+        message: "cpu above 90% for over 30s",
+        startedAt: T0_MS,
+        endedAt: null,
+      });
+    });
+
+    it("names the top three processes from the latest processes frame when it opens", () => {
+      const engine = new RuleEngine();
+      const highCpu = Array.from({ length: 31 }, (_, i) => makeSystemFrame(i, { cpuPercent: 95 }));
+      const busy = makeProcessesFrame(25, { sequence: 1 });
+
+      engine.onFrames(makeStoredFrames([...highCpu.slice(0, 26), busy, ...highCpu.slice(26)]));
+
+      expect(engine.events).toHaveLength(1);
+      expect(engine.events[0]).toMatchObject({
+        kind: "cpu.high",
+        message:
+          "cpu above 90% for over 30s (top: node 180%, Google Chrome Helper 45%, WindowServer 20%)",
+        details: {
+          topProcesses: [
+            { pid: 5821, cpuPercent: 180, command: "/opt/homebrew/bin/node" },
+            {
+              pid: 60300,
+              cpuPercent: 45,
+              command: expect.stringContaining("Google Chrome Helper"),
+            },
+            { pid: 442, cpuPercent: 20, command: expect.stringContaining("WindowServer") },
+          ],
+        },
+      });
+    });
+
+    it("picks the busiest three by cpu even when the frame lists more, unsorted", () => {
+      const engine = new RuleEngine();
+      const [node, chrome, windowServer] = makeProcessesData().top;
+      const unsorted = makeProcessesFrame(0, {
+        top: [
+          { ...windowServer!, cpuPercent: 5 },
+          { ...chrome!, pid: 7, cpuPercent: 300, command: "/usr/bin/cpu-burn" },
+          { ...node!, cpuPercent: 50 },
+          { ...chrome!, cpuPercent: 120 },
+        ],
+      });
+
+      engine.onFrames(
+        makeStoredFrames([unsorted, ...Array.from({ length: 31 }, (_, i) => makeSystemFrame(i))]),
+      );
+      engine.onFrames(systemSeries(Array.from({ length: 31 }, () => 95)));
+
+      expect(engine.events[0]).toMatchObject({
+        message:
+          "cpu above 90% for over 30s (top: cpu-burn 300%, Google Chrome Helper 120%, node 50%)",
+        details: { topProcesses: [{ pid: 7 }, { pid: 60300 }, { pid: 5821 }] },
+      });
+    });
+
+    it("keeps the snapshot taken at open even when a later processes frame changes the top", () => {
+      const engine = new RuleEngine();
+      engine.onFrames(
+        makeStoredFrames([
+          makeProcessesFrame(0),
+          ...Array.from({ length: 31 }, (_, i) => makeSystemFrame(i, { cpuPercent: 95 })),
+        ]),
+      );
+      const opened = { ...engine.events[0]! };
+      const [node] = makeProcessesData().top;
+      const laterTop = makeProcessesFrame(31, {
+        sequence: 2,
+        top: [{ ...node!, pid: 999, cpuPercent: 700, command: "/usr/bin/other" }],
+      });
+
+      const changed = engine.onFrames(
+        makeStoredFrames([laterTop, makeSystemFrame(32, { cpuPercent: 95 })]),
+      );
+
+      expect(changed).toEqual([]);
+      expect(engine.events[0]).toEqual(opened);
+    });
+
+    it("takes a fresh snapshot when the event closes and a new one opens", () => {
+      const engine = new RuleEngine();
+      engine.onFrames(
+        makeStoredFrames([
+          makeProcessesFrame(0),
+          ...Array.from({ length: 31 }, (_, i) => makeSystemFrame(i, { cpuPercent: 95 })),
+          makeSystemFrame(31, { cpuPercent: 10 }),
+        ]),
+      );
+      const [node] = makeProcessesData().top;
+      const secondBurn = makeProcessesFrame(40, {
+        sequence: 2,
+        top: [{ ...node!, pid: 999, cpuPercent: 700, command: "/usr/bin/other" }],
+      });
+
+      engine.onFrames(
+        makeStoredFrames([
+          secondBurn,
+          ...Array.from({ length: 31 }, (_, i) => makeSystemFrame(40 + i, { cpuPercent: 95 })),
+        ]),
+      );
+
+      expect(engine.events).toHaveLength(2);
+      expect(engine.events[1]).toMatchObject({
+        message: "cpu above 90% for over 30s (top: other 700%)",
+        details: { topProcesses: [{ pid: 999, cpuPercent: 700, command: "/usr/bin/other" }] },
+      });
+    });
+  });
+
+  describe("RuleContext", () => {
+    /** Reports, as an instant event per system frame, which processes frame the context exposes. */
+    const probe: Rule<"system"> = {
+      kind: "probe.latest",
+      collector: "system",
+      create() {
+        return {
+          onFrame(frame, _atMs, context) {
+            const processes = context.latestFrame("processes");
+            const own = context.latestFrame("system");
+            return {
+              active: true,
+              instant: true,
+              severity: "info",
+              message: `processes=${processes?.frame.sequence ?? "none"} own=${own?.frame.sequence} self=${frame.sequence}`,
+            };
+          },
+        };
+      },
+    };
+
+    it("exposes the most recent frame of another stream as of each frame, in index order", () => {
+      const engine = new RuleEngine([register(probe)]);
+
+      engine.onFrames(
+        makeStoredFrames([
+          makeSystemFrame(0),
+          makeProcessesFrame(1, { sequence: 1 }),
+          makeSystemFrame(2, { sequence: 2 }),
+          makeProcessesFrame(3, { sequence: 2 }),
+          makeProcessesFrame(4, { sequence: 3 }),
+          makeSystemFrame(5, { sequence: 3 }),
+        ]),
+      );
+
+      expect(engine.events.map((event) => event.message)).toEqual([
+        "processes=none own=1 self=1",
+        "processes=1 own=2 self=2",
+        "processes=3 own=3 self=3",
+      ]);
+    });
+
+    it("hands ticks the same context as frames", () => {
+      const ticker: Rule<"system"> = {
+        kind: "probe.tick",
+        collector: "system",
+        create() {
+          return {
+            onFrame: () => ({ active: false, severity: "info", message: "" }),
+            onTick(_nowMs, context) {
+              return {
+                active: true,
+                instant: true,
+                severity: "info",
+                message: `processes=${context.latestFrame("processes")?.frame.sequence ?? "none"}`,
+              };
+            },
+          };
+        },
+      };
+      const engine = new RuleEngine([register(ticker)]);
+      engine.onFrames(
+        makeStoredFrames([makeSystemFrame(0), makeProcessesFrame(1, { sequence: 4 })]),
+      );
+
+      const changed = engine.onTick(seconds(10));
+
+      expect(changed).toEqual([expect.objectContaining({ message: "processes=4" })]);
     });
   });
 
