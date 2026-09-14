@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+//
+// cpu-burn — pin every core for a while, then exit 0.
+//
+// Spawns one worker thread per core; each one hashes junk in a tight loop until
+// the deadline. The main thread prints a progress line every few seconds so the
+// scenario also produces steady stdout. Signal for the monitor: cpu climbs to
+// roughly 100% x cores within a second or two, stays there, then drops when the
+// process exits cleanly.
+//
+// Plain Node 20, no dependencies, no build step.
+
+"use strict";
+
+const os = require("node:os");
+const crypto = require("node:crypto");
+const { Worker, isMainThread, workerData, parentPort } = require("node:worker_threads");
+
+const DEFAULTS = {
+  duration: 120, // seconds
+  workers:
+    typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length,
+  interval: 5, // seconds between progress lines
+};
+
+function usage() {
+  return `usage: cpu-burn [--duration SECONDS] [--workers N] [--interval SECONDS]
+
+Burns cpu on N worker threads for SECONDS, printing a progress line every few
+seconds, then exits 0.
+
+options:
+  -d, --duration SECONDS   how long to burn (default ${DEFAULTS.duration})
+  -w, --workers N          worker threads, one per core is the default (${DEFAULTS.workers} here)
+  -i, --interval SECONDS   seconds between progress lines (default ${DEFAULTS.interval})
+  -h, --help               show this help
+
+environment (flags win over env):
+  CPU_BURN_DURATION        same as --duration
+  CPU_BURN_WORKERS         same as --workers
+  CPU_BURN_INTERVAL        same as --interval
+
+examples:
+  scenarios/cpu-burn                    # all cores, 2 minutes
+  scenarios/cpu-burn -d 30 -w 2         # two cores, 30 seconds
+  afk run -- scenarios/cpu-burn         # through the afk wrapper (once it exists)
+`;
+}
+
+function positiveNumber(name, raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    process.stderr.write(
+      `cpu-burn: ${name} must be a positive number, got ${JSON.stringify(raw)}\n`,
+    );
+    process.exit(2);
+  }
+  return n;
+}
+
+function parseArgs(argv) {
+  const opts = {
+    duration: process.env.CPU_BURN_DURATION ?? DEFAULTS.duration,
+    workers: process.env.CPU_BURN_WORKERS ?? DEFAULTS.workers,
+    interval: process.env.CPU_BURN_INTERVAL ?? DEFAULTS.interval,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const [flag, inlineValue] = arg.includes("=") ? arg.split(/=(.*)/s) : [arg, undefined];
+    const value = () => (inlineValue !== undefined ? inlineValue : argv[++i]);
+    switch (flag) {
+      case "-h":
+      case "--help":
+        process.stdout.write(usage());
+        process.exit(0);
+      case "-d":
+      case "--duration":
+        opts.duration = value();
+        break;
+      case "-w":
+      case "--workers":
+        opts.workers = value();
+        break;
+      case "-i":
+      case "--interval":
+        opts.interval = value();
+        break;
+      default:
+        process.stderr.write(`cpu-burn: unknown argument ${JSON.stringify(arg)}\n\n${usage()}`);
+        process.exit(2);
+    }
+  }
+  return {
+    duration: positiveNumber("--duration", opts.duration),
+    workers: Math.max(1, Math.floor(positiveNumber("--workers", opts.workers))),
+    interval: positiveNumber("--interval", opts.interval),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// worker: hash in a tight loop until the deadline, report iterations on exit
+// ---------------------------------------------------------------------------
+
+function burn({ deadline }) {
+  let buf = crypto.randomBytes(4096);
+  let iterations = 0;
+  // Check the clock every 256 hashes; Date.now() is cheap but not free.
+  while (true) {
+    for (let i = 0; i < 256; i++) {
+      buf = crypto.createHash("sha256").update(buf).digest();
+      iterations++;
+    }
+    if (Date.now() >= deadline) break;
+  }
+  parentPort.postMessage({ iterations });
+}
+
+// ---------------------------------------------------------------------------
+// main: spawn workers, print progress, exit 0 when they all finish
+// ---------------------------------------------------------------------------
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const startedAt = Date.now();
+  const deadline = startedAt + opts.duration * 1000;
+
+  process.stdout.write(
+    `cpu-burn: ${opts.workers} worker(s) on ${DEFAULTS.workers} core(s) for ${opts.duration}s (pid ${process.pid})\n`,
+  );
+
+  let remaining = opts.workers;
+  let totalIterations = 0;
+  const workers = [];
+
+  for (let n = 0; n < opts.workers; n++) {
+    const w = new Worker(__filename, { workerData: { deadline } });
+    w.on("message", (m) => {
+      totalIterations += m.iterations;
+    });
+    w.on("error", (err) => {
+      process.stderr.write(`cpu-burn: worker ${n} failed: ${err.stack || err}\n`);
+      process.exit(1);
+    });
+    w.on("exit", () => {
+      remaining--;
+      if (remaining === 0) finish();
+    });
+    workers.push(w);
+  }
+
+  const ticker = setInterval(() => {
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const left = Math.max(0, opts.duration - elapsed);
+    const load = os.loadavg()[0].toFixed(2);
+    process.stdout.write(
+      `cpu-burn: ${elapsed.toFixed(0).padStart(String(opts.duration).length)}s elapsed, ${left.toFixed(0)}s left, load1=${load}\n`,
+    );
+  }, opts.interval * 1000);
+
+  function finish() {
+    clearInterval(ticker);
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    process.stdout.write(
+      `cpu-burn: done after ${elapsed}s, ${totalIterations.toLocaleString("en-US")} sha256 rounds\n`,
+    );
+    process.exit(0);
+  }
+
+  // Ctrl-C / SIGTERM: stop the workers and exit non-zero (130 / 143), like a real job would.
+  for (const [sig, code] of [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ]) {
+    process.on(sig, () => {
+      clearInterval(ticker);
+      process.stdout.write(`cpu-burn: caught ${sig}, stopping\n`);
+      Promise.all(workers.map((w) => w.terminate())).finally(() => process.exit(code));
+    });
+  }
+}
+
+if (isMainThread) main();
+else burn(workerData);

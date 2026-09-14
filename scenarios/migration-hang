@@ -1,0 +1,178 @@
+#!/usr/bin/env node
+//
+// migration-hang — a fake migration job that goes quiet.
+//
+// Prints "processing N/TOTAL items" at a steady rate, then at a configurable point
+// either hangs forever (blocks with no cpu, no output, no exit) or crashes with a
+// non-zero exit code. Signal for the monitor: steady stdout that stops abruptly
+// while the process is still alive (hang), or a run that ends with a non-zero
+// exit (crash). Ctrl-C kills the hung process like any other.
+//
+// Plain Node 20, no dependencies, no build step.
+
+"use strict";
+
+const DEFAULTS = {
+  total: 10000, // items the "migration" claims it will process
+  rate: 20, // lines per second
+  hangAt: 300, // hang after this item (0 = never)
+  hangAfter: 0, // or after this many seconds (0 = disabled); whichever comes first
+  exitCode: 1, // used with --crash
+};
+
+function usage() {
+  return `usage: migration-hang [--total N] [--rate LINES_PER_SEC] [--hang-at ITEM]
+                      [--hang-after SECONDS] [--crash [CODE]] [--never]
+
+Prints "processing N/TOTAL items" at a steady rate, then stops printing and hangs
+forever without exiting or using cpu. Ctrl-C to kill it.
+
+options:
+  -t, --total N              items to claim (default ${DEFAULTS.total})
+  -r, --rate LINES_PER_SEC   output rate (default ${DEFAULTS.rate})
+  -a, --hang-at ITEM         stall after printing this item (default ${DEFAULTS.hangAt}; 0 disables)
+  -s, --hang-after SECONDS   stall after this many seconds (default off); first trigger wins
+  -c, --crash [CODE]         instead of hanging, exit non-zero (default code ${DEFAULTS.exitCode})
+  -n, --never                never stall: process every item and exit 0 (the healthy control)
+  -h, --help                 show this help
+
+environment (flags win over env):
+  MIGRATION_TOTAL, MIGRATION_RATE, MIGRATION_HANG_AT, MIGRATION_HANG_AFTER,
+  MIGRATION_CRASH (set to an exit code)
+
+examples:
+  scenarios/migration-hang                       # 20 lines/s, hangs after item 300 (~15s)
+  scenarios/migration-hang --hang-after 30       # hangs 30s in regardless of item count
+  scenarios/migration-hang --crash 3             # exits 3 after item 300 instead of hanging
+  scenarios/migration-hang --never --total 200   # finishes cleanly, exit 0
+  afk run -- scenarios/migration-hang            # through the afk wrapper (once it exists)
+`;
+}
+
+function number(name, raw, { min = 0, integer = false } = {}) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || (integer && !Number.isInteger(n))) {
+    process.stderr.write(
+      `migration-hang: ${name} must be ${integer ? "an integer" : "a number"} >= ${min}, got ${JSON.stringify(raw)}\n`,
+    );
+    process.exit(2);
+  }
+  return n;
+}
+
+function parseArgs(argv) {
+  const env = process.env;
+  const opts = {
+    total: env.MIGRATION_TOTAL ?? DEFAULTS.total,
+    rate: env.MIGRATION_RATE ?? DEFAULTS.rate,
+    hangAt: env.MIGRATION_HANG_AT ?? DEFAULTS.hangAt,
+    hangAfter: env.MIGRATION_HANG_AFTER ?? DEFAULTS.hangAfter,
+    crash: env.MIGRATION_CRASH !== undefined ? env.MIGRATION_CRASH : null,
+    never: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const [flag, inlineValue] = arg.includes("=") ? arg.split(/=(.*)/s) : [arg, undefined];
+    const value = () => (inlineValue !== undefined ? inlineValue : argv[++i]);
+    // --crash takes an optional code: consume the next arg only if it looks like a number.
+    const optionalValue = () => {
+      if (inlineValue !== undefined) return inlineValue;
+      if (argv[i + 1] !== undefined && /^\d+$/.test(argv[i + 1])) return argv[++i];
+      return DEFAULTS.exitCode;
+    };
+    switch (flag) {
+      case "-h":
+      case "--help":
+        process.stdout.write(usage());
+        process.exit(0);
+      case "-t":
+      case "--total":
+        opts.total = value();
+        break;
+      case "-r":
+      case "--rate":
+        opts.rate = value();
+        break;
+      case "-a":
+      case "--hang-at":
+        opts.hangAt = value();
+        break;
+      case "-s":
+      case "--hang-after":
+        opts.hangAfter = value();
+        break;
+      case "-c":
+      case "--crash":
+        opts.crash = optionalValue();
+        break;
+      case "-n":
+      case "--never":
+        opts.never = true;
+        break;
+      default:
+        process.stderr.write(
+          `migration-hang: unknown argument ${JSON.stringify(arg)}\n\n${usage()}`,
+        );
+        process.exit(2);
+    }
+  }
+  return {
+    total: number("--total", opts.total, { min: 1, integer: true }),
+    rate: number("--rate", opts.rate, { min: 0.001 }),
+    hangAt: number("--hang-at", opts.hangAt, { min: 0, integer: true }),
+    hangAfter: number("--hang-after", opts.hangAfter, { min: 0 }),
+    crash: opts.crash === null ? null : number("--crash", opts.crash, { min: 1, integer: true }),
+    never: opts.never,
+  };
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const startedAt = Date.now();
+  const stallAt = opts.hangAt > 0 ? opts.hangAt : Infinity;
+  const stallAfterMs = opts.hangAfter > 0 ? opts.hangAfter * 1000 : Infinity;
+
+  const plan = opts.never
+    ? "will finish cleanly"
+    : `${opts.crash !== null ? `will exit ${opts.crash}` : "will hang"} after item ${
+        Number.isFinite(stallAt) ? stallAt : "-"
+      }${Number.isFinite(stallAfterMs) ? ` or ${opts.hangAfter}s` : ""}`;
+  process.stdout.write(
+    `migration-hang: migrating ${opts.total} items at ${opts.rate}/s, ${plan} (pid ${process.pid})\n`,
+  );
+
+  let item = 0;
+  const timer = setInterval(tick, 1000 / opts.rate);
+
+  function tick() {
+    item++;
+    process.stdout.write(`processing ${item}/${opts.total} items\n`);
+
+    if (item >= opts.total) {
+      clearInterval(timer);
+      process.stdout.write(`migration-hang: migrated ${opts.total} items in ${elapsed()}s\n`);
+      process.exit(0);
+    }
+    if (opts.never) return;
+
+    const byItem = item >= stallAt;
+    const byTime = Date.now() - startedAt >= stallAfterMs;
+    if (!byItem && !byTime) return;
+
+    clearInterval(timer);
+    const reason = byItem ? `item ${item}` : `${opts.hangAfter}s`;
+    if (opts.crash !== null) {
+      process.stderr.write(`migration-hang: fatal: lost connection to database after ${reason}\n`);
+      process.exit(opts.crash);
+    }
+    // Hang: nothing is printed from here on. A far-future timer keeps the event loop
+    // alive with zero cpu; the process only dies from a signal (Ctrl-C works normally).
+    setInterval(() => {}, 2 ** 31 - 1);
+  }
+
+  function elapsed() {
+    return ((Date.now() - startedAt) / 1000).toFixed(1);
+  }
+}
+
+main();
