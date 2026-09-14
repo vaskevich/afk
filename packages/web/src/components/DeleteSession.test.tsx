@@ -17,12 +17,22 @@ afterEach(() => {
  * app uses; the network call underneath it is the true edge, so that is what is stubbed.
  */
 describe("DeleteSession", () => {
+  it("shows only a trash icon at rest, named and titled for readers and tooltips", () => {
+    render(<DeleteSession sessionId={SESSION_ID} onDeleted={() => {}} />);
+
+    const button = screen.getByRole("button", { name: "Delete session" });
+
+    expect(button.textContent).toBe("");
+    expect(button.querySelector("svg")).not.toBeNull();
+    expect(button.getAttribute("title")).toBe("Delete session");
+  });
+
   it("asks once more before deleting, and only the second click calls the server", async () => {
     const deleteSession = vi.spyOn(apiSource, "deleteSession").mockResolvedValue(undefined);
     const onDeleted = vi.fn();
     render(<DeleteSession sessionId={SESSION_ID} onDeleted={onDeleted} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete this session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
 
     expect(screen.getByRole("button", { name: "Really delete?" })).toBeDefined();
     expect(deleteSession).not.toHaveBeenCalled();
@@ -37,26 +47,26 @@ describe("DeleteSession", () => {
   it("backs out of the confirmation on Escape", () => {
     const deleteSession = vi.spyOn(apiSource, "deleteSession").mockResolvedValue(undefined);
     render(<DeleteSession sessionId={SESSION_ID} onDeleted={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete this session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
 
     fireEvent.keyDown(document.body, { key: "Escape" });
 
-    expect(screen.getByRole("button", { name: "Delete this session" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Delete session" })).toBeDefined();
     expect(deleteSession).not.toHaveBeenCalled();
   });
 
   it("backs out when the pointer goes down anywhere outside it", () => {
     render(<DeleteSession sessionId={SESSION_ID} onDeleted={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete this session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
 
     fireEvent.pointerDown(document.body);
 
-    expect(screen.getByRole("button", { name: "Delete this session" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Delete session" })).toBeDefined();
   });
 
   it("stays in the confirmation when the pointer goes down on the button itself", () => {
     render(<DeleteSession sessionId={SESSION_ID} onDeleted={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete this session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
 
     // A real click is a pointer press on the button first; that press must not reset
     // it, or the click that follows would start the dance over instead of deleting.
@@ -69,14 +79,14 @@ describe("DeleteSession", () => {
     vi.spyOn(apiSource, "deleteSession").mockRejectedValue(new Error("bad ingest token"));
     const onDeleted = vi.fn();
     render(<DeleteSession sessionId={SESSION_ID} onDeleted={onDeleted} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete this session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Really delete?" }));
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toBe("Could not delete: bad ingest token");
     expect(onDeleted).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Delete this session" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Delete session" })).toBeDefined();
   });
 
   it("disables the button while the request is in flight", async () => {
@@ -88,7 +98,7 @@ describe("DeleteSession", () => {
     );
     const onDeleted = vi.fn();
     render(<DeleteSession sessionId={SESSION_ID} onDeleted={onDeleted} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete this session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Really delete?" }));
 
@@ -102,7 +112,7 @@ describe("DeleteSession", () => {
     const onDeleted = vi.fn();
     const deleteSession = vi.spyOn(fixtureSource, "deleteSession");
     render(<DeleteSession sessionId={DEMO_SESSION_ID} onDeleted={onDeleted} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete this session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Really delete?" }));
 

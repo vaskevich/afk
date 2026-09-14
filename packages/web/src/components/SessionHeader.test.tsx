@@ -68,7 +68,7 @@ describe("SessionHeader actions", () => {
     const names = within(actions)
       .getAllByRole("button")
       .map((button) => button.getAttribute("aria-label") ?? button.textContent);
-    expect(names).toEqual(["Share", expect.stringMatching(/^Theme:/), "Delete this session"]);
+    expect(names).toEqual(["Share", expect.stringMatching(/^Theme:/), "Delete session"]);
   });
 });
 
@@ -76,7 +76,7 @@ describe("SessionHeader delete control", () => {
   it("offers Delete next to Share for an ordinary session", async () => {
     await renderOnSessionRoute(header());
 
-    const remove = await screen.findByRole("button", { name: "Delete this session" });
+    const remove = await screen.findByRole("button", { name: "Delete session" });
     const share = screen.getByRole("button", { name: "Share" });
     expect(remove.parentElement?.parentElement).toBe(share.parentElement?.parentElement);
   });
@@ -86,7 +86,7 @@ describe("SessionHeader delete control", () => {
       header(makeSessionSummary({ sessionId: "current", status: "ended" })),
     );
 
-    expect(await screen.findByRole("button", { name: "Delete this session" })).toBeDefined();
+    expect(await screen.findByRole("button", { name: "Delete session" })).toBeDefined();
   });
 
   it("hides it for the demo session, which the server refuses to delete anyway", async () => {
@@ -96,13 +96,13 @@ describe("SessionHeader delete control", () => {
     );
 
     await screen.findByRole("button", { name: "Share" });
-    expect(screen.queryByRole("button", { name: "Delete this session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete session" })).toBeNull();
   });
 
   it("hides it once the session has been deleted under the viewer", async () => {
     await renderOnSessionRoute(header(makeSessionSummary({ sessionId: "current" }), true));
 
     await screen.findByRole("button", { name: "Share" });
-    expect(screen.queryByRole("button", { name: "Delete this session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete session" })).toBeNull();
   });
 });

@@ -4,11 +4,42 @@ import { sourceFor } from "../data/useSession.ts";
 /** Where the control is in its two-click dance. */
 type DeleteState = "idle" | "confirming" | "deleting";
 
-const BUTTON_LABELS: Record<DeleteState, string> = {
-  idle: "Delete",
+/** What the button says once the trash icon has been clicked. */
+const BUTTON_LABELS: Record<Exclude<DeleteState, "idle">, string> = {
   confirming: "Really delete?",
   deleting: "Deleting…",
 };
+/** The button's styling per state: a square for the icon, red for the confirmation. */
+const BUTTON_CLASSES: Record<DeleteState, string | undefined> = {
+  idle: "icon-button",
+  confirming: "delete-confirm",
+  deleting: undefined,
+};
+/** The idle button's accessible name and tooltip; its face is only the trash icon. */
+const IDLE_NAME = "Delete session";
+/** The icon's box in CSS pixels, matching the theme glyph next to it. */
+const ICON_SIZE_PX = 16;
+
+/** A trash can (lid, handle, body, two lines) stroked in the surrounding text colour. */
+function TrashIcon() {
+  return (
+    <svg
+      className="delete-icon"
+      width={ICON_SIZE_PX}
+      height={ICON_SIZE_PX}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M2.5 4h11M6 4V2.5h4V4M4 4l.75 9.5h6.5L12 4M6.5 7v4M9.5 7v4" />
+    </svg>
+  );
+}
 
 interface Props {
   sessionId: string;
@@ -17,7 +48,7 @@ interface Props {
 }
 
 /**
- * A "Delete" button that asks once more before it acts: the first click turns it into
+ * A trash-can button that asks once more before it acts: the first click turns it into
  * "Really delete?", the second calls the server. Anything else (a pointer press
  * outside it, Escape, or just leaving it) puts it back. Two clicks on the same
  * control rather than `window.confirm` so it looks and behaves like its neighbours
@@ -73,16 +104,18 @@ export function DeleteSession({ sessionId, onDeleted }: Props) {
     }
   };
 
+  const idle = state === "idle";
   return (
     <div className="delete" ref={ref}>
       <button
         type="button"
-        className={state === "confirming" ? "delete-confirm" : undefined}
-        aria-label={state === "idle" ? "Delete this session" : undefined}
+        className={BUTTON_CLASSES[state]}
+        aria-label={idle ? IDLE_NAME : undefined}
+        title={idle ? IDLE_NAME : undefined}
         disabled={state === "deleting"}
         onClick={onClick}
       >
-        {BUTTON_LABELS[state]}
+        {idle ? <TrashIcon /> : BUTTON_LABELS[state]}
       </button>
       {error !== null && (
         <p className="delete-error" role="alert">

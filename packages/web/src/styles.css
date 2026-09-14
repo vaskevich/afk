@@ -582,14 +582,17 @@ button:focus-visible {
 
 /* ---- delete control -------------------------------------------------- */
 
-/* Sits next to Share at the same size; the second click's wording and colour are the
-   only warning, so the confirming state is unmistakably red. */
+/* A trash icon beside the theme glyph at the same size; the second click's wording and
+   colour are the only warning, so the confirming state is unmistakably red. */
 .delete {
   position: relative;
   display: inline-flex;
 }
 .delete button {
   white-space: nowrap;
+}
+.delete-icon {
+  display: block;
 }
 .delete .delete-confirm {
   color: var(--critical);
