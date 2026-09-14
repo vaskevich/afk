@@ -54,6 +54,11 @@ locals {
 # anyway as belt-and-suspenders: cheap to allow, and it keeps this role usable
 # if the `environment:` line is ever accidentally dropped from the workflow --
 # it would still only work from main, not from an arbitrary branch or PR.
+locals {
+  # "owner@id/repo@id", from `gh api repos/OWNER/REPO/actions/oidc/customization/sub`.
+  github_repo_immutable = "${split("/", var.github_repo)[0]}@${var.github_owner_id}/${split("/", var.github_repo)[1]}@${var.github_repo_id}"
+}
+
 data "aws_iam_policy_document" "github_deploy_trust" {
   statement {
     effect  = "Allow"
@@ -76,6 +81,12 @@ data "aws_iam_policy_document" "github_deploy_trust" {
       values = [
         "repo:${var.github_repo}:ref:refs/heads/main",
         "repo:${var.github_repo}:environment:production",
+        # GitHub's "immutable subject" (on for this repo) appends numeric ids to the
+        # owner and repo so renames cannot hijack a trust policy:
+        # repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:production. Both forms are
+        # accepted so toggling the repo setting either way keeps deploys working.
+        "repo:${local.github_repo_immutable}:ref:refs/heads/main",
+        "repo:${local.github_repo_immutable}:environment:production",
       ]
     }
   }

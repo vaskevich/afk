@@ -44,6 +44,18 @@ variable "github_repo" {
 # or set it to false and supply github_oidc_provider_arn to reference an
 # existing one instead -- creating a second provider for the same issuer fails
 # with EntityAlreadyExists.
+variable "github_owner_id" {
+  description = "Numeric GitHub id of the repo owner, for the immutable OIDC subject (see ci.tf). `gh api users/OWNER --jq .id`."
+  type        = number
+  default     = 1815707
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub id of the repository, for the immutable OIDC subject (see ci.tf). `gh api repos/OWNER/REPO --jq .id`."
+  type        = number
+  default     = 1369376504
+}
+
 variable "create_github_oidc_provider" {
   description = "Whether to create the GitHub Actions OIDC provider in this account. Set false (and supply github_oidc_provider_arn) if one already exists for token.actions.githubusercontent.com."
   type        = bool
