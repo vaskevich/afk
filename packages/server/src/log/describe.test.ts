@@ -1,0 +1,62 @@
+import { describe, expect, it } from "vitest";
+import { MemoryPressureLevel } from "@afk/shared";
+import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
+import { describeFrame } from "./describe.ts";
+
+describe("describeFrame", () => {
+  describe("system frame", () => {
+    it("includes the stream, sequence, and cpu percent to one decimal", () => {
+      const frame = makeSystemFrame(0, { cpuPercent: 42.567 });
+
+      const description = describeFrame(frame);
+
+      expect(description).toContain(`${frame.stream} #${frame.sequence}`);
+      expect(description).toContain("cpu=42.6%");
+    });
+
+    it("labels pressure level 1 as normal", () => {
+      const frame = makeSystemFrame(0, { pressureLevel: MemoryPressureLevel.Normal });
+
+      expect(describeFrame(frame)).toContain("mem=normal");
+    });
+
+    it("labels pressure level 2 as warn", () => {
+      const frame = makeSystemFrame(0, { pressureLevel: MemoryPressureLevel.Warn });
+
+      expect(describeFrame(frame)).toContain("mem=warn");
+    });
+
+    it("labels pressure level 4 as critical", () => {
+      const frame = makeSystemFrame(0, { pressureLevel: MemoryPressureLevel.Critical });
+
+      expect(describeFrame(frame)).toContain("mem=critical");
+    });
+
+    it("falls back to level N for an unknown pressure level", () => {
+      const frame = makeSystemFrame(0, { pressureLevel: 7 });
+
+      expect(describeFrame(frame)).toContain("mem=level 7");
+    });
+  });
+
+  describe("run frame", () => {
+    it("describes a running command with its command and byte counts", () => {
+      const frame = makeRunFrame(0, {
+        output: { flavor: "volume", stdoutBytes: 2048, stderrBytes: 512 },
+      });
+
+      const description = describeFrame(frame);
+
+      expect(description).toContain("running");
+      expect(description).toContain(`(${frame.data.command})`);
+      expect(description).toContain("out=2.0K");
+      expect(description).toContain("err=0.5K");
+    });
+
+    it("describes an exited command with its exit code", () => {
+      const frame = makeRunFrame(1, { state: "exited", exitCode: 3, elapsedSeconds: 1 });
+
+      expect(describeFrame(frame)).toContain("exited=3");
+    });
+  });
+});
