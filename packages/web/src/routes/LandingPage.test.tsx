@@ -25,6 +25,22 @@ describe("LandingPage after a delete", () => {
     );
   });
 
+  // Regression: ?deleted= echoed whatever the URL carried, so a hand-typed
+  // `?deleted=<alert>script(1)</script>` put that text in the notice (escaped by React,
+  // but still nonsense on the page). Only a well-formed session id gets a notice.
+  it("shows no notice when ?deleted= is not a session id", async () => {
+    await renderOnSessionRoute(
+      null,
+      "/?deleted=%3Calert%3Escript(1)%3C/script%3E",
+      <LandingPage />,
+    );
+
+    // Wait for the settled page (the install line is always there) before asserting absence.
+    await screen.findByText(/afk start/);
+    expect(screen.queryByText(/was deleted/)).toBeNull();
+    expect(document.body.textContent).not.toContain("script(1)");
+  });
+
   it("shows no notice on an ordinary visit", async () => {
     withoutStats();
 
