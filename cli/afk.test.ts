@@ -743,7 +743,9 @@ describe("sample_once", () => {
 
     expect(code, stderr).toBe(0);
     const frames = await queuedFrames(sessionDir);
+    // The first tick also emits the agents frame; every stream carries the scheduled second.
     expect(frames.map((frame) => [frame.stream, frame.timestamp])).toEqual([
+      ["agents", 1234],
       ["processes", 1234],
       ["system", 1234],
     ]);
@@ -765,7 +767,7 @@ describe("sample_once", () => {
 
     expect(code, stderr).toBe(0);
     const frames = await queuedFrames(sessionDir);
-    expect(frames.map((frame) => frame.timestamp)).toEqual([9999, 9999]);
+    expect(frames.map((frame) => frame.timestamp)).toEqual([9999, 9999, 9999]);
   });
 });
 
