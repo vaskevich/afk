@@ -203,7 +203,10 @@ and `ThemeProvider` / `useTheme` (`useTheme.tsx`) keep `data-theme` on `<html>` 
 step with the choice and with `prefers-color-scheme`. An inline script in
 `index.html` applies the attribute before the first paint. Canvas renderers read
 their colours from the stylesheet at draw time, so `useCanvas` redraws whenever the
-resolved theme changes.
+resolved theme changes. The control in the header (`components/ThemeToggle.tsx`) is
+a single glyph for the theme in use, with a dot when it was chosen here rather than
+taken from the operating system; hovering, focusing, or tapping it reveals the
+choices to force light, force dark, or follow the system again.
 
 The server serves the built dashboard so the URL the client prints works directly.
 For UI work the Vite dev server proxies `/api` to the server.
