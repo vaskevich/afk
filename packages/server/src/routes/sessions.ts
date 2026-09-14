@@ -152,6 +152,12 @@ export function sessionRoutes(deps: AppDeps) {
         `[session ${session.sessionId}] created for ${session.host.hostname} ` +
           `(client ${session.clientVersion}, ${session.host.cpuCount} cpus${continuation}) -> ${dashboardUrl}`,
       );
+      if (previous) {
+        const how = replacesActiveSession ? "ended by chain" : "already over, linked";
+        console.log(
+          `[session ${previous.sessionId}] ${how} after ${previous.frames.length} frames; continues in ${session.sessionId}`,
+        );
+      }
       const body: CreateSessionResponse = {
         sessionId: session.sessionId,
         ingestToken: session.ingestToken,
