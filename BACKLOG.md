@@ -13,8 +13,30 @@ priority within each section. Migrate to a proper tracker if it outgrows a file.
 - [x] Server: anomaly rules (cpu sustained high, memory pressure warn/critical, client stale) -- `packages/server/src/rules/`
 - [x] CLI: `afk run -- <cmd>` joins the current session; reports stdout/stderr bytes per tick + exit code
 - [ ] CLI: processes collector (pid, parentPid, %cpu, rss, full path) via `ps`
-- [ ] CLI: agents collector (running claude / codex process counts)
 - [x] Server rules for runs: exited non-zero, no output for N seconds -- `rules/run.ts` (`run.exited`, `run.stalled`)
+
+## Wishlist: agents collector (claude / codex)
+
+Parked on 2026-09-15. Investigated and cheap to build (about the size of the
+processes collector), but it depends on undocumented tool internals and ships session
+names off the machine, so it waits for a deliberate decision.
+
+- What is observable today: Claude Code writes `~/.claude/sessions/<pid>.json` per
+  running session (`name`, `cwd`, `kind`, `status`, `version`, `startedAt`, `updatedAt`);
+  subagent transcripts live under `~/.claude/projects/<project>/<session>/subagents/`
+  and a file modified in the last minute is a working subagent; Codex has `codex` /
+  `codex app-server` processes and rollouts under `~/.codex/sessions/YYYY/MM/DD/`.
+- Shape: a generic `agents` collector, one entry per agent (tool, pid, name, cwd,
+  status, kind, lastActivityAt) plus per-tool working-subagent counts, sampled every 5 s.
+- The payoff rule: an agent whose transcript has not changed for 10 minutes while its
+  process is alive is almost certainly waiting on a person (permission prompt or
+  question). Lean on transcript inactivity, not the `status` string, until its
+  vocabulary is confirmed across working, idle, and waiting sessions.
+- Privacy: send only the directory basename, make the collector opt-in for hosted
+  servers (default on for self-hosted).
+- Degrade gracefully when the directories are missing or the file shape changes.
+- JSON-heavy in bash; a good first collector for a Python client if that port happens
+  (see docs/CLIENT.md).
 
 ## Storage & retention
 
