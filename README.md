@@ -17,9 +17,15 @@ Status: early prototype. See [BACKLOG.md](BACKLOG.md).
 
 ```bash
 pnpm install
-pnpm dev:server                                     # http://localhost:4141
-AFK_SERVER=http://localhost:4141 ./cli/afk start    # in another terminal
+pnpm build                                          # builds the dashboard into packages/web/dist
+pnpm dev:server                                     # http://localhost:4141, serves the built dashboard
+AFK_SERVER=http://localhost:4141 ./cli/afk start    # in another terminal; open the URL it prints
 ```
+
+The dashboard follows an active session live over server-sent events and shows the
+whole trace once it ends. To iterate on the UI without rebuilding, run `pnpm dev:web`
+(Vite on http://localhost:5173, proxying `/api` to the server) and start the client with
+`AFK_PUBLIC_BASE_URL=http://localhost:5173` so the printed URL opens there.
 
 Watch a session's frames arrive as server-sent events (works in a browser tab or curl):
 
@@ -29,5 +35,3 @@ curl -N http://localhost:4141/api/sessions/<sessionId>/stream
 
 Reconnect where you left off with `-H 'Last-Event-ID: <index>'` or `?after=<index>`.
 `GET /api/sessions/<sessionId>/frames?after=<index>` returns the same data as one JSON document.
-Set `AFK_PUBLIC_BASE_URL=http://localhost:5173` when running the Vite dev server so the
-printed dashboard URL opens the web app.

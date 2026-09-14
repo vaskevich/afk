@@ -3,6 +3,8 @@ import type { Session, SessionStore } from "./store/sessions.ts";
 export interface AppConfig {
   /** Public origin used to build dashboard URLs, e.g. https://afk.osv.im */
   publicBaseUrl: string;
+  /** Absolute path to the built dashboard (packages/web/dist). */
+  webDistDir: string;
 }
 
 /** Everything route modules need. Passed in explicitly so tests can build an app with a fresh store. */

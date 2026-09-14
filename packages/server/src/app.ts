@@ -5,6 +5,7 @@ import { healthRoutes } from "./routes/health.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
+import { webRoutes } from "./routes/web.ts";
 
 // TODO(hardening): secureHeaders, body size limit, rate limiting, admission control,
 // minimum client version. See BACKLOG.md.
@@ -26,5 +27,6 @@ export function createApp(config: AppConfig, store = new SessionStore()) {
     .route("/api/health", healthRoutes)
     .route("/api/sessions", sessionRoutes(deps))
     .route("/api/sessions", frameRoutes(deps))
-    .route("/api/sessions", streamRoutes(deps));
+    .route("/api/sessions", streamRoutes(deps))
+    .route("/", webRoutes(config.webDistDir));
 }
