@@ -325,7 +325,9 @@ create_session() {
   INGEST_TOKEN=$(json_get_string "$response" ingestToken)
   DASHBOARD_URL=$(json_get_string "$response" dashboardUrl)
   MAX_DURATION_SECONDS=$(json_get_number "$response" maxDurationSeconds)
-  [ -n "$SESSION_ID" ] && [ -n "$INGEST_TOKEN" ] || die "unexpected response from server: $response"
+  if [ -z "$SESSION_ID" ] || [ -z "$INGEST_TOKEN" ]; then
+    die "unexpected response from server: $response"
+  fi
   : "${MAX_DURATION_SECONDS:=3600}"
 
   SESSION_DIR="$AFK_HOME/sessions/$SESSION_ID"
@@ -644,7 +646,7 @@ cmd_start() {
     log "session ended. Dashboard stays available at $DASHBOARD_URL"
     exit 0
   }
-  # shellcheck disable=SC2329 # invoked through the trap finish sets
+  # shellcheck disable=SC2329,SC2317 # invoked through the trap finish sets (2317 is the older code)
   abandon() {
     trap - INT TERM
     log "interrupted again; leaving $(queue_count) queued frames unsent in $SESSION_DIR"
