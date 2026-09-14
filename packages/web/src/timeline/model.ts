@@ -1,4 +1,4 @@
-import type { CollectorName, Frame, FramesResponse, StoredFrame } from "@afk/shared";
+import type { AnomalyEvent, CollectorName, Frame, FramesResponse, StoredFrame } from "@afk/shared";
 
 /** One row on the timeline: every frame of a single stream, in time order. */
 export interface StreamSeries {
@@ -15,6 +15,8 @@ export interface TimelineModel {
   /** Where "follow the latest" points: now while active, the end once over. Always <= t1. */
   latest: number;
   streams: StreamSeries[];
+  /** Every server-detected anomaly, sorted by start. */
+  events: AnomalyEvent[];
   /** Highest `StoredFrame.index` seen; the resume cursor for streaming. */
   lastIndex: number;
 }
@@ -54,7 +56,9 @@ export function buildModel(data: FramesResponse, now: number): TimelineModel {
   const t1 = Math.max(end, lastFrameMs, t0 + 60_000);
   const latest = Math.min(Math.max(end, t0), t1);
 
-  return { t0, t1, latest, streams: [...byStream.values()], lastIndex };
+  const events = [...data.events].sort((a, b) => a.startedAt - b.startedAt);
+
+  return { t0, t1, latest, streams: [...byStream.values()], events, lastIndex };
 }
 
 /** Index of the frame whose timestamp is closest to `timeMs`, or -1 when empty. */

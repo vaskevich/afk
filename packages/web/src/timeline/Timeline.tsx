@@ -7,11 +7,20 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
+import type { AnomalyEvent } from "@afk/shared";
 import { formatClock, formatDuration, formatOffset } from "../format.ts";
+import type { EventCluster } from "./clusters.ts";
 import type { TimelineModel } from "./model.ts";
 import { TimeAxis } from "./TimeAxis.tsx";
 import { TimelineRow } from "./TimelineRow.tsx";
-import { isFullWindow, panWindow, zoomWindow, ZOOM_STEP, type TimeWindow } from "./viewport.ts";
+import {
+  isFullWindow,
+  panWindow,
+  windowAround,
+  zoomWindow,
+  ZOOM_STEP,
+  type TimeWindow,
+} from "./viewport.ts";
 
 interface Props {
   model: TimelineModel;
@@ -32,6 +41,21 @@ const WHEEL_ZOOM_SENSITIVITY = 0.01;
 const WHEEL_ZOOM_MAX_FACTOR = 2;
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+
+const NO_EVENTS: readonly AnomalyEvent[] = [];
+
+function groupByStream(events: readonly AnomalyEvent[]): Map<string, AnomalyEvent[]> {
+  const byStream = new Map<string, AnomalyEvent[]>();
+  for (const event of events) {
+    const list = byStream.get(event.stream);
+    if (list) {
+      list.push(event);
+    } else {
+      byStream.set(event.stream, [event]);
+    }
+  }
+  return byStream;
+}
 
 export function Timeline({ model, cursor, following, onCursorChange, view, onZoomChange }: Props) {
   const { t0, t1, latest } = model;
@@ -194,6 +218,23 @@ export function Timeline({ model, cursor, following, onCursorChange, view, onZoo
     e.preventDefault();
   };
 
+  const eventsByStream = useMemo(() => groupByStream(model.events), [model.events]);
+
+  const onSelectEvent = useCallback(
+    (event: AnomalyEvent) => onCursorChange(event.startedAt),
+    [onCursorChange],
+  );
+  // Zoom to the cluster so its members come apart (subject to the minimum window).
+  const onSelectCluster = useCallback(
+    (cluster: EventCluster) => {
+      const first = cluster.events[0]!;
+      const last = cluster.events[cluster.events.length - 1]!;
+      onCursorChange(first.startedAt);
+      onZoomChange(windowAround(first.startedAt, last.startedAt, model));
+    },
+    [onCursorChange, onZoomChange, model],
+  );
+
   const cursorLeft = useMemo(() => plot.left + x(cursor), [plot.left, x, cursor]);
   const cursorVisible = cursor >= v0 && cursor <= v1;
   const fullWindow = isFullWindow(view, model);
@@ -265,7 +306,18 @@ export function Timeline({ model, cursor, following, onCursorChange, view, onZoo
           </div>
         </div>
         {model.streams.map((series) => (
-          <TimelineRow key={series.stream} series={series} width={plot.width} view={view} x={x} />
+          <TimelineRow
+            key={series.stream}
+            series={series}
+            events={eventsByStream.get(series.stream) ?? NO_EVENTS}
+            width={plot.width}
+            t0={t0}
+            latest={latest}
+            view={view}
+            x={x}
+            onSelectEvent={onSelectEvent}
+            onSelectCluster={onSelectCluster}
+          />
         ))}
         {model.streams.length === 0 && <div className="centered">No frames yet.</div>}
         {cursorVisible && <div className="timeline-cursor" style={{ left: cursorLeft }} />}

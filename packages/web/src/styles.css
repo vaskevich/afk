@@ -416,9 +416,80 @@ button:focus-visible {
   font-size: 10px;
 }
 
+.timeline-row-plot {
+  position: relative;
+  min-width: 0;
+}
+
 .timeline-row canvas {
   display: block;
   width: 100%;
+}
+
+/* ---- event markers --------------------------------------------------- */
+
+.event-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.event-band {
+  position: absolute;
+  top: 0;
+  height: 4px;
+  opacity: 0.45;
+}
+
+.event-marker,
+.event-cluster {
+  position: absolute;
+  top: 1px;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  cursor: pointer;
+  padding: 0;
+  border: 1.5px solid var(--bg-row);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.event-marker {
+  width: 11px;
+  height: 11px;
+}
+.event-cluster {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--bg);
+}
+.event-marker:hover,
+.event-cluster:hover,
+.event-marker:focus-visible,
+.event-cluster:focus-visible {
+  border-color: var(--fg);
+  z-index: 1;
+}
+
+.event-band.event-info,
+.event-marker.event-info,
+.event-cluster.event-info {
+  background: var(--info);
+}
+.event-band.event-warning,
+.event-marker.event-warning,
+.event-cluster.event-warning {
+  background: var(--warn);
+}
+.event-band.event-critical,
+.event-marker.event-critical,
+.event-cluster.event-critical {
+  background: var(--critical);
 }
 
 .timeline-cursor {
