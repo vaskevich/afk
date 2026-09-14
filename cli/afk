@@ -24,10 +24,20 @@
 #                        runs still going
 #   afk stop             end that session (asks the `afk start` process to finish)
 #   afk qr               print the current session's dashboard URL as a QR code again
-#   afk version
+#   afk update           replace this copy with the client the server serves (the same
+#                        installer as curl -fsSL <origin>/install | sh), in this copy's
+#                        directory unless AFK_INSTALL_DIR says where
+#   afk version [--check]
+#                        print this copy's version; --check also asks the server which
+#                        version it serves
 #
 # The dashboard URL is printed with a QR code under it when stdout is a terminal, so
 # you can point a phone at the screen instead of typing it; --no-qr skips that.
+#
+# When the server serves a newer client than this one, `afk start` (and an `afk run`
+# that started its own session) says so; on a terminal `afk start` also asks whether
+# to update now, waiting ten seconds for the answer and taking silence as no. The new
+# copy is used from the next `afk start`; the running one carries on as it is.
 #
 # The server caps a session (an hour by default). Shortly before that `afk start`, or
 # an `afk run` that started its own session, opens a successor session that continues
@@ -41,6 +51,9 @@
 #   AFK_HOME             state directory, default ~/.afk
 #   AFK_SPOOL_MAX_BYTES  cap on queued frames on disk, default 50 MiB; oldest dropped past it
 #   AFK_NO_QR            set to 1 to never print the QR code (same as --no-qr)
+#   AFK_NO_UPDATE_PROMPT set to 1 to never be asked to update (the notice still prints)
+#   AFK_INSTALL_DIR      where `afk update` and the prompt install the new copy; default
+#                        is this copy's own directory
 #   AFK_RUN_TAIL_LINES   how many of the last lines of stdout and stderr a failed `afk run`
 #                        reports, default 20; 0 sends no output at all (exit 0 never sends any)
 #   AFK_RUN_CAPTURE_MAX_BYTES
@@ -139,6 +152,9 @@ SPOOL_DROP_LOG_INTERVAL_SECONDS=60
 # When the server is at capacity, `afk start` waits and retries this often, for at most this long.
 CAPACITY_RETRY_SECONDS=30
 CAPACITY_MAX_WAIT_SECONDS=600
+# `afk start` on a terminal waits this long for an answer to "update now?" before
+# taking it as no; a start nobody is watching is delayed by at most this.
+UPDATE_PROMPT_TIMEOUT_SECONDS=10
 
 # `afk start` opens its successor session this long before the server's cap, so the
 # old session's last frames are sent while it still accepts them: 30 s for the default
@@ -179,6 +195,34 @@ json_get_string() { # json key
 }
 json_get_number() { # json key
   printf '%s' "$1" | sed -n 's/.*"'"$2"'":\([0-9][0-9]*\).*/\1/p'
+}
+# The `{...}` value of a top-level key whose value holds no object of its own (the
+# `client` half of /api/version), so a key that recurs inside several objects
+# ("version") can be read from the right one with json_get_string.
+json_get_object() { # json key
+  printf '%s' "$1" | sed -n 's/.*"'"$2"'":\({[^{}]*}\).*/\1/p'
+}
+
+# True when version $1 is older than $2: major.minor.patch compared numerically part
+# by part (0.10.0 is newer than 0.9.0), a pre-release or build suffix ignored, a
+# missing part 0. macOS has no `sort -V`.
+version_lt() { # a b
+  local a=${1%%[-+]*} b=${2%%[-+]*} part_a part_b
+  while [ -n "$a" ] || [ -n "$b" ]; do
+    part_a=${a%%.*}
+    part_b=${b%%.*}
+    case "$a" in *.*) a=${a#*.} ;; *) a="" ;; esac
+    case "$b" in *.*) b=${b#*.} ;; *) b="" ;; esac
+    case "$part_a" in ''|*[!0-9]*) part_a=0 ;; esac
+    case "$part_b" in ''|*[!0-9]*) part_b=0 ;; esac
+    if [ "$part_a" -lt "$part_b" ]; then
+      return 0
+    fi
+    if [ "$part_a" -gt "$part_b" ]; then
+      return 1
+    fi
+  done
+  return 1
 }
 
 # The server answered 426 Upgrade Required: it will not talk to this client (or this
@@ -626,6 +670,9 @@ create_session() { # [previous-session-id previous-ingest-token]
   INGEST_TOKEN=$(json_get_string "$response" ingestToken)
   DASHBOARD_URL=$(json_get_string "$response" dashboardUrl)
   MAX_DURATION_SECONDS=$(json_get_number "$response" maxDurationSeconds)
+  # The client the server itself serves; empty from a server without one, or an older
+  # server that does not say. See check_client_update.
+  LATEST_CLIENT_VERSION=$(json_get_string "$response" latestClientVersion)
   if [ -z "$SESSION_ID" ] || [ -z "$INGEST_TOKEN" ]; then
     log "unexpected response from server: $response"
     return 1
@@ -1158,6 +1205,121 @@ system_sampler_loop() {
 # Whether stdout is a terminal; the tests override this after sourcing the script.
 stdout_is_terminal() { [ -t 1 ]; }
 
+# ---------------------------------------------------------------------------
+# updates
+#
+# The create response carries `latestClientVersion`, the version of the client the
+# server itself serves at /cli/afk. A copy that is behind says so, and `afk start` on
+# a terminal offers to run the installer. Only a 426 (log_upgrade_required) is a
+# refusal; this is advice, and a session never depends on it.
+# ---------------------------------------------------------------------------
+
+# The question needs someone at the keyboard: stdin to read the answer from and
+# stderr, where it is asked, both terminals. Tests replace this.
+can_prompt() { [ -t 0 ] && [ -t 2 ]; }
+
+# After a session create: say when the server serves a newer client than this one and,
+# with `prompt` (`afk start`, on a terminal, unless AFK_NO_UPDATE_PROMPT=1), ask whether
+# to run the installer now. No is the default and the question waits at most
+# UPDATE_PROMPT_TIMEOUT_SECONDS, so a start nobody is watching is barely delayed; a
+# failed update is logged and the session carries on. The new copy is only picked up
+# by the next `afk start`: this process keeps running the code it loaded, and the
+# session it just created is not disturbed.
+check_client_update() { # [prompt]
+  local answer=""
+  if [ -z "${LATEST_CLIENT_VERSION:-}" ] || ! version_lt "$AFK_VERSION" "$LATEST_CLIENT_VERSION"; then
+    return 0
+  fi
+  log "afk $LATEST_CLIENT_VERSION is available (this is $AFK_VERSION). Update with: curl -fsSL $AFK_SERVER/install | sh"
+  if [ "${1:-}" != prompt ] || [ "${AFK_NO_UPDATE_PROMPT:-0}" = 1 ] || ! can_prompt; then
+    return 0
+  fi
+  printf 'afk: update now? [y/N] ' >&2
+  # read fails on the timeout (and on end of input); either is a no, with the cursor
+  # still on the question's line.
+  read -r -t "$UPDATE_PROMPT_TIMEOUT_SECONDS" answer || printf '\n' >&2
+  case "$answer" in
+    y|Y|yes|Yes|YES) ;;
+    *)
+      log "not updating (run 'afk update' any time)"
+      return 0 ;;
+  esac
+  if run_installer; then
+    log "installed afk $(installed_client_version "$INSTALLED_CLIENT_PATH") at $INSTALLED_CLIENT_PATH; it takes effect on the next afk start (this session keeps running $AFK_VERSION)"
+  else
+    log "update failed; this session carries on with afk $AFK_VERSION"
+  fi
+}
+
+# The directory this copy runs from, for the installer to replace it in place.
+self_directory() { (cd "$(dirname "$0")" && pwd); }
+
+# The AFK_VERSION line of an installed copy, the way the server reads it too.
+installed_client_version() { # path
+  sed -n 's/^AFK_VERSION="\(.*\)"$/\1/p' "$1" 2>/dev/null
+}
+
+# Downloads the installer from $AFK_SERVER and runs it: the same `curl | sh` the 426
+# hint prints, installing over this copy unless AFK_INSTALL_DIR names another directory
+# (the installer's own default is ~/.local/bin). The download goes to a file first so
+# a failed download fails here instead of feeding sh an empty script; over https the
+# same downgrade guard as the installer's own fetches applies. Its output goes to
+# stderr, keeping stdout for the dashboard URL, and its stdin is closed so it cannot
+# read the terminal. Leaves the installed path in INSTALLED_CLIENT_PATH.
+run_installer() {
+  local installer rc
+  INSTALLED_CLIENT_PATH="${AFK_INSTALL_DIR:-$(self_directory)}/afk"
+  installer=$(mktemp "${TMPDIR:-/tmp}/afk-installer.XXXXXX")
+  case "$AFK_SERVER" in
+    https://*) curl -fsSL --proto '=https' --tlsv1.2 -o "$installer" "$AFK_SERVER/install" ;;
+    *) curl -fsSL -o "$installer" "$AFK_SERVER/install" ;;
+  esac || {
+    rm -f "$installer"
+    log "could not download $AFK_SERVER/install"
+    return 1
+  }
+  AFK_INSTALL_DIR="${INSTALLED_CLIENT_PATH%/afk}" sh "$installer" >&2 </dev/null; rc=$?
+  rm -f "$installer"
+  return "$rc"
+}
+
+# `afk update`: run the installer whatever the server said, and show what changed.
+cmd_update() {
+  local after
+  log "this is afk $AFK_VERSION; updating from $AFK_SERVER"
+  run_installer || die "update failed; nothing was changed"
+  after=$(installed_client_version "$INSTALLED_CLIENT_PATH")
+  if [ "$after" = "$AFK_VERSION" ]; then
+    log "afk $AFK_VERSION is the latest; reinstalled at $INSTALLED_CLIENT_PATH"
+  else
+    log "afk $AFK_VERSION -> ${after:-?} at $INSTALLED_CLIENT_PATH"
+  fi
+}
+
+# `afk version [--check]`: this copy's version and, with --check, the one the server
+# serves (`client.version` of /api/version), with a hint when this copy is behind.
+cmd_version() {
+  local file response latest
+  printf 'afk %s\n' "$AFK_VERSION"
+  [ "${1:-}" = "--check" ] || return 0
+  file=$(mktemp "${TMPDIR:-/tmp}/afk-version.XXXXXX")
+  http_request -o "$file" --connect-timeout 5 --max-time 10 "$AFK_SERVER/api/version" || {
+    rm -f "$file"
+    die "could not reach $AFK_SERVER: $HTTP_ERROR"
+  }
+  response=$(cat "$file" 2>/dev/null)
+  rm -f "$file"
+  [ "$HTTP_STATUS" = 200 ] || die "$AFK_SERVER/api/version answered HTTP $HTTP_STATUS"
+  latest=$(json_get_string "$(json_get_object "$response" client)" version)
+  if [ -z "$latest" ]; then
+    die "$AFK_SERVER does not say which client it serves (an older server, or one without the client)"
+  fi
+  printf 'latest %s (%s)\n' "$latest" "$AFK_SERVER"
+  if version_lt "$AFK_VERSION" "$latest"; then
+    log "update with: afk update"
+  fi
+}
+
 # Fetches the current session's QR code and prints it, block plus URL line, exactly as
 # the server sent it. Prints nothing and returns 1 unless the server answered 200.
 fetch_qr() {
@@ -1248,6 +1410,7 @@ cmd_start() {
   resend_leftover_queues
   gather_host_info
   create_session_or_wait
+  check_client_update prompt
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
   print_dashboard_url
 
@@ -1313,7 +1476,8 @@ cmd_run() {
       if ! create_session; then
         run_without_telemetry "$@"
       fi
-      log "no session running here; started $SESSION_ID with machine telemetry for the length of this command" ;;
+      log "no session running here; started $SESSION_ID with machine telemetry for the length of this command"
+      check_client_update ;;
     *) run_without_telemetry "$@" ;;
   esac
 
@@ -1472,7 +1636,8 @@ main() {
     status)  cmd_status ;;
     stop)    cmd_stop ;;
     qr)      cmd_qr ;;
-    version) printf 'afk %s\n' "$AFK_VERSION" ;;
+    update)  cmd_update ;;
+    version) shift; cmd_version "$@" ;;
     -h|--help|help|"") usage ;;
     *)       die "unknown command: $1 (try 'afk help')" ;;
   esac

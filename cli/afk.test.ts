@@ -2,7 +2,17 @@ import { execFile, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2899,4 +2909,525 @@ describe("cmd_run owning a session that reaches its cap", () => {
       expect(await queueFiles(join(afkHome, "sessions", "second"))).toEqual([]);
     },
   );
+});
+
+describe("version_lt", () => {
+  it.each([
+    ["0.2.0", "0.2.0", "no"],
+    ["0.2.0", "0.2.1", "yes"],
+    ["0.2.0", "0.3.0", "yes"],
+    ["0.2.0", "1.0.0", "yes"],
+    ["0.3.0", "0.2.0", "no"],
+    ["0.2.1", "0.2.0", "no"],
+    ["1.0.0", "0.9.9", "no"],
+  ])("%s older than %s: %s", async (a, b, expected) => {
+    const { stdout, stderr } = await runBash(
+      `if version_lt "${a}" "${b}"; then echo yes; else echo no; fi`,
+    );
+
+    expect(stdout.trim(), stderr).toBe(expected);
+  });
+
+  it("compares parts numerically, so 0.10.0 is newer than 0.9.0", async () => {
+    const { stdout } = await runBash(
+      'if version_lt "0.9.0" "0.10.0"; then echo yes; else echo no; fi; ' +
+        'if version_lt "0.10.0" "0.9.0"; then echo yes; else echo no; fi',
+    );
+
+    expect(stdout).toBe("yes\nno\n");
+  });
+
+  it("ignores a pre-release or build suffix", async () => {
+    const { stdout } = await runBash(
+      'if version_lt "0.2.0" "0.2.0-beta.1"; then echo yes; else echo no; fi; ' +
+        'if version_lt "0.2.0-rc.1+abc" "0.2.1"; then echo yes; else echo no; fi',
+    );
+
+    expect(stdout).toBe("no\nyes\n");
+  });
+});
+
+describe("json_get_object", () => {
+  const VERSION_BODY =
+    '{"server":{"version":"0.1.0","commit":null,"builtAt":null},"web":{"version":"0.1.0","commit":"abc"},"client":{"version":"0.3.0"},"protocolVersion":1}';
+
+  it("returns one top-level object so a key that recurs elsewhere can be read from it", async () => {
+    const { stdout } = await runBash(
+      `json_get_object '${VERSION_BODY}' client; echo; ` +
+        `json_get_string "$(json_get_object '${VERSION_BODY}' client)" version; echo`,
+    );
+
+    expect(stdout).toBe('{"version":"0.3.0"}\n0.3.0\n');
+  });
+
+  it("returns empty when the key is null or missing", async () => {
+    const { stdout } = await runBash(
+      `json_get_object '{"server":{"version":"0.1.0"},"client":null}' client; echo "[$?]"`,
+    );
+
+    expect(stdout).toBe("[0]\n");
+  });
+});
+
+/** The version the tests give the running copy, so the cases do not move with each release. */
+const THIS_VERSION = "0.2.0";
+const NEWER_VERSION = "0.3.0";
+
+/** A create response carrying (or not) the version of the client the server serves. */
+function createdWithLatest(latestClientVersion?: string): string {
+  const latest =
+    latestClientVersion === undefined ? "" : `,"latestClientVersion":"${latestClientVersion}"`;
+  return `{"sessionId":"sess123","ingestToken":"tok","dashboardUrl":"http://example.test/s/sess123","maxDurationSeconds":3600${latest}}`;
+}
+
+/**
+ * What the stub server serves at /install: a POSIX sh installer that installs a copy
+ * of the newer client where the real one would (`AFK_INSTALL_DIR`), then exits as told.
+ */
+function stubInstaller(exitCode = 0): string {
+  return [
+    "#!/bin/sh",
+    'mkdir -p "$AFK_INSTALL_DIR"',
+    `printf '#!/bin/bash\\nAFK_VERSION="${NEWER_VERSION}"\\n' > "$AFK_INSTALL_DIR/afk"`,
+    'echo "stub installer ran in $AFK_INSTALL_DIR"',
+    `exit ${exitCode}`,
+    "",
+  ].join("\n");
+}
+
+/** A server that creates a session saying it serves `latest`, serves `installer` at /install, and accepts the rest. */
+function startUpdateServer(latest: string | undefined, installer = stubInstaller()) {
+  return startServer((req) => {
+    if (req.url === "/api/sessions") {
+      return { status: 201, body: createdWithLatest(latest) };
+    }
+    if (req.url === "/install") {
+      return { status: 200, body: installer };
+    }
+    return { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' };
+  });
+}
+
+describe("check_client_update", () => {
+  const hostEnv = {
+    HOST_NAME: "test-host",
+    HOST_PLATFORM: "darwin",
+    HOST_OS_VERSION: "26.0",
+    HOST_CPU_COUNT: "8",
+    HOST_MEMORY_BYTES: "17179869184",
+  };
+  const NOTICE = `afk ${NEWER_VERSION} is available (this is ${THIS_VERSION})`;
+  const QUESTION = "update now? [y/N]";
+  /** The test process has no tty; a snippet that wants the prompt path says so. */
+  const AT_A_TERMINAL = "can_prompt() { return 0; }";
+
+  /** Sources the client as version THIS_VERSION, creates a session, then runs `check` with `stdin` as its input. */
+  async function checkAfterCreate(
+    afkHome: string,
+    serverUrl: string,
+    check: string,
+    stdin = "",
+    env: NodeJS.ProcessEnv = {},
+  ): Promise<BashResult> {
+    return runBash(
+      [
+        `AFK_VERSION=${THIS_VERSION}`,
+        "create_session",
+        `${check} <<< "${stdin}"; printf 'RC=%d\\n' "$?"`,
+      ].join("\n"),
+      { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: serverUrl, ...env },
+    );
+  }
+
+  it("says a newer client is available, with the manual update command, and returns 0", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startUpdateServer(NEWER_VERSION);
+
+    const { stdout, stderr } = await checkAfterCreate(afkHome, server.url, "check_client_update");
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(NOTICE);
+    expect(stderr).toContain(`Update with: curl -fsSL ${server.url}/install | sh`);
+    expect(stderr).not.toContain(QUESTION);
+  });
+
+  it.each([
+    ["the same version", THIS_VERSION],
+    ["an older version", "0.1.9"],
+    ["no version at all (an older server)", undefined],
+  ])("says nothing when the server serves %s", async (_case, latest) => {
+    const afkHome = await makeTempDir();
+    const server = await startUpdateServer(latest);
+
+    const { stdout, stderr } = await checkAfterCreate(
+      afkHome,
+      server.url,
+      `${AT_A_TERMINAL}\ncheck_client_update prompt`,
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).not.toContain("is available");
+    expect(stderr).not.toContain(QUESTION);
+  });
+
+  it("does not ask when stdin and stderr are not terminals", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startUpdateServer(NEWER_VERSION);
+
+    const { stdout, stderr } = await checkAfterCreate(
+      afkHome,
+      server.url,
+      "check_client_update prompt",
+      "y",
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(NOTICE);
+    expect(stderr).not.toContain(QUESTION);
+    expect(server.requests.map((req) => req.url)).not.toContain("/install");
+  });
+
+  it("does not ask with AFK_NO_UPDATE_PROMPT=1, even on a terminal", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startUpdateServer(NEWER_VERSION);
+
+    const { stdout, stderr } = await checkAfterCreate(
+      afkHome,
+      server.url,
+      `${AT_A_TERMINAL}\ncheck_client_update prompt`,
+      "y",
+      { AFK_NO_UPDATE_PROMPT: "1" },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(NOTICE);
+    expect(stderr).not.toContain(QUESTION);
+    expect(server.requests.map((req) => req.url)).not.toContain("/install");
+  });
+
+  it("runs the server's installer into AFK_INSTALL_DIR on y and says the new copy takes effect next start", async () => {
+    const afkHome = await makeTempDir();
+    const installDir = join(await makeTempDir(), "bin");
+    const server = await startUpdateServer(NEWER_VERSION);
+
+    const { stdout, stderr } = await checkAfterCreate(
+      afkHome,
+      server.url,
+      `${AT_A_TERMINAL}\ncheck_client_update prompt`,
+      "y",
+      { AFK_INSTALL_DIR: installDir },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(QUESTION);
+    expect(server.requests.map((req) => req.url)).toContain("/install");
+    expect(await readFile(join(installDir, "afk"), "utf8")).toContain(
+      `AFK_VERSION="${NEWER_VERSION}"`,
+    );
+    // The installer's own output lands on stderr, never on stdout with the dashboard URL.
+    expect(stderr).toContain(`stub installer ran in ${installDir}`);
+    expect(stderr).toContain(
+      `installed afk ${NEWER_VERSION} at ${installDir}/afk; it takes effect on the next afk start (this session keeps running ${THIS_VERSION})`,
+    );
+  });
+
+  it("carries on without installing on n", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startUpdateServer(NEWER_VERSION);
+
+    const { stdout, stderr } = await checkAfterCreate(
+      afkHome,
+      server.url,
+      `${AT_A_TERMINAL}\ncheck_client_update prompt`,
+      "n",
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(QUESTION);
+    expect(stderr).toContain("not updating (run 'afk update' any time)");
+    expect(server.requests.map((req) => req.url)).not.toContain("/install");
+  });
+
+  it("takes no answer within the timeout as no", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startUpdateServer(NEWER_VERSION);
+
+    // stdin stays open with nothing on it for longer than the (shortened) timeout.
+    const { stdout, stderr } = await runBash(
+      [
+        `AFK_VERSION=${THIS_VERSION}`,
+        AT_A_TERMINAL,
+        "UPDATE_PROMPT_TIMEOUT_SECONDS=1",
+        "create_session",
+        "check_client_update prompt < <(sleep 3); printf 'RC=%d\\n' \"$?\"",
+      ].join("\n"),
+      { ...hostEnv, AFK_HOME: afkHome, AFK_SERVER: server.url },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(QUESTION);
+    expect(stderr).toContain("not updating");
+    expect(server.requests.map((req) => req.url)).not.toContain("/install");
+  });
+
+  it("logs a failed install and returns 0 so the session carries on", async () => {
+    const afkHome = await makeTempDir();
+    const installDir = join(await makeTempDir(), "bin");
+    const server = await startUpdateServer(NEWER_VERSION, stubInstaller(1));
+
+    const { stdout, stderr } = await checkAfterCreate(
+      afkHome,
+      server.url,
+      `${AT_A_TERMINAL}\ncheck_client_update prompt`,
+      "y",
+      { AFK_INSTALL_DIR: installDir },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(`update failed; this session carries on with afk ${THIS_VERSION}`);
+  });
+
+  it("logs a failed download and returns 0 without running anything", async () => {
+    const afkHome = await makeTempDir();
+    const installDir = join(await makeTempDir(), "bin");
+    const server = await startServer((req) => {
+      if (req.url === "/api/sessions") {
+        return { status: 201, body: createdWithLatest(NEWER_VERSION) };
+      }
+      return { status: 404, body: "not here" };
+    });
+
+    const { stdout, stderr } = await checkAfterCreate(
+      afkHome,
+      server.url,
+      `${AT_A_TERMINAL}\ncheck_client_update prompt`,
+      "y",
+      { AFK_INSTALL_DIR: installDir },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0" });
+    expect(stderr).toContain(`could not download ${server.url}/install`);
+    expect(stderr).toContain("update failed");
+    expect(await exists(join(installDir, "afk"))).toBe(false);
+  });
+});
+
+describe("afk start with a newer client on the server", () => {
+  const AT_A_TERMINAL = "can_prompt() { return 0; }";
+
+  /** The update server, plus a marker file once the first frame batch arrives (the session is under way). */
+  function startFramesMarkingServer(afkHome: string): Promise<TestServer> {
+    return startServer(async (req) => {
+      if (req.url === "/api/sessions") {
+        return { status: 201, body: createdWithLatest(NEWER_VERSION) };
+      }
+      if (req.url === "/api/sessions/sess123/frames") {
+        await writeFile(join(afkHome, "frames-seen"), "");
+      }
+      return { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' };
+    });
+  }
+
+  it.skipIf(process.platform !== "darwin")(
+    "says so, asks, and carries on with the session when the answer is n",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startFramesMarkingServer(afkHome);
+
+      const { stdout, stderr } = await runBash(
+        [
+          `AFK_VERSION=${THIS_VERSION}`,
+          AT_A_TERMINAL,
+          `main start --no-qr <<< n > "$AFK_HOME/out.txt" 2> "$AFK_HOME/err.txt" & START=$!`,
+          'for _ in $(seq 1 100); do [ -e "$AFK_HOME/frames-seen" ] && break; sleep 0.1; done',
+          'kill -TERM "$START"; wait "$START"; printf "START_RC=%d\\n" "$?"',
+        ].join("\n"),
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+        15_000,
+      );
+
+      expect(parseKeyValueLines(stdout), stderr).toEqual({ START_RC: "0" });
+      const err = await readFile(join(afkHome, "err.txt"), "utf8");
+      expect(err).toContain(`afk ${NEWER_VERSION} is available (this is ${THIS_VERSION})`);
+      expect(err).toContain("update now? [y/N]");
+      expect(err).toContain("not updating");
+      expect(err).toContain("session sess123 started");
+      expect(err).toContain("session ended");
+      expect(server.requests.map((req) => req.url)).not.toContain("/install");
+      expect(server.requests.map((req) => req.url)).toContain("/api/sessions/sess123/end");
+    },
+  );
+});
+
+describe("afk run with a newer client on the server", () => {
+  const AT_A_TERMINAL = "can_prompt() { return 0; }";
+
+  it.skipIf(process.platform !== "darwin")(
+    "says so but never asks, since the command is about to get stdin",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startUpdateServer(NEWER_VERSION);
+
+      const { stdout, stderr, code } = await runBash(
+        [`AFK_VERSION=${THIS_VERSION}`, AT_A_TERMINAL, "cmd_run -- cat <<< y"].join("\n"),
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+        15_000,
+      );
+
+      expect(code, stderr).toBe(0);
+      // The wrapped command got the whole of stdin, not the update question (the
+      // dashboard URL precedes its output on stdout).
+      expect(stdout).toMatch(/\ny\n$/);
+      expect(stderr).toContain(`afk ${NEWER_VERSION} is available (this is ${THIS_VERSION})`);
+      expect(stderr).not.toContain("update now?");
+      expect(server.requests.map((req) => req.url)).not.toContain("/install");
+    },
+  );
+});
+
+describe("afk update", () => {
+  /** A copy of the client in its own directory, the way an installed one lives, so $0 is not the repo's. */
+  async function installedCopy(): Promise<{ dir: string; path: string; version: string }> {
+    const dir = await makeTempDir();
+    const path = join(dir, "afk");
+    await copyFile(AFK_SCRIPT, path);
+    const version = /^AFK_VERSION="([^"]+)"$/m.exec(await readFile(path, "utf8"))![1]!;
+    return { dir, path, version };
+  }
+
+  /** Runs the copy at `path` the way a user would. */
+  async function runCopy(
+    path: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+  ): Promise<BashResult> {
+    try {
+      const { stdout, stderr } = await execFileAsync("/bin/bash", [path, ...args], {
+        env: { ...process.env, AFK_SOURCED: "0", ...env },
+        timeout: 5000,
+      });
+      return { stdout, stderr, code: 0 };
+    } catch (error) {
+      const failure = error as { stdout?: string; stderr?: string; code?: number };
+      return {
+        stdout: failure.stdout ?? "",
+        stderr: failure.stderr ?? "",
+        code: failure.code ?? 1,
+      };
+    }
+  }
+
+  it("runs the server's installer over this copy and prints the versions before and after", async () => {
+    const copy = await installedCopy();
+    const server = await startUpdateServer(undefined);
+
+    const { stderr, code } = await runCopy(copy.path, ["update"], { AFK_SERVER: server.url });
+
+    expect(code, stderr).toBe(0);
+    expect(stderr).toContain(`this is afk ${copy.version}; updating from ${server.url}`);
+    expect(stderr).toContain(`afk ${copy.version} -> ${NEWER_VERSION} at ${copy.path}`);
+    expect(server.requests.map((req) => req.url)).toEqual(["/install"]);
+    expect(await readFile(copy.path, "utf8")).toContain(`AFK_VERSION="${NEWER_VERSION}"`);
+  });
+
+  it("installs into AFK_INSTALL_DIR instead when it is set", async () => {
+    const copy = await installedCopy();
+    const installDir = join(await makeTempDir(), "elsewhere");
+    const server = await startUpdateServer(undefined);
+
+    const { stderr, code } = await runCopy(copy.path, ["update"], {
+      AFK_SERVER: server.url,
+      AFK_INSTALL_DIR: installDir,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stderr).toContain(`at ${installDir}/afk`);
+    expect(await readFile(join(installDir, "afk"), "utf8")).toContain(
+      `AFK_VERSION="${NEWER_VERSION}"`,
+    );
+    expect(await readFile(copy.path, "utf8")).toContain(`AFK_VERSION="${copy.version}"`);
+  });
+
+  it("exits 1 and leaves this copy alone when the installer fails", async () => {
+    const copy = await installedCopy();
+    const server = await startServer(() => ({ status: 200, body: "#!/bin/sh\nexit 1\n" }));
+
+    const { stderr, code } = await runCopy(copy.path, ["update"], { AFK_SERVER: server.url });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("update failed; nothing was changed");
+    expect(await readFile(copy.path, "utf8")).toContain(`AFK_VERSION="${copy.version}"`);
+  });
+});
+
+describe("afk version", () => {
+  const versionBody = (client: string) =>
+    `{"server":{"version":"0.1.0","commit":null,"builtAt":null},"web":null,"client":${client},"protocolVersion":1}`;
+
+  it("prints this copy's version", async () => {
+    const { stdout, stderr, code } = await runAfk(["version"]);
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toMatch(/^afk \d+\.\d+\.\d+\n$/);
+  });
+
+  it("--check prints the version the server serves and how to update when this copy is behind", async () => {
+    const server = await startServer(() => ({
+      status: 200,
+      body: versionBody('{"version":"99.0.0"}'),
+    }));
+
+    const { stdout, stderr, code } = await runAfk(["version", "--check"], {
+      AFK_SERVER: server.url,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toMatch(
+      new RegExp(`^afk \\d+\\.\\d+\\.\\d+\\nlatest 99\\.0\\.0 \\(${server.url}\\)\\n$`),
+    );
+    expect(stderr).toContain("update with: afk update");
+    expect(server.requests).toEqual([
+      expect.objectContaining({ method: "GET", url: "/api/version" }),
+    ]);
+  });
+
+  it("--check gives no update hint when this copy is the version the server serves", async () => {
+    const { stdout: local } = await runAfk(["version"]);
+    const current = local.trim().replace(/^afk /, "");
+    const server = await startServer(() => ({
+      status: 200,
+      body: versionBody(`{"version":"${current}"}`),
+    }));
+
+    const { stdout, stderr, code } = await runAfk(["version", "--check"], {
+      AFK_SERVER: server.url,
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toBe(`afk ${current}\nlatest ${current} (${server.url})\n`);
+    expect(stderr).not.toContain("afk update");
+  });
+
+  it("--check exits 1 when the server does not say which client it serves", async () => {
+    const server = await startServer(() => ({ status: 200, body: versionBody("null") }));
+
+    const { stdout, stderr, code } = await runAfk(["version", "--check"], {
+      AFK_SERVER: server.url,
+    });
+
+    expect(code).toBe(1);
+    expect(stdout).toMatch(/^afk \d+\.\d+\.\d+\n$/);
+    expect(stderr).toContain(`${server.url} does not say which client it serves`);
+  });
+
+  it("--check exits 1 with curl's reason when the server cannot be reached", async () => {
+    const server = await startServer(() => ({ status: 200 }));
+    const url = server.url;
+    await server.close();
+
+    const { stderr, code } = await runAfk(["version", "--check"], { AFK_SERVER: url });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(`could not reach ${url}`);
+  });
 });
