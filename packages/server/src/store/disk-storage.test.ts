@@ -87,12 +87,12 @@ describe("DiskSessionStorage", () => {
       await storage.putSession(makeRecord());
       const good = makeStoredFrames([makeSystemFrame(0)]);
       await storage.appendFrames("session1", good);
-      // The documented layout is sessions/<id>/frames.ndjson; write a line that is
-      // valid JSON but not a valid StoredFrame, which is what `readFrames` is built to
-      // skip (see disk-storage.ts's use of StoredFrame.safeParse).
+      // The documented layout is sessions/<id>/frames.ndjson. Both kinds of damage a
+      // crash can leave behind must be skipped: a line that is valid JSON of the wrong
+      // shape, and a line that was cut off mid-write and is not JSON at all.
       await appendFile(
         join(dataDir, "sessions", "session1", "frames.ndjson"),
-        '{"not":"a valid frame"}\n',
+        '{"not":"a valid frame"}\n{"index":2,"receivedAt":17,"fra\n',
       );
 
       await expect(storage.readFrames("session1")).resolves.toEqual(good);

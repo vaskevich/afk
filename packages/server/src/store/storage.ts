@@ -37,6 +37,21 @@ export interface SessionStorage {
   deleteSession(sessionId: string): Promise<void>;
 }
 
+/**
+ * One line of a frames file, or null when it is corrupt (bad JSON or wrong shape) so
+ * a damaged line loses one frame rather than the whole session.
+ */
+export function parseStoredFrameLine(line: string): StoredFrame | null {
+  let json: unknown;
+  try {
+    json = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const parsed = StoredFrame.safeParse(json);
+  return parsed.success ? parsed.data : null;
+}
+
 /** Keeps everything in memory. For tests and throwaway runs. */
 export class MemorySessionStorage implements SessionStorage {
   private readonly records = new Map<string, SessionRecord>();

@@ -58,8 +58,9 @@ export class TooManyStreamsError extends Error {
 /**
  * Sessions the server is working with, cached in memory and written through to
  * `SessionStorage`. Sessions not in memory (after a restart, or ended ones being
- * viewed) are loaded from storage on first access.
- * TODO(memory): evict idle ended sessions from the cache.
+ * viewed) are loaded from storage on first access, and idle ended sessions are evicted
+ * again by `tick`.
+ * TODO(memory): measure actual bytes instead of counting frames for admission control.
  */
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
