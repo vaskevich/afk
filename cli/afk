@@ -1035,12 +1035,16 @@ SAMPLE_TICK=0
 # and renamed into place: rename is atomic, so the sender never sees a partial file,
 # and with no shared spool file there is nothing for the sampler and sender to race
 # on (macOS has no flock).
+#
+# The timestamp is SAMPLE_AT when a sampler tick set it (the second the tick was
+# scheduled for, see sample_once) and otherwise the wall clock, which is what the run
+# sampler and the final run frame use.
 emit_frame() { # stream collector sequence data-json
   local name temp
   name=$(printf '%010d-%s.ndjson' "$3" "$1")
   temp="$SESSION_DIR/queue/.$name.tmp"
   printf '{"stream":"%s","collector":"%s","sequence":%d,"timestamp":%d,"data":%s}\n' \
-    "$1" "$2" "$3" "$(now_seconds)" "$4" > "$temp" && mv "$temp" "$SESSION_DIR/queue/$name"
+    "$1" "$2" "$3" "${SAMPLE_AT:-$(now_seconds)}" "$4" > "$temp" && mv "$temp" "$SESSION_DIR/queue/$name"
 }
 
 # True on the ticks a collector with this interval (in seconds) is due.
@@ -1048,7 +1052,18 @@ due_every() { # interval-seconds
   [ $(( (SAMPLE_TICK - 1) % ($1 / SAMPLE_INTERVAL_SECONDS) )) -eq 0 ]
 }
 
-sample_once() {
+# One tick: every collector that is due, with its frames stamped with the second the
+# tick was scheduled for (the loop's deadline) rather than the clock after the
+# collectors ran. The collectors take a good part of a second between them, so a
+# tick that runs long is followed by its catch-up tick within the same wall-clock
+# second, and stamped by the clock the two would share a timestamp while the next
+# second went without one; stamped by schedule, consecutive frames are exactly one
+# interval apart. The loop re-bases a deadline that has fallen more than
+# SAMPLE_MAX_CATCHUP_SECONDS behind, so a stamp is never further than that from
+# when the sample was taken. Without an argument (a direct call) the wall clock is
+# used, through emit_frame's fallback.
+sample_once() { # [scheduled-seconds]
+  local SAMPLE_AT=${1:-}
   SAMPLE_TICK=$((SAMPLE_TICK + 1))
   SEQ_SYSTEM=$((SEQ_SYSTEM + 1))
   emit_frame system system "$SEQ_SYSTEM" "$(collect_system)"
@@ -1298,15 +1313,18 @@ system_sampler_loop() {
       touch "$SESSION_DIR/stop"
       break
     fi
-    sample_once
+    sample_once "$deadline"
     # Ticks are scheduled against a deadline that advances by the interval, rather
     # than sleeping a fixed interval after the collectors, so their runtime does not
     # push every tick later than the last. Stock macOS has no sub-second clock (no
     # `date +%N`), so a tick that finishes early sleeps to the next whole second
     # and one that finishes late is followed by the next tick straight away: single
-    # gaps vary by the collectors' runtime, but the average rate stays at 1 Hz. A
-    # deadline more than SAMPLE_MAX_CATCHUP_SECONDS behind (the machine slept) is
-    # re-based on the current time instead of being caught up in a burst.
+    # gaps vary by the collectors' runtime, but the average rate stays at 1 Hz, and
+    # the frames carry the deadline they were due at (see sample_once), so their
+    # timestamps stay one interval apart whatever the gaps did. A deadline more
+    # than SAMPLE_MAX_CATCHUP_SECONDS behind (the machine slept) is re-based on the
+    # current time instead of being caught up in a burst; the deadline only ever
+    # moves forward, so timestamps are strictly increasing within a stream.
     deadline=$((deadline + SAMPLE_INTERVAL_SECONDS))
     now=$(now_seconds)
     if [ "$now" -lt "$deadline" ]; then

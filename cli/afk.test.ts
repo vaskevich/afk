@@ -31,6 +31,7 @@ import {
   SystemCollectorData,
 } from "@afk/shared";
 import type { RunFrame } from "@afk/shared";
+import { makeProcessesData, makeSystemData } from "@afk/shared/testing";
 
 /** True when the path exists; the tests use it to assert a file was deleted or moved. */
 async function exists(path: string): Promise<boolean> {
@@ -451,7 +452,56 @@ describe("sample_once", () => {
       expect(byStream("processes")).toEqual([1, 2]);
     },
   );
+
+  it("stamps every frame of a tick with the second the tick was scheduled for, not the clock after the collectors", async () => {
+    const sessionDir = await makeTempDir();
+    await mkdir(join(sessionDir, "queue"));
+
+    const { code, stderr } = await runBash(
+      [
+        "now_seconds() { printf '9999'; }",
+        "collect_system() { printf '%s' \"$SYSTEM_JSON\"; }",
+        "collect_processes() { printf '%s' \"$PROCESSES_JSON\"; }",
+        "sample_once 1234",
+      ].join("\n"),
+      { SESSION_DIR: sessionDir, ...fakeCollectorData() },
+    );
+
+    expect(code, stderr).toBe(0);
+    const frames = await queuedFrames(sessionDir);
+    expect(frames.map((frame) => [frame.stream, frame.timestamp])).toEqual([
+      ["processes", 1234],
+      ["system", 1234],
+    ]);
+  });
+
+  it("stamps frames with the wall clock when called without a scheduled second", async () => {
+    const sessionDir = await makeTempDir();
+    await mkdir(join(sessionDir, "queue"));
+
+    const { code, stderr } = await runBash(
+      [
+        "now_seconds() { printf '9999'; }",
+        "collect_system() { printf '%s' \"$SYSTEM_JSON\"; }",
+        "collect_processes() { printf '%s' \"$PROCESSES_JSON\"; }",
+        "sample_once",
+      ].join("\n"),
+      { SESSION_DIR: sessionDir, ...fakeCollectorData() },
+    );
+
+    expect(code, stderr).toBe(0);
+    const frames = await queuedFrames(sessionDir);
+    expect(frames.map((frame) => frame.timestamp)).toEqual([9999, 9999]);
+  });
 });
+
+/** Valid collector output for tests that replace the collectors with fakes, as environment. */
+function fakeCollectorData(): NodeJS.ProcessEnv {
+  return {
+    SYSTEM_JSON: JSON.stringify(makeSystemData()),
+    PROCESSES_JSON: JSON.stringify(makeProcessesData()),
+  };
+}
 
 describe("emit_frame", () => {
   it("writes the frame as its own queue file, named by sequence and stream, that validates as a Frame", async () => {
@@ -1044,6 +1094,38 @@ describe("system_sampler_loop", () => {
     ]);
     expect(stderr).toContain("reached the maximum session length");
     expect(await exists(join(sessionDir, "stop"))).toBe(true);
+  });
+
+  it("emits system frames one second apart when the collectors run long, not two in one second and none in the next", async () => {
+    const sessionDir = await makeTempDir();
+    await mkdir(join(sessionDir, "queue"));
+    // A clock in tenths of a second, kept in a file so the fake collectors (which run
+    // in command substitutions) can advance it: `now_seconds` rounds it down the way
+    // `date +%s` does, `sleep` moves it by whole seconds, and each collector takes the
+    // fraction of a second the real one does, so a tick with both runs past the second
+    // it started in.
+    const clock = join(sessionDir, "clock");
+    await writeFile(clock, "10000\n");
+
+    const { code, stderr } = await runBash(
+      [
+        'advance_clock() { echo $(( $(cat "$CLOCK") + $1 )) > "$CLOCK"; }',
+        'now_seconds() { echo $(( $(cat "$CLOCK") / 10 )); }',
+        "sleep() { advance_clock $(($1 * 10)); }",
+        "collect_system() { advance_clock 6; printf '%s' \"$SYSTEM_JSON\"; }",
+        "collect_processes() { advance_clock 9; printf '%s' \"$PROCESSES_JSON\"; }",
+        "PROCESSES_INTERVAL_SECONDS=2",
+        "system_sampler_loop",
+      ].join("\n"),
+      { SESSION_DIR: sessionDir, CLOCK: clock, MAX_DURATION_SECONDS: "6", ...fakeCollectorData() },
+    );
+
+    expect(code, stderr).toBe(0);
+    const frames = await queuedFrames(sessionDir);
+    const timestamps = (stream: string) =>
+      frames.filter((frame) => frame.stream === stream).map((frame) => frame.timestamp);
+    expect(timestamps("system")).toEqual([1000, 1001, 1002, 1003, 1004, 1005]);
+    expect(timestamps("processes")).toEqual([1000, 1002, 1004]);
   });
 });
 

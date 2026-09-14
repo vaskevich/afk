@@ -12,7 +12,9 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   per frame and an atomic rename; a shared append-only file races.
 - Bound its own disk use during an outage (the queue is capped, oldest frames go).
 - Keep the sampling rate honest without a sub-second clock: schedule ticks against
-  deadlines rather than sleeping a fixed interval after the collectors.
+  deadlines rather than sleeping a fixed interval after the collectors, and stamp
+  each frame with the second its tick was scheduled for, so consecutive samples of
+  a stream are exactly one interval apart.
 - Know whether the process that owns the session is alive without a network round
   trip (a pid file), leave no state behind on any exit path, and sweep old state on
   startup.
@@ -74,6 +76,19 @@ re-proposed as hardening items. Reopen one when its reason stops holding.
   every server rule works on frame timestamps in whole seconds and the dashboard
   draws at that resolution. A client that needs a real clock is the Python or Go
   client of the table above, not this one with one more tool bolted on.
+  What the whole-second schedule does need is that frames be stamped by it, not by
+  the clock after the collectors: the collectors take a good part of a second
+  between them (`ps` for the processes list is most of it), so a tick that runs
+  past its second is followed by its catch-up tick inside the next one, and read
+  off the wall clock after the collectors the two frames shared a timestamp while
+  the second in between had none, which the dashboard drew as a slit. Each frame
+  now carries the deadline its tick was due at (`sample_once` is handed it by
+  `system_sampler_loop`), so system frames are consecutive seconds and processes
+  frames exact multiples of their interval; a deadline more than
+  `SAMPLE_MAX_CATCHUP_SECONDS` behind is re-based to now, so a stamp is never
+  further than that from when the sample was taken, and since the deadline only
+  moves forward, timestamps are strictly increasing within a stream. Run frames,
+  which are not on that schedule, keep the wall clock.
 - **Not doing: re-exec into the new copy after an in-session update.** When `afk start`
   installs an update at its prompt, the process carries on running the code it loaded
   and the new copy is used from the next `afk start`. Re-executing would mean handing
