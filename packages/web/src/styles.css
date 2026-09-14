@@ -325,6 +325,66 @@ button:focus-visible {
   color: var(--fg);
 }
 
+/* The last lines a failed command printed: collapsed under its event, and in the run
+   details card. Long lines wrap; a tall tail scrolls. */
+.output-tail {
+  max-width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.output-tail summary {
+  cursor: pointer;
+  user-select: none;
+}
+.output-tail summary:hover {
+  color: var(--fg);
+}
+.output-tail-stream {
+  margin-top: 6px;
+}
+.output-tail-label {
+  margin-bottom: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.output-tail pre {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fg);
+  background: var(--bg-row);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.banner-events li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+/* An event with a tail takes the whole row so the output has room to read. */
+.banner-events li:has(.output-tail) {
+  flex-basis: 100%;
+}
+.banner-events .output-tail {
+  padding-left: 8px;
+}
+.event-list .output-tail {
+  padding: 2px 8px 6px;
+}
+.details-card .output-tail {
+  margin-top: 8px;
+}
+
 .mono {
   font-family: var(--font-mono);
 }

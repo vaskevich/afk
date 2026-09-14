@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { T0_MS, makeEvent } from "@afk/shared/testing";
-import { eventEndMs, isOpenEvent, pluralize, worstSeverity } from "./events.ts";
+import { T0_MS, makeEvent, makeRunTail } from "@afk/shared/testing";
+import { eventEndMs, isOpenEvent, outputTailSummary, pluralize, worstSeverity } from "./events.ts";
 
 const seconds = (n: number) => T0_MS + n * 1000;
 
@@ -63,5 +63,25 @@ describe("pluralize", () => {
 
   it("uses an explicit irregular plural when given one", () => {
     expect(pluralize(2, "anomaly", "anomalies")).toBe("2 anomalies");
+  });
+});
+
+describe("outputTailSummary", () => {
+  it("counts the lines of both streams", () => {
+    const tail = makeRunTail({ stdout: ["a", "b"], stderr: ["c"], truncated: false });
+
+    expect(outputTailSummary(tail)).toBe("last output (3 lines)");
+  });
+
+  it("uses the singular for one line", () => {
+    expect(outputTailSummary(makeRunTail({ stdout: [], stderr: ["c"] }))).toBe(
+      "last output (1 line)",
+    );
+  });
+
+  it("says when the client cut lines off", () => {
+    const tail = makeRunTail({ stdout: ["a"], stderr: ["c"], truncated: true });
+
+    expect(outputTailSummary(tail)).toBe("last output (2 lines, truncated)");
   });
 });

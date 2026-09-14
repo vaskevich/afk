@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FramesResponse } from "@afk/shared";
+import type { RunFrame } from "@afk/shared";
 import { generateDemoSession } from "./fixtureSource.ts";
 
 describe("generateDemoSession", () => {
@@ -52,6 +53,51 @@ describe("generateDemoSession", () => {
     expect(processes).toHaveLength(180 - 18);
     expect(processes.every((f) => (f.frame.timestamp - startSeconds) % 5 === 0)).toBe(true);
     expect(processes.map((f) => f.frame.sequence)).toEqual(processes.map((_, i) => i + 1));
+  });
+
+  it("wraps a failing migration in a run stream whose final frame alone carries the output tail", () => {
+    const data = generateDemoSession("demo");
+
+    const run = data.frames
+      .map((f) => f.frame)
+      .filter((frame): frame is RunFrame => frame.collector === "run");
+
+    expect(run.length).toBeGreaterThan(1);
+    expect(new Set(run.map((frame) => frame.stream)).size).toBe(1);
+    expect(run.map((frame) => frame.sequence)).toEqual(run.map((_, i) => i + 1));
+    const final = run[run.length - 1]!;
+    expect(run.slice(0, -1).every((frame) => frame.data.state === "running")).toBe(true);
+    expect(run.slice(0, -1).every((frame) => frame.data.output.tail === undefined)).toBe(true);
+    expect(final.data).toMatchObject({
+      state: "exited",
+      exitCode: 3,
+      output: {
+        tail: {
+          stdout: expect.arrayContaining(["processing 300/10000 items"]),
+          stderr: [expect.stringContaining("fatal")],
+          truncated: true,
+        },
+      },
+    });
+  });
+
+  it("gives the run.exited event the final frame's tail and ends its message with the last stderr line", () => {
+    const data = generateDemoSession("demo");
+    const exited = data.events.find((event) => event.kind === "run.exited")!;
+
+    const final = data.frames.filter((f) => f.frame.stream === exited.stream).at(-1)!.frame;
+
+    expect(final.collector).toBe("run");
+    if (final.collector === "run") {
+      const tail = final.data.output.tail!;
+      expect(exited).toMatchObject({
+        severity: "critical",
+        startedAt: final.timestamp * 1000,
+        endedAt: final.timestamp * 1000,
+        details: { outputTail: tail },
+      });
+      expect(exited.message.endsWith(`: ${tail.stderr.at(-1)!}`)).toBe(true);
+    }
   });
 
   it("gives the cpu.high event details matching the processes sample at its start", () => {
