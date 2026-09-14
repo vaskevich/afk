@@ -265,6 +265,12 @@ export type IngestResponse = z.infer<typeof IngestResponse>;
 export const SessionStatus = z.enum(["active", "ended", "expired"]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
+/**
+ * The one session the dashboard renders from a built-in fixture rather than the server
+ * (`/s/demo`). The server never issues this id, and it refuses to delete it by name.
+ */
+export const DEMO_SESSION_ID = "demo";
+
 export const SessionSummary = z.object({
   sessionId: z.string(),
   status: SessionStatus,
@@ -341,11 +347,33 @@ export const VersionResponse = z.object({
 });
 export type VersionResponse = z.infer<typeof VersionResponse>;
 
+/**
+ * DELETE /api/sessions/:id: the session and every frame it held are gone from memory
+ * and storage. `frames` is how many were deleted with it, for the client's one line.
+ */
+export const DeleteSessionResponse = z.object({
+  sessionId: z.string(),
+  frames: z.number().int().nonnegative(),
+});
+export type DeleteSessionResponse = z.infer<typeof DeleteSessionResponse>;
+
 export const ErrorResponse = z.object({
   error: z.string(),
   details: z.unknown().optional(),
 });
 export type ErrorResponse = z.infer<typeof ErrorResponse>;
+
+/**
+ * `details` of the 404 a deleted session answers with, on every route, for as long as
+ * the server remembers the deletion (its negative id cache, about a minute). A client
+ * whose session answers 404 mid-session treats it as deleted whether or not this is
+ * there: the server never forgets a session it created while the client is running
+ * for any other reason. After that the 404 is the plain `unknown session`.
+ */
+export const DeletedSessionDetails = z.object({
+  reason: z.literal("deleted"),
+});
+export type DeletedSessionDetails = z.infer<typeof DeletedSessionDetails>;
 
 /**
  * `details` of a 426 Upgrade Required `ErrorResponse`, the same three fields whichever
@@ -443,13 +471,28 @@ export const FramesResponse = z.object({
 export type FramesResponse = z.infer<typeof FramesResponse>;
 
 /**
+ * Why the stream's `end` event was sent. `ended` is the ordinary case, the summary
+ * says how (the client said so, it chained, or the server ended it); `deleted` means
+ * the session no longer exists anywhere and the summary is the last one there was.
+ */
+export const StreamEndReason = z.enum(["ended", "deleted"]);
+export type StreamEndReason = z.infer<typeof StreamEndReason>;
+
+/** The `end` event's data: the final summary plus why the stream is closing. */
+export const StreamEndEvent = SessionSummary.extend({
+  reason: StreamEndReason,
+});
+export type StreamEndEvent = z.infer<typeof StreamEndEvent>;
+
+/**
  * GET /api/sessions/:id/stream (text/event-stream). Events, in order of appearance:
  *   session  data = SessionSummary; sent on connect and whenever the status changes
  *   event    data = AnomalyEvent; every existing event is sent after `session` as a
  *            snapshot, then one per change (an event opening, updating, or closing);
  *            consumers upsert by id. No SSE id, so it never disturbs frame resumption.
  *   frame    data = StoredFrame; id = StoredFrame.index
- *   end      data = SessionSummary; sent once the session is over, then the stream closes
+ *   end      data = StreamEndEvent (the summary plus `reason`); sent once the session is
+ *            over or has been deleted, then the stream closes
  * Reconnect with `Last-Event-ID` (or `?after=<index>`) to replay what was missed.
  */
 export const StreamEventName = {

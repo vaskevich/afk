@@ -408,13 +408,20 @@ event: event     data: AnomalyEvent     every existing event as a snapshot after
                                          `session`, then one per open/update/close
 event: frame     data: StoredFrame      id: <index>, replayed then live
 : keepalive                             every 15 s
-event: end       data: SessionSummary   once the session is over; stream closes
+event: end       data: StreamEndEvent   once the session is over or deleted; stream closes
 ```
 
 Resume with the `Last-Event-ID` header (browsers send it automatically on reconnect)
 or `?after=<index>`; the header wins. `event: event` frames carry no SSE id, so they
 never disturb frame resumption. On an already-ended session the server replays
 everything and sends `end` immediately, which is exactly the completed-trace view.
+
+`StreamEndEvent` is the `SessionSummary` plus `reason`, a `StreamEndReason`: `ended`
+when the session is over (the summary says how: `endedAt`, and `nextSessionId` when it
+chained) and `deleted` when it was deleted while the stream was open (see "Delete"
+above), in which case the summary is the last one there was and every later read of
+the id is a 404. A dashboard that parses the data as a plain `SessionSummary` drops
+the field and behaves as before.
 
 ### Anomaly events
 
