@@ -34,6 +34,8 @@ interface Props {
   view: TimeWindow;
   /** Called with a new zoom window, or null to show the whole session. */
   onZoomChange(zoom: TimeWindow | null): void;
+  /** Reports the plot column's width in CSS pixels, so pixel radii can be turned into time. */
+  onPlotWidthChange?(width: number): void;
 }
 
 /** Trackpad pinch arrives as ctrl+wheel with small deltas; a mouse wheel notch is ~100. */
@@ -57,7 +59,15 @@ function groupByStream(events: readonly AnomalyEvent[]): Map<string, AnomalyEven
   return byStream;
 }
 
-export function Timeline({ model, cursor, following, onCursorChange, view, onZoomChange }: Props) {
+export function Timeline({
+  model,
+  cursor,
+  following,
+  onCursorChange,
+  view,
+  onZoomChange,
+  onPlotWidthChange,
+}: Props) {
   const { t0, t1, latest } = model;
   const { v0, v1 } = view;
   const axisRef = useRef<HTMLDivElement>(null);
@@ -234,6 +244,10 @@ export function Timeline({ model, cursor, following, onCursorChange, view, onZoo
     },
     [onCursorChange, onZoomChange, model],
   );
+
+  useEffect(() => {
+    onPlotWidthChange?.(plot.width);
+  }, [onPlotWidthChange, plot.width]);
 
   const cursorLeft = useMemo(() => plot.left + x(cursor), [plot.left, x, cursor]);
   const cursorVisible = cursor >= v0 && cursor <= v1;
