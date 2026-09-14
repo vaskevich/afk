@@ -8,7 +8,7 @@ import { errorResponse } from "../http/errors.ts";
  */
 export function ingestAuth({ store }: AppDeps) {
   return createMiddleware<AppEnv>(async (c, next) => {
-    const session = store.get(c.req.param("sessionId") ?? "");
+    const session = await store.get(c.req.param("sessionId") ?? "");
     if (!session) return errorResponse(c, 404, "unknown session");
 
     const auth = c.req.header("authorization") ?? "";

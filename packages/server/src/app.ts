@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { AppConfig, AppDeps } from "./env.ts";
-import { SessionStore } from "./store/sessions.ts";
+import type { SessionStore } from "./store/sessions.ts";
 import { healthRoutes } from "./routes/health.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
@@ -15,13 +15,13 @@ import { webRoutes } from "./routes/web.ts";
 //   env.ts             - app-level config/deps types shared across routes and middleware
 //   routes/            - one Hono sub-app per resource, mounted here
 //   middleware/         - request plumbing shared by routes (e.g. ingest auth)
-//   store/             - in-memory domain state (sessions)
+//   store/             - sessions (in-memory cache written through to SessionStorage: disk or bucket)
 //   http/              - generic HTTP helpers (error responses)
 //   log/               - server-side log formatting
 //   utils/             - small standalone helpers (ids, ndjson parsing)
 
 /** Wires route modules together. Handlers live in ./routes, shared request plumbing in ./middleware. */
-export function createApp(config: AppConfig, store = new SessionStore()) {
+export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
   return new Hono()
     .route("/api/health", healthRoutes)

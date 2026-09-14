@@ -1,6 +1,7 @@
 import type { Frame, HostInfo, SessionSummary, SessionStatus, StoredFrame } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import { randomId, randomToken } from "../utils/ids.ts";
+import type { SessionRecord, SessionStorage } from "./storage.ts";
 
 export type { StoredFrame };
 
@@ -9,19 +10,15 @@ export type SessionEvent =
   { type: "frames"; frames: StoredFrame[] } | { type: "ended"; summary: SessionSummary };
 export type SessionListener = (event: SessionEvent) => void;
 
-export interface Session {
-  sessionId: string;
-  ingestToken: string;
-  host: HostInfo;
-  clientVersion: string;
-  startedAt: number;
-  endedAt: number | null;
-  maxDurationSeconds: number;
+/** A session held in memory: the persisted record plus live bookkeeping. */
+export interface Session extends SessionRecord {
   /** Highest accepted sequence per stream. */
   latestSequence: Map<string, number>;
-  /** TODO(persistence): append to disk (later S3) instead of holding everything in memory. */
+  /** Every frame so far, in index order. */
   frames: StoredFrame[];
   listeners: Set<SessionListener>;
+  /** Serializes storage appends so frames land on disk in index order. */
+  writeChain: Promise<void>;
 }
 
 export interface IngestResult {
@@ -30,13 +27,19 @@ export interface IngestResult {
 }
 
 /**
- * In-memory session store. Enough for the MVP; persistence and retention are tracked in BACKLOG.md.
+ * Sessions the server is working with, cached in memory and written through to
+ * `SessionStorage`. Sessions not in memory (after a restart, or ended ones being
+ * viewed) are loaded from storage on first access.
+ * TODO(memory): evict idle ended sessions from the cache.
  */
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
+  private readonly loading = new Map<string, Promise<Session | undefined>>();
 
-  create(input: { host: HostInfo; clientVersion: string }): Session {
-    const session: Session = {
+  constructor(private readonly storage: SessionStorage) {}
+
+  async create(input: { host: HostInfo; clientVersion: string }): Promise<Session> {
+    const record: SessionRecord = {
       sessionId: randomId(),
       ingestToken: randomToken(),
       host: input.host,
@@ -44,16 +47,53 @@ export class SessionStore {
       startedAt: Date.now(),
       endedAt: null,
       maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
-      latestSequence: new Map(),
-      frames: [],
-      listeners: new Set(),
     };
+    await this.storage.putSession(record);
+    const session = this.hydrate(record, []);
     this.sessions.set(session.sessionId, session);
     return session;
   }
 
-  get(sessionId: string): Session | undefined {
-    return this.sessions.get(sessionId);
+  async get(sessionId: string): Promise<Session | undefined> {
+    const cached = this.sessions.get(sessionId);
+    if (cached) return cached;
+    // Coalesce concurrent loads of the same session so it is only read once.
+    let pending = this.loading.get(sessionId);
+    if (!pending) {
+      pending = this.load(sessionId).finally(() => this.loading.delete(sessionId));
+      this.loading.set(sessionId, pending);
+    }
+    return pending;
+  }
+
+  private async load(sessionId: string): Promise<Session | undefined> {
+    const record = await this.storage.getSession(sessionId);
+    if (!record) return undefined;
+    const frames = await this.storage.readFrames(sessionId);
+    const session = this.hydrate(record, frames);
+    this.sessions.set(sessionId, session);
+    return session;
+  }
+
+  private hydrate(record: SessionRecord, frames: StoredFrame[]): Session {
+    const latestSequence = new Map<string, number>();
+    for (const { frame } of frames) {
+      const latest = latestSequence.get(frame.stream) ?? 0;
+      if (frame.sequence > latest) latestSequence.set(frame.stream, frame.sequence);
+    }
+    return {
+      ...record,
+      latestSequence,
+      frames,
+      listeners: new Set(),
+      writeChain: Promise.resolve(),
+    };
+  }
+
+  private record(session: Session): SessionRecord {
+    const { sessionId, ingestToken, host, clientVersion, startedAt, endedAt, maxDurationSeconds } =
+      session;
+    return { sessionId, ingestToken, host, clientVersion, startedAt, endedAt, maxDurationSeconds };
   }
 
   status(session: Session, now = Date.now()): SessionStatus {
@@ -74,9 +114,10 @@ export class SessionStore {
     };
   }
 
-  end(session: Session): void {
+  async end(session: Session): Promise<void> {
     if (session.endedAt !== null) return;
     session.endedAt = Date.now();
+    await this.storage.putSession(this.record(session));
     this.emit(session, { type: "ended", summary: this.summary(session) });
   }
 
@@ -99,23 +140,36 @@ export class SessionStore {
    * Accepts frames in order, skipping any whose sequence is at or below the latest seen for
    * its stream. That makes client retries idempotent: a batch that was received but whose
    * acknowledgement was lost is simply resent and ignored.
+   *
+   * Frames are persisted before the in-memory state advances, so a failed write leaves the
+   * session untouched and the client's retry is not mistaken for a duplicate.
    */
-  ingest(session: Session, frames: Frame[]): IngestResult {
+  async ingest(session: Session, frames: Frame[]): Promise<IngestResult> {
     const receivedAt = Date.now();
     const accepted: StoredFrame[] = [];
+    const nextSequence = new Map(session.latestSequence);
     let duplicates = 0;
+    let nextIndex = session.frames.length + 1;
     for (const frame of frames) {
-      const latest = session.latestSequence.get(frame.stream) ?? 0;
+      const latest = nextSequence.get(frame.stream) ?? 0;
       if (frame.sequence <= latest) {
         duplicates++;
         continue;
       }
-      session.latestSequence.set(frame.stream, frame.sequence);
-      const stored: StoredFrame = { index: session.frames.length + 1, receivedAt, frame };
-      session.frames.push(stored);
-      accepted.push(stored);
+      nextSequence.set(frame.stream, frame.sequence);
+      accepted.push({ index: nextIndex++, receivedAt, frame });
     }
-    if (accepted.length > 0) this.emit(session, { type: "frames", frames: accepted });
+    if (accepted.length === 0) return { accepted, duplicates };
+
+    const write = session.writeChain.then(() =>
+      this.storage.appendFrames(session.sessionId, accepted),
+    );
+    session.writeChain = write.catch(() => undefined);
+    await write;
+
+    session.latestSequence = nextSequence;
+    session.frames.push(...accepted);
+    this.emit(session, { type: "frames", frames: accepted });
     return { accepted, duplicates };
   }
 }

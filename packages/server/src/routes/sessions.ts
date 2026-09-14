@@ -15,7 +15,7 @@ export function sessionRoutes(deps: AppDeps) {
       if (!parsed.success)
         return errorResponse(c, 400, "invalid session request", parsed.error.flatten());
 
-      const session = store.create({
+      const session = await store.create({
         host: parsed.data.host,
         clientVersion: parsed.data.clientVersion,
       });
@@ -34,14 +34,14 @@ export function sessionRoutes(deps: AppDeps) {
       // compact (no whitespace) JSON that c.json() emits.
       return c.json(body, 201);
     })
-    .get("/:sessionId", (c) => {
-      const session = store.get(c.req.param("sessionId"));
+    .get("/:sessionId", async (c) => {
+      const session = await store.get(c.req.param("sessionId"));
       if (!session) return errorResponse(c, 404, "unknown session");
       return c.json(store.summary(session));
     })
-    .post("/:sessionId/end", ingestAuth(deps), (c) => {
+    .post("/:sessionId/end", ingestAuth(deps), async (c) => {
       const session = c.get("session");
-      store.end(session);
+      await store.end(session);
       console.log(
         `[session ${session.sessionId}] ended by client after ${session.frames.length} frames`,
       );

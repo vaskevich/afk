@@ -17,7 +17,7 @@ export function frameRoutes(deps: AppDeps) {
     const parsed = parseFrames(await c.req.text());
     if (!parsed.ok) return errorResponse(c, 400, parsed.message, parsed.details);
 
-    const result = store.ingest(session, parsed.frames);
+    const result = await store.ingest(session, parsed.frames);
     for (const stored of result.accepted) {
       console.log(`[session ${session.sessionId}] ${describeFrame(stored.frame)}`);
     }

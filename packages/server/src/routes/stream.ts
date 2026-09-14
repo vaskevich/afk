@@ -25,8 +25,8 @@ export function streamRoutes(deps: AppDeps) {
   const { store } = deps;
 
   return new Hono<AppEnv>()
-    .get("/:sessionId/frames", (c) => {
-      const session = store.get(c.req.param("sessionId"));
+    .get("/:sessionId/frames", async (c) => {
+      const session = await store.get(c.req.param("sessionId"));
       if (!session) return errorResponse(c, 404, "unknown session");
       const after = resumeIndex(undefined, c.req.query("after"));
       const body: FramesResponse = {
@@ -35,8 +35,8 @@ export function streamRoutes(deps: AppDeps) {
       };
       return c.json(body);
     })
-    .get("/:sessionId/stream", (c) => {
-      const session = store.get(c.req.param("sessionId"));
+    .get("/:sessionId/stream", async (c) => {
+      const session = await store.get(c.req.param("sessionId"));
       if (!session) return errorResponse(c, 404, "unknown session");
       const after = resumeIndex(c.req.header("last-event-id"), c.req.query("after"));
       return streamSSE(c, (stream) => serveSession(stream, session, after));
