@@ -38,7 +38,8 @@ RUN pnpm build
 # package.json for exactly this reason.
 # -----------------------------------------------------------------------------
 FROM base AS prod-deps
-COPY pnpm-workspace.yaml ./
+# The lockfile is required for --frozen-lockfile; the manifests alone are not enough.
+COPY pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/server/package.json ./packages/server/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY packages/web/package.json ./packages/web/package.json
