@@ -7,7 +7,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { Frame, PROCESSES_TOP_MAX, ProcessesCollectorData, SystemCollectorData } from "@afk/shared";
+import {
+  Frame,
+  PROCESSES_TOP_MAX,
+  ProcessesCollectorData,
+  RUN_TAIL_MAX_LINE_CHARS,
+  RUN_TAIL_MAX_LINES,
+  RunCollectorData,
+  RunOutputTail,
+  SystemCollectorData,
+} from "@afk/shared";
+import type { RunFrame } from "@afk/shared";
 
 /** True when the path exists; the tests use it to assert a file was deleted or moved. */
 async function exists(path: string): Promise<boolean> {
@@ -596,4 +606,246 @@ describe("load_current_session", () => {
 
     expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "1" });
   });
+});
+
+/** A run directory as `afk run` leaves it: the captured stdout and stderr of the command. */
+async function makeRunDir(stdout: string, stderr: string): Promise<string> {
+  const runDir = await makeTempDir();
+  await writeFile(join(runDir, "stdout"), stdout);
+  await writeFile(join(runDir, "stderr"), stderr);
+  return runDir;
+}
+
+const numberedLines = (count: number) =>
+  Array.from({ length: count }, (_, i) => `processing ${i + 1}/${count} items`);
+
+describe("run_output_tail", () => {
+  it("prints the last lines of stdout and stderr as JSON with escaping intact", async () => {
+    const escape = "";
+    const runDir = await makeRunDir(
+      `plain\nback\\slash "quoted"\ttab\ncafé ☕ 日本\n${escape}[31mred${escape}[0m\r\nno newline at end`,
+      "fatal: lost connection\n",
+    );
+
+    const { stdout, stderr } = await runBash("run_output_tail 3", { RUN_DIR: runDir });
+
+    const parsed: unknown = JSON.parse(stdout);
+    expect(RunOutputTail.safeParse(parsed).success, stderr).toBe(true);
+    expect(parsed).toEqual({
+      stdout: ["plain", 'back\\slash "quoted"\ttab', "café ☕ 日本", "red", "no newline at end"],
+      stderr: ["fatal: lost connection"],
+      truncated: false,
+    });
+  });
+
+  it("keeps the last lines and marks truncated when a stream had more than were kept", async () => {
+    const lines = numberedLines(RUN_TAIL_MAX_LINES + 5);
+    const runDir = await makeRunDir(`${lines.join("\n")}\n`, "");
+
+    const { stdout, stderr } = await runBash("run_output_tail 1", { RUN_DIR: runDir });
+
+    expect(JSON.parse(stdout), stderr).toEqual({
+      stdout: lines.slice(5),
+      stderr: [],
+      truncated: true,
+    });
+  });
+
+  it("is not truncated when a stream has exactly the maximum lines", async () => {
+    const lines = numberedLines(RUN_TAIL_MAX_LINES);
+    const runDir = await makeRunDir("", `${lines.join("\n")}\n`);
+
+    const { stdout, stderr } = await runBash("run_output_tail 1", { RUN_DIR: runDir });
+
+    expect(JSON.parse(stdout), stderr).toEqual({ stdout: [], stderr: lines, truncated: false });
+  });
+
+  it("cuts each line to the maximum characters", async () => {
+    const runDir = await makeRunDir(`${"x".repeat(RUN_TAIL_MAX_LINE_CHARS + 100)}\n`, "");
+
+    const { stdout, stderr } = await runBash("run_output_tail 1", { RUN_DIR: runDir });
+
+    expect(JSON.parse(stdout), stderr).toEqual({
+      stdout: ["x".repeat(RUN_TAIL_MAX_LINE_CHARS)],
+      stderr: [],
+      truncated: false,
+    });
+  });
+
+  it("prints nothing for exit code 0", async () => {
+    const runDir = await makeRunDir("done\n", "warning: deprecated\n");
+
+    const { stdout, stderr } = await runBash("run_output_tail 0", { RUN_DIR: runDir });
+
+    expect(stdout, stderr).toBe("");
+  });
+
+  it("prints nothing when AFK_RUN_TAIL_LINES is 0, whatever the exit code", async () => {
+    const runDir = await makeRunDir("done\n", "fatal: boom\n");
+
+    const { stdout, stderr } = await runBash("run_output_tail 3", {
+      RUN_DIR: runDir,
+      AFK_RUN_TAIL_LINES: "0",
+    });
+
+    expect(stdout, stderr).toBe("");
+  });
+
+  it("keeps only AFK_RUN_TAIL_LINES lines when that is below the maximum", async () => {
+    const runDir = await makeRunDir("one\ntwo\nthree\n", "");
+
+    const { stdout, stderr } = await runBash("run_output_tail 3", {
+      RUN_DIR: runDir,
+      AFK_RUN_TAIL_LINES: "2",
+    });
+
+    expect(JSON.parse(stdout), stderr).toEqual({
+      stdout: ["two", "three"],
+      stderr: [],
+      truncated: true,
+    });
+  });
+
+  it("caps AFK_RUN_TAIL_LINES at the maximum the server accepts", async () => {
+    const lines = numberedLines(RUN_TAIL_MAX_LINES + 10);
+    const runDir = await makeRunDir(`${lines.join("\n")}\n`, "");
+
+    const { stdout, stderr } = await runBash("run_output_tail 3", {
+      RUN_DIR: runDir,
+      AFK_RUN_TAIL_LINES: String(RUN_TAIL_MAX_LINES + 10),
+    });
+
+    expect(JSON.parse(stdout), stderr).toEqual({
+      stdout: lines.slice(10),
+      stderr: [],
+      truncated: true,
+    });
+  });
+});
+
+describe("collect_run", () => {
+  const runEnv = { RUN_STARTED: "1", RUN_COMMAND_JSON: "sh -c exit 3" };
+
+  it("puts the tail it is given under output.tail on an exited frame", async () => {
+    const runDir = await makeRunDir("processing 1/2 items\n", "fatal: boom\n");
+
+    const { stdout, stderr } = await runBash('collect_run exited 3 "$(run_output_tail 3)"', {
+      ...runEnv,
+      RUN_DIR: runDir,
+    });
+
+    const parsed: unknown = JSON.parse(stdout);
+    const result = RunCollectorData.safeParse(parsed);
+    expect(result.success, JSON.stringify(result.success ? stderr : result.error.issues)).toBe(
+      true,
+    );
+    expect(parsed).toMatchObject({
+      state: "exited",
+      exitCode: 3,
+      output: {
+        flavor: "volume",
+        tail: { stdout: ["processing 1/2 items"], stderr: ["fatal: boom"], truncated: false },
+      },
+    });
+  });
+
+  it("emits no tail at all when given none", async () => {
+    const runDir = await makeRunDir("processing 1/2 items\n", "");
+
+    const { stdout, stderr } = await runBash('collect_run exited 0 "$(run_output_tail 0)"', {
+      ...runEnv,
+      RUN_DIR: runDir,
+    });
+
+    const parsed = RunCollectorData.parse(JSON.parse(stdout));
+    expect(parsed.output, stderr).toEqual({ flavor: "volume", stdoutBytes: 21, stderrBytes: 0 });
+  });
+});
+
+describe("cmd_run", () => {
+  const SESSION_ID = "sess123";
+
+  /** A stand-in server that accepts a session, every frame batch, and the end. */
+  async function startAcceptingServer(): Promise<TestServer> {
+    return startServer((req) => {
+      if (req.url === "/api/sessions") {
+        return {
+          status: 201,
+          body: `{"sessionId":"${SESSION_ID}","ingestToken":"tok","dashboardUrl":"http://example.test/s/${SESSION_ID}","maxDurationSeconds":3600}`,
+        };
+      }
+      return { status: 200, body: '{"accepted":1,"duplicates":0,"latestSequence":{}}' };
+    });
+  }
+
+  /** The `exited` run frame across every batch the server received. */
+  function exitedRunFrame(server: TestServer): RunFrame | undefined {
+    const frames = server.requests
+      .filter((req) => req.url === `/api/sessions/${SESSION_ID}/frames`)
+      .flatMap((req) => req.body.split("\n").filter((line) => line !== ""))
+      .map((line) => Frame.parse(JSON.parse(line)));
+    return frames.find(
+      (frame): frame is RunFrame => frame.collector === "run" && frame.data.state === "exited",
+    );
+  }
+
+  // Runs the real collectors for the session it owns, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "puts the command's last output on the final frame when it fails",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+
+      const { code, stderr } = await runBash('cmd_run -- sh -c "echo out; echo err >&2; exit 3"', {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+      });
+
+      expect(code, stderr).toBe(3);
+      expect(exitedRunFrame(server)?.data).toMatchObject({
+        exitCode: 3,
+        output: { tail: { stdout: ["out"], stderr: ["err"], truncated: false } },
+      });
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "sends no output on the final frame when the command succeeds",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+
+      const { code, stderr } = await runBash('cmd_run -- sh -c "echo out; echo err >&2"', {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+      });
+
+      expect(code, stderr).toBe(0);
+      const final = exitedRunFrame(server);
+      expect(final?.data.exitCode).toBe(0);
+      expect(final?.data.output.tail).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "sends no output for a failed command when AFK_RUN_TAIL_LINES is 0",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+
+      // The printed word is spelled with a quote pair in the command line, so it can
+      // only reach the server through the output tail, never through `command`.
+      const { code, stderr } = await runBash("cmd_run -- sh -c \"echo se''cret; exit 2\"", {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+        AFK_RUN_TAIL_LINES: "0",
+      });
+
+      expect(code, stderr).toBe(2);
+      const final = exitedRunFrame(server);
+      expect(final?.data.exitCode).toBe(2);
+      expect(final?.data.output.tail).toBeUndefined();
+      expect(server.requests.some((req) => req.body.includes("secret"))).toBe(false);
+    },
+  );
 });

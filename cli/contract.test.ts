@@ -34,6 +34,7 @@ import type { HostInfo, RunFrame } from "@afk/shared";
 import { createApp } from "../packages/server/src/app.ts";
 import { DEFAULT_LIMITS } from "../packages/server/src/env.ts";
 import type { AdmissionLimits } from "../packages/server/src/env.ts";
+import { makeAppConfig } from "../packages/server/src/routes/test-helpers.ts";
 import { SessionStore } from "../packages/server/src/store/sessions.ts";
 import { MemorySessionStorage } from "../packages/server/src/store/storage.ts";
 
@@ -151,7 +152,7 @@ async function startServer(limits: AdmissionLimits, webDistDir: string): Promise
 
   const port = await listen(0);
   const url = `http://${LOOPBACK}:${port}`;
-  wiring.app = createApp({ publicBaseUrl: url, webDistDir, limits }, store);
+  wiring.app = createApp(makeAppConfig({ publicBaseUrl: url, webDistDir, limits }), store);
 
   return {
     url,
@@ -426,7 +427,8 @@ describe.skipIf(process.platform !== "darwin")(
         command: "sh -c echo out; echo err >&2; exit 3",
         state: "exited",
         exitCode: 3,
-        output: { flavor: "volume" },
+        // A failed command ships the tail of what it printed on its final frame.
+        output: { flavor: "volume", tail: { stdout: ["out"], stderr: ["err"], truncated: false } },
       });
       expect(final.frame.data.output.stdoutBytes).toBeGreaterThanOrEqual("out\n".length);
       expect(final.frame.data.output.stderrBytes).toBeGreaterThanOrEqual("err\n".length);
