@@ -1,5 +1,5 @@
 import qrcode from "qrcode-generator";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 /** Same encoding as the server's `GET /api/sessions/:id/qr`, so both codes look alike. */
 const ERROR_CORRECTION_LEVEL = "M";
@@ -51,7 +51,33 @@ interface Props {
 export function SharePanel({ url }: Props) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   const qr = useMemo(() => qrSvgPath(url), [url]);
+
+  // A pointer press anywhere outside the button and the panel, or Escape, closes it.
+  // Both listen on the document only while the panel is open. The button is inside
+  // `ref` too, so its own click still toggles rather than closing and reopening.
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onPointerDown = (event: Event) => {
+      if (!ref.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   const copy = async () => {
     try {
@@ -65,7 +91,7 @@ export function SharePanel({ url }: Props) {
   };
 
   return (
-    <div className="share">
+    <div className="share" ref={ref}>
       <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
         Share
       </button>
