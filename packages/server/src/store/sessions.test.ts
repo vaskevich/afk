@@ -13,6 +13,8 @@ import {
   SessionStore,
   TooManyFramesError,
   TooManyStreamsError,
+  UNKNOWN_ID_CACHE_MAX_ENTRIES,
+  UNKNOWN_ID_TTL_MS,
   sessionEndMs,
   sessionStatus,
   type SessionEvent,
@@ -152,6 +154,45 @@ describe("SessionStore", () => {
       const found = await store.get("doesNotExist");
 
       expect(found).toBeUndefined();
+    });
+
+    it("reads storage once for an unknown id and remembers the answer within the TTL", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const getSessionSpy = vi.spyOn(storage, "getSession");
+
+      await store.get("doesNotExist", T0_MS);
+      const again = await store.get("doesNotExist", T0_MS + UNKNOWN_ID_TTL_MS - 1);
+
+      expect(again).toBeUndefined();
+      expect(getSessionSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("asks storage about an unknown id again once the TTL has passed", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const getSessionSpy = vi.spyOn(storage, "getSession");
+
+      await store.get("doesNotExist", T0_MS);
+      await store.get("doesNotExist", T0_MS + UNKNOWN_ID_TTL_MS);
+
+      expect(getSessionSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("forgets the oldest unknown id first once the cache is full", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      for (let i = 0; i < UNKNOWN_ID_CACHE_MAX_ENTRIES; i += 1) {
+        await store.get(`unknown${i}`, T0_MS);
+      }
+      const getSessionSpy = vi.spyOn(storage, "getSession");
+
+      // Remembering oneTooMany forgets unknown0; reading unknown0 again then forgets unknown1.
+      await store.get("oneTooMany", T0_MS);
+      await store.get("unknown0", T0_MS);
+      await store.get("unknown2", T0_MS);
+
+      expect(getSessionSpy.mock.calls.map(([id]) => id)).toEqual(["oneTooMany", "unknown0"]);
     });
   });
 
