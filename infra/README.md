@@ -72,6 +72,15 @@ create-container-service-deployment`, driven by `deploy.sh`, so shipping a new
 | TLS (Lightsail-managed certificate)                | $0.00                                                    |
 | **Total**                                          | **~$8/month**                                            |
 
+## Naming
+
+Lightsail resource names are unique per region across **all** resource types, not
+per type: a certificate, a bucket, a disk, and a container service cannot share a
+name. The first apply here failed with "Resource with name afk already exists" because
+the certificate had been created as `afk` before the container service of the same
+name. Give every Lightsail resource its own distinct name (the certificate is
+`afk-osv-im-cert`, the service `afk`, the bucket `afk-osv-im`).
+
 ## No longer used
 
 This repo used to provision a Lightsail **instance** (Ubuntu + Caddy + systemd,
