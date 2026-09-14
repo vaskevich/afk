@@ -47,7 +47,10 @@ create-container-service-deployment`, driven by `deploy.sh`, so shipping a new
   machine. Migrating to an S3+DynamoDB backend later is a small, mechanical
   change if that ever stops being enough.
 - **aws-vault profile**: `osv_im_admin` (present in `~/.aws/config`), the same
-  profile and account osv.im's infra uses:
+  profile and account osv.im's infra uses. The profile is named only on the
+  command line, never in `providers.tf` -- `aws-vault exec` handles the MFA
+  prompt and exports temporary credentials, and a `profile` argument in the
+  provider would override those and fail on the profile's `mfa_serial`:
 
   ```sh
   aws-vault exec osv_im_admin -- tofu -chdir=infra plan

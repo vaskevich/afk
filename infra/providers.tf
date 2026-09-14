@@ -1,6 +1,12 @@
 provider "aws" {
-  region  = var.region
-  profile = var.aws_vault_profile
+  region = var.region
+
+  # No `profile` here on purpose: credentials come from the environment, which
+  # `aws-vault exec osv_im_admin -- ...` populates with temporary keys after
+  # prompting for MFA. Setting `profile` would make the provider re-resolve
+  # osv_im_admin from ~/.aws/config instead, hit its mfa_serial, and fail with
+  # "assume role with MFA enabled, but AssumeRoleTokenProvider session option
+  # not set" -- OpenTofu cannot prompt for an MFA token.
 
   # osv.im's infra repo assumes a second, MFA-gated role on top of the aws-vault
   # profile (see its main.tf). We couldn't confirm the exact role ARN it uses at

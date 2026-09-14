@@ -1,7 +1,6 @@
 # Copy to terraform.tfvars (gitignored) and fill in.
 
 # region                 = "us-west-2"
-# aws_vault_profile      = "osv_im_admin"
 # aws_terraform_role_arn = ""
 
 # Bucket names are global across all of Lightsail/S3. Override the default

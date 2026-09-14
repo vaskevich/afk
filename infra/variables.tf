@@ -4,12 +4,6 @@ variable "region" {
   default     = "us-west-2"
 }
 
-variable "aws_vault_profile" {
-  description = "aws-vault profile used for `aws-vault exec <profile> -- tofu ...`. Matches ~/.aws/config's osv_im_admin, the same profile the osv.im repo uses."
-  type        = string
-  default     = "osv_im_admin"
-}
-
 variable "aws_terraform_role_arn" {
   description = "Optional role to assume on top of the aws-vault profile, for parity with osv.im's infra repo. Leave blank to use the aws-vault profile's credentials directly."
   type        = string
