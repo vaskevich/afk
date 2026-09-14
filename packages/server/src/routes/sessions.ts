@@ -1,9 +1,15 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { CreateSessionRequest } from "@afk/shared";
+import { CreateSessionRequest, PROTOCOL_VERSION } from "@afk/shared";
 import type { CreateSessionResponse } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
 import { errorResponse } from "../http/errors.ts";
+import { limitBody } from "../middleware/body-limit.ts";
+import {
+  clientVersion,
+  isAcceptedProtocolVersion,
+  upgradeRequired,
+} from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
 
 /** Parses the request body as JSON, or null if it isn't valid JSON. */
@@ -15,15 +21,32 @@ async function readJsonBody(c: Context<AppEnv>): Promise<unknown> {
   }
 }
 
+/** The body's `protocolVersion` when it is a number, before schema validation; undefined otherwise. */
+function protocolVersionOf(body: unknown): number | undefined {
+  if (typeof body !== "object" || body === null || !("protocolVersion" in body)) {
+    return undefined;
+  }
+  const version = (body as { protocolVersion: unknown }).protocolVersion;
+  return typeof version === "number" ? version : undefined;
+}
+
 /** What a client is told to wait before retrying a create that hit the session cap. */
 const CAPACITY_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * A create request is a few hundred bytes: the schema caps hostname at 256 chars,
+ * platform, osVersion, and clientVersion at 64 each, plus three numbers and the JSON
+ * punctuation, so under 1 KiB even with every field at its maximum. 4 KiB leaves room
+ * for a future optional field or two without inviting anything larger.
+ */
+export const MAX_CREATE_BODY_BYTES = 4 * 1024;
 
 /** Session lifecycle: create, inspect, end. Mounted at /api/sessions. */
 export function sessionRoutes(deps: AppDeps) {
   const { store, config } = deps;
 
   return new Hono<AppEnv>()
-    .post("/", async (c) => {
+    .post("/", clientVersion(deps), limitBody(MAX_CREATE_BODY_BYTES), async (c) => {
       if (!store.hasCapacity()) {
         // TODO(hardening): also rate limit creation per client address.
         c.header("Retry-After", String(CAPACITY_RETRY_AFTER_SECONDS));
@@ -34,7 +57,24 @@ export function sessionRoutes(deps: AppDeps) {
         );
       }
 
-      const parsed = CreateSessionRequest.safeParse(await readJsonBody(c));
+      const request = await readJsonBody(c);
+      // The schema would reject an out-of-range protocolVersion with a 400 like any other
+      // invalid field; intercept it first so an old client gets the upgrade message instead.
+      const protocolVersion = protocolVersionOf(request);
+      if (
+        protocolVersion !== undefined &&
+        !isAcceptedProtocolVersion(protocolVersion, config.minimumVersions)
+      ) {
+        return upgradeRequired(
+          c,
+          config.minimumVersions,
+          `protocol version ${protocolVersion} is not supported; this server accepts ` +
+            `${config.minimumVersions.protocolVersion} to ${PROTOCOL_VERSION}`,
+          c.get("clientVersion"),
+        );
+      }
+
+      const parsed = CreateSessionRequest.safeParse(request);
       if (!parsed.success) {
         return errorResponse(c, 400, "invalid session request", parsed.error.flatten());
       }
@@ -65,7 +105,7 @@ export function sessionRoutes(deps: AppDeps) {
       }
       return c.json(store.summary(session));
     })
-    .post("/:sessionId/end", ingestAuth(deps), async (c) => {
+    .post("/:sessionId/end", clientVersion(deps), ingestAuth(deps), async (c) => {
       const session = c.get("session");
       await store.end(session);
       console.log(

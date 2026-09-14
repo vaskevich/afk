@@ -7,15 +7,16 @@ import { sessionRoutes } from "./routes/sessions.ts";
 import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
 import { webRoutes } from "./routes/web.ts";
+import { securityHeaders } from "./middleware/security-headers.ts";
 
-// TODO(hardening): secureHeaders, body size limit, rate limiting, admission control,
-// minimum client version. See BACKLOG.md.
+// TODO(hardening): rate limiting of session creation per client address. See BACKLOG.md.
 
 // Layout of src/:
 //   app.ts, index.ts   - entry point and app wiring (this file)
 //   env.ts             - app-level config/deps types shared across routes and middleware
 //   routes/            - one Hono sub-app per resource, mounted here
-//   middleware/         - request plumbing shared by routes (e.g. ingest auth)
+//   middleware/         - request plumbing shared by routes (ingest auth, client version,
+//                        security headers)
 //   store/             - sessions (in-memory cache written through to SessionStorage: disk or bucket)
 //   http/              - generic HTTP helpers (error responses)
 //   log/               - server-side log formatting
@@ -25,6 +26,7 @@ import { webRoutes } from "./routes/web.ts";
 export function createApp(config: AppConfig, store: SessionStore) {
   const deps: AppDeps = { config, store };
   return new Hono()
+    .use("*", securityHeaders())
     .route("/api/health", healthRoutes)
     .route("/api/stats", statsRoutes(deps))
     .route("/api/sessions", sessionRoutes(deps))
