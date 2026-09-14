@@ -74,7 +74,9 @@ export function clientVersion({ config }: AppDeps) {
       return upgradeRequired(
         c,
         minimumVersions,
-        `${CLIENT_HEADER} version "${version}" is not major.minor.patch semver`,
+        // No quotes around the version: the bash client reads `error` with a sed that
+        // stops at the first double quote.
+        `${CLIENT_HEADER} version ${version} is not major.minor.patch semver`,
         version,
       );
     }
