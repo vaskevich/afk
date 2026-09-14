@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { T0_MS, makeHost, makeStoredFrames, makeSystemFrame } from "@afk/shared/testing";
+import { log } from "../log/logger.ts";
 import { DiskSessionStorage } from "./disk-storage.ts";
 import { SessionStore } from "./sessions.ts";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
@@ -176,7 +177,7 @@ describe("sweepExpiredSessions", () => {
     await inner.putSession(makeRecord({ sessionId: "expiredB", endedAt: T0_MS }));
     const storage = new BrokenReadStorage(inner, "broken");
     const store = new SessionStore(storage);
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(log, "error").mockImplementation(() => {});
 
     const result = await sweepExpiredSessions(storage, store, T0_MS + RETENTION_MS, RETENTION_MS);
 
@@ -209,7 +210,7 @@ describe("startSweeper", () => {
     await storage.putSession(makeRecord({ sessionId: "old", endedAt: T0_MS }));
     await storage.putSession(makeRecord({ sessionId: "fresh", endedAt: T0_MS + 60_000 }));
     const listSpy = vi.spyOn(storage, "listSessionIds");
-    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(log, "info").mockImplementation(() => {});
     const stop = startSweeper({
       storage,
       store: new SessionStore(storage),
@@ -234,7 +235,7 @@ describe("startSweeper", () => {
   it("skips an interval while the previous sweep is still running", async () => {
     vi.useFakeTimers();
     const storage = new GatedListStorage(new MemorySessionStorage());
-    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(log, "info").mockImplementation(() => {});
     const stop = startSweeper({
       storage,
       store: new SessionStore(storage),
@@ -257,7 +258,7 @@ describe("startSweeper", () => {
     vi.useFakeTimers();
     const storage = new MemorySessionStorage();
     const listSpy = vi.spyOn(storage, "listSessionIds");
-    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(log, "info").mockImplementation(() => {});
     const stop = startSweeper({
       storage,
       store: new SessionStore(storage),

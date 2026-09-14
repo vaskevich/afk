@@ -45,7 +45,7 @@ describe("describeFrame", () => {
   });
 
   describe("run frame", () => {
-    it("describes a running command with its command and byte counts", () => {
+    it("describes a running command with its byte counts but never the command line", () => {
       const frame = makeRunFrame(0, {
         output: { flavor: "volume", stdoutBytes: 2048, stderrBytes: 512 },
       });
@@ -53,7 +53,7 @@ describe("describeFrame", () => {
       const description = describeFrame(frame);
 
       expect(description).toContain("running");
-      expect(description).toContain(`(${frame.data.command})`);
+      expect(description).not.toContain(frame.data.command);
       expect(description).toContain("out=2.0K");
       expect(description).toContain("err=0.5K");
     });

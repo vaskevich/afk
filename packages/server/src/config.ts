@@ -19,6 +19,7 @@ import type { MinimumVersions } from "./env.ts";
 import { MIN_CLIENT_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION } from "@afk/shared";
 import { parseSemver } from "./utils/semver.ts";
 import { DEFAULT_LIMITS, DEFAULT_SSE_KEEPALIVE_MS, type AdmissionLimits } from "./env.ts";
+import { DEFAULT_LOG_LEVEL, LOG_LEVELS, type LogLevel } from "./log/logger.ts";
 import { DEFAULT_STORE_OPTIONS, DEFAULT_TICK_INTERVAL_MS } from "./store/sessions.ts";
 import { DEFAULT_RETENTION_DAYS, DEFAULT_SWEEP_INTERVAL_MS } from "./store/sweeper.ts";
 
@@ -89,6 +90,8 @@ export interface ServerConfig {
   evictEndedAfterSeconds: number;
   sseKeepaliveSeconds: number;
   minimumVersions: MinimumVersions;
+  /** Threshold for `log/logger.ts`; lines below it are dropped. */
+  logLevel: LogLevel;
 }
 
 /** Thrown by `loadConfig` with one line per problem, each naming the variable. */
@@ -197,6 +200,8 @@ const EnvSchema = z
     // protocol floor: the shared schema already rejects anything below MIN_PROTOCOL_VERSION.
     AFK_MIN_CLIENT_VERSION: semver(MIN_CLIENT_VERSION),
     AFK_MIN_PROTOCOL_VERSION: integer(MIN_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+
+    AFK_LOG_LEVEL: oneOf(LOG_LEVELS, DEFAULT_LOG_LEVEL),
   })
   .superRefine((env, ctx) => {
     if (env.AFK_STORAGE !== "s3") {
@@ -267,6 +272,7 @@ export function loadConfig(
       clientVersion: value.AFK_MIN_CLIENT_VERSION,
       protocolVersion: value.AFK_MIN_PROTOCOL_VERSION,
     },
+    logLevel: value.AFK_LOG_LEVEL,
   };
 }
 
@@ -294,5 +300,6 @@ export function describeConfig(config: ServerConfig): string {
     `evict ended after ${config.evictEndedAfterSeconds}s`,
     `sse keepalive ${config.sseKeepaliveSeconds}s`,
     `minimum client ${config.minimumVersions.clientVersion} / protocol ${config.minimumVersions.protocolVersion}`,
+    `log level ${config.logLevel}`,
   ].join(", ");
 }

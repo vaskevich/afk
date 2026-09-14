@@ -8,6 +8,7 @@ import type {
 } from "@afk/shared";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import { DEFAULT_LIMITS, type AdmissionLimits } from "../env.ts";
+import { log } from "../log/logger.ts";
 import { RuleEngine } from "../rules/engine.ts";
 import { randomId, randomToken } from "../utils/ids.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
@@ -301,9 +302,9 @@ export class SessionStore {
     }
     for (const event of events) {
       const state = event.endedAt === null ? "open" : "closed";
-      console.log(
-        `[session ${session.sessionId}] ${state} ${event.kind} (${event.severity}): ${event.message}`,
-      );
+      log.info(`${state} ${event.kind} (${event.severity}): ${event.message}`, {
+        session: session.sessionId,
+      });
     }
     this.emit(session, { type: "events", events });
   }

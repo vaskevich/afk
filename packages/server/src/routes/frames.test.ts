@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import type { AdmissionLimits } from "../env.ts";
 import { DEFAULT_LIMITS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
+import { log } from "../log/logger.ts";
 import { MAX_INGEST_BODY_BYTES } from "./frames.ts";
 import {
   createTestSession,
@@ -50,6 +51,43 @@ describe("POST /api/sessions/:id/frames", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ accepted: 2, duplicates: 0, latestSequence: { system: 2 } });
+  });
+
+  it("logs one info line per batch naming the session, its streams, and the counts, never one per frame", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+
+    await postFrames(app, sessionId, ingestToken, [
+      makeSystemFrame(0),
+      makeSystemFrame(1),
+      makeSystemFrame(2),
+      makeRunFrame(0),
+    ]);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith("accepted batch", {
+      session: sessionId,
+      streams: "system,run:abcd1234",
+      accepted: 3,
+      duplicates: 1,
+    });
+  });
+
+  it("keeps the run command line out of the info summary and puts it on the debug line", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    const frame = makeRunFrame(0);
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    const debug = vi.spyOn(log, "debug").mockImplementation(() => {});
+    vi.spyOn(log, "enabled").mockReturnValue(true);
+
+    await postFrames(app, sessionId, ingestToken, [frame]);
+
+    expect(JSON.stringify(info.mock.calls)).not.toContain(frame.data.command);
+    expect(debug).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ session: sessionId, command: frame.data.command }),
+    );
   });
 
   it("counts a resent batch entirely as duplicates and accepts nothing", async () => {

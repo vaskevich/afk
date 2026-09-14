@@ -6,6 +6,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { StoredFrame } from "@afk/shared";
+import { log } from "../log/logger.ts";
 import { SessionRecord, parseStoredFrameLine, type SessionStorage } from "./storage.ts";
 
 const SESSION_KEY = "session.json";
@@ -134,7 +135,7 @@ export class S3SessionStorage implements SessionStorage {
         if (frame) {
           frames.push(frame);
         } else {
-          console.warn(`[storage] skipping unreadable frame in session ${sessionId}`);
+          log.warn("skipping unreadable frame", { session: sessionId });
         }
       }
     }

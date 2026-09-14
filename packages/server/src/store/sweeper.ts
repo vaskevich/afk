@@ -1,3 +1,4 @@
+import { log } from "../log/logger.ts";
 import { SessionStore, sessionEndMs, sessionStatus } from "./sessions.ts";
 import type { SessionStorage } from "./storage.ts";
 
@@ -49,7 +50,10 @@ export async function sweepExpiredSessions(
       store.evict(sessionId);
       deleted++;
     } catch (err) {
-      console.error(`[sweeper] session ${sessionId}: ${describeError(err)}`);
+      log.error("sweeper could not sweep a session", {
+        session: sessionId,
+        error: describeError(err),
+      });
     }
   }
   return { scanned: sessionIds.length, deleted };
@@ -86,12 +90,13 @@ export function startSweeper(options: SweeperOptions): () => void {
     running = true;
     try {
       const result = await sweepExpiredSessions(storage, store, Date.now(), retentionMs);
-      console.log(
-        `[sweeper] scanned ${result.scanned} sessions, deleted ${result.deleted} ` +
-          `(retention ${retentionMs / MS_PER_DAY}d)`,
-      );
+      log.info("sweeper ran", {
+        scanned: result.scanned,
+        deleted: result.deleted,
+        retentionDays: retentionMs / MS_PER_DAY,
+      });
     } catch (err) {
-      console.error(`[sweeper] run failed: ${describeError(err)}`);
+      log.error("sweeper run failed", { error: describeError(err) });
     } finally {
       running = false;
     }

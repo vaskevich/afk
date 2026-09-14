@@ -42,6 +42,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   evictEndedAfterSeconds: 600,
   sseKeepaliveSeconds: 15,
   minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
+  logLevel: "info",
 };
 
 describe("loadConfig", () => {
@@ -78,6 +79,7 @@ describe("loadConfig", () => {
         AFK_TICK_INTERVAL_SECONDS: "1",
         AFK_EVICT_ENDED_AFTER_SECONDS: "0",
         AFK_SSE_KEEPALIVE_SECONDS: "30",
+        AFK_LOG_LEVEL: "debug",
       },
       PATHS,
     );
@@ -96,7 +98,14 @@ describe("loadConfig", () => {
       evictEndedAfterSeconds: 0,
       sseKeepaliveSeconds: 30,
       minimumVersions: { clientVersion: MIN_CLIENT_VERSION, protocolVersion: MIN_PROTOCOL_VERSION },
+      logLevel: "debug",
     });
+  });
+
+  it("rejects an unknown log level, listing the valid ones", () => {
+    expect(() => loadConfig({ AFK_LOG_LEVEL: "verbose" }, PATHS)).toThrow(
+      'AFK_LOG_LEVEL: expected one of debug, info, warn, error, got "verbose"',
+    );
   });
 
   it("builds the s3 storage config when AFK_STORAGE=s3 and every required variable is set", () => {

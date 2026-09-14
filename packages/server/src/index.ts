@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app.ts";
 import { ConfigError, describeConfig, loadConfig, type ServerConfig } from "./config.ts";
 import type { AppConfig } from "./env.ts";
+import { log } from "./log/logger.ts";
 import { createStorage } from "./store/create-storage.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { MS_PER_DAY, startSweeper } from "./store/sweeper.ts";
@@ -13,7 +14,9 @@ function loadConfigOrExit(): ServerConfig {
     return loadConfig(process.env);
   } catch (err) {
     if (err instanceof ConfigError) {
-      console.error(err.message);
+      for (const problem of err.problems) {
+        log.error("invalid configuration", { problem });
+      }
       process.exit(1);
     }
     throw err;
@@ -21,6 +24,7 @@ function loadConfigOrExit(): ServerConfig {
 }
 
 const config = loadConfigOrExit();
+log.setLevel(config.logLevel);
 
 const storage = createStorage(config.storage);
 const store = new SessionStore(storage, {
@@ -47,5 +51,5 @@ const appConfig: AppConfig = {
 const app = createApp(appConfig, store);
 
 serve({ fetch: app.fetch, port: config.port }, (info) => {
-  console.log(`afk server listening on http://localhost:${info.port} (${describeConfig(config)})`);
+  log.info(`afk server listening on http://localhost:${info.port} (${describeConfig(config)})`);
 });

@@ -5,9 +5,33 @@ import { errorResponse } from "../http/errors.ts";
 import { limitBody } from "../middleware/body-limit.ts";
 import { clientVersion } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
-import { TooManyFramesError, TooManyStreamsError } from "../store/sessions.ts";
+import { TooManyFramesError, TooManyStreamsError, type IngestResult } from "../store/sessions.ts";
 import { parseFrames } from "../utils/ndjson.ts";
 import { describeFrame } from "../log/describe.ts";
+import { log } from "../log/logger.ts";
+
+/**
+ * One `info` line per batch (an operator can find a session and see it is alive without
+ * one line per frame; at the 20 x 10 cap that would be tens of thousands of lines an
+ * hour) and one `debug` line per accepted frame. The `afk run` command line only ever
+ * appears on the debug line: it is typed by the user and can carry secrets.
+ */
+function logBatch(sessionId: string, result: IngestResult): void {
+  const streams = new Set(result.accepted.map((stored) => stored.frame.stream));
+  log.info("accepted batch", {
+    session: sessionId,
+    streams: [...streams].join(","),
+    accepted: result.accepted.length,
+    duplicates: result.duplicates,
+  });
+  if (!log.enabled("debug")) {
+    return;
+  }
+  for (const { frame } of result.accepted) {
+    const command = frame.collector === "run" ? frame.data.command : undefined;
+    log.debug(describeFrame(frame), { session: sessionId, command });
+  }
+}
 
 /**
  * Largest ingest body accepted. The client's sender ships at most
@@ -54,14 +78,7 @@ export function frameRoutes(deps: AppDeps) {
         }
         throw err;
       }
-      for (const stored of result.accepted) {
-        console.log(`[session ${session.sessionId}] ${describeFrame(stored.frame)}`);
-      }
-      if (result.duplicates > 0) {
-        console.log(
-          `[session ${session.sessionId}] skipped ${result.duplicates} duplicate frame(s)`,
-        );
-      }
+      logBatch(session.sessionId, result);
       const body: IngestResponse = {
         accepted: result.accepted.length,
         duplicates: result.duplicates,
