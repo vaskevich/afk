@@ -258,6 +258,19 @@ span comes within a radius of the current cursor, falling back to the full list 
 nothing is nearby. Neither interprets raw measurements — they only render what the
 server's `AnomalyEvent`s already say.
 
+The dashboard has a dark and a light theme. Every colour is a custom property on
+`:root` in `styles.css`, redefined under `:root[data-theme="light"]`; `theme.ts` is
+the pure model (`system` | `dark` | `light`, stored under `afk.theme` in
+localStorage, `system` by default and whenever storage is unavailable or holds junk)
+and `ThemeProvider` / `useTheme` (`useTheme.tsx`) keep `data-theme` on `<html>` in
+step with the choice and with `prefers-color-scheme`. An inline script in
+`index.html` applies the attribute before the first paint. Canvas renderers read
+their colours from the stylesheet at draw time, so `useCanvas` redraws whenever the
+resolved theme changes. The control in the header (`components/ThemeToggle.tsx`) is
+a single glyph for the theme in use, with a dot when it was chosen here rather than
+taken from the operating system; hovering, focusing, or tapping it reveals the
+choices to force light, force dark, or follow the system again.
+
 The server serves the built dashboard so the URL the client prints works directly.
 For UI work the Vite dev server proxies `/api` to the server.
 
@@ -325,6 +338,12 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   make the handoff a rename. Name order is sequence order within a stream, which is
   all the server's per-stream de-duplication needs. The queue is capped at 50 MiB
   (oldest frames dropped) so an offline night cannot fill the disk.
+- **2026-09-15** The dashboard's theme preference is per browser, in localStorage
+  under `afk.theme`, and `system` (follow `prefers-color-scheme`) by default. Nothing
+  about the choice belongs to a session or the server: a share link should look the
+  same for everyone, and the viewer's own device already knows what they want. The
+  light palette redefines the same CSS custom properties rather than adding new ones,
+  so components and canvas renderers stay theme-unaware.
 - **2026-09-14** Tests are Vitest, one config at the repo root, co-located with the
   code they cover (`foo.test.ts` next to `foo.ts`), builders (`makeSystemFrame`,
   `makeEvent`, …) over literals, real implementations (`MemorySessionStorage`,
