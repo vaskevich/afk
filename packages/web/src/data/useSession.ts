@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { FramesResponse } from "@afk/shared";
+import type { AnomalyEvent, FramesResponse } from "@afk/shared";
 import { useEffect, useState } from "react";
 import { apiSource } from "./apiSource.ts";
 import { fixtureSource } from "./fixtureSource.ts";
@@ -10,6 +10,14 @@ export function sourceFor(sessionId: string): SessionSource {
 }
 
 const queryKey = (sessionId: string) => ["session", sessionId] as const;
+
+/** Replaces the event with the same id (or appends it), keeping the list sorted by start. */
+export function upsertEvent(events: AnomalyEvent[], event: AnomalyEvent): AnomalyEvent[] {
+  const next = events.filter((existing) => existing.id !== event.id);
+  next.push(event);
+  next.sort((a, b) => a.startedAt - b.startedAt);
+  return next;
+}
 
 /**
  * Loads a session, then keeps it up to date over the source's live subscription while
@@ -47,6 +55,7 @@ export function useSession(sessionId: string) {
           return fresh.length === 0 ? old : { ...old, frames: [...old.frames, ...fresh] };
         }),
       onSession: (session) => update((old) => ({ ...old, session })),
+      onEvent: (event) => update((old) => ({ ...old, events: upsertEvent(old.events, event) })),
       onConnection: setConnection,
     });
     // loadedLastIndex changes as frames stream in; only the value at subscribe time matters.

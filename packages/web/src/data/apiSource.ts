@@ -1,4 +1,10 @@
-import { FramesResponse, SessionSummary, StoredFrame, StreamEventName } from "@afk/shared";
+import {
+  AnomalyEvent,
+  FramesResponse,
+  SessionSummary,
+  StoredFrame,
+  StreamEventName,
+} from "@afk/shared";
 import type { SessionSource } from "./source.ts";
 
 /** How long to buffer incoming frames before handing them to React, to avoid a render per frame during replay. */
@@ -54,6 +60,14 @@ export const apiSource: SessionSource = {
     });
     source.addEventListener(StreamEventName.Session, (e: MessageEvent<string>) => {
       handlers.onSession(SessionSummary.parse(JSON.parse(e.data)));
+    });
+    source.addEventListener(StreamEventName.Event, (e: MessageEvent<string>) => {
+      const parsed = AnomalyEvent.safeParse(JSON.parse(e.data));
+      if (!parsed.success) {
+        // TODO(hardening): surface schema drift between server and dashboard
+        return;
+      }
+      handlers.onEvent(parsed.data);
     });
     source.addEventListener(StreamEventName.End, (e: MessageEvent<string>) => {
       flush();
