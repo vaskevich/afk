@@ -160,17 +160,21 @@ does not need to know about events at all.
 
 Implement `SessionStorage` in `packages/server/src/store/storage.ts`:
 
-| method           | disk                            | object store                                                            |
-| ---------------- | ------------------------------- | ----------------------------------------------------------------------- |
-| `putSession`     | write `session.json` atomically | put `sessions/<id>/session.json`                                        |
-| `getSession`     | read it                         | get it                                                                  |
-| `appendFrames`   | append lines to `frames.ndjson` | put `sessions/<id>/frames/<first index, zero padded>.ndjson`            |
-| `readFrames`     | read the file                   | list the prefix, get the objects 16 at a time, concatenate in key order |
-| `listSessionIds` | readdir                         | list `sessions/` with delimiter                                         |
-| `deleteSession`  | rm -rf                          | delete every key under the prefix                                       |
+| method            | disk                            | object store                                                                                                   |
+| ----------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `putSession`      | write `session.json` atomically | put `sessions/<id>/session.json`                                                                               |
+| `getSession`      | read it                         | get it                                                                                                         |
+| `appendFrames`    | append lines to `frames.ndjson` | buffer; every 60 s or 100 frames put a slab `sessions/<id>/frames/<first index, zero padded>.ndjson`           |
+| `readFrames`      | read the file                   | get `sessions/<id>/frames.ndjson` if it exists, else list `frames/`, get the parts 16 at a time, concatenate   |
+| `listSessionIds`  | readdir                         | list `sessions/` with delimiter                                                                                |
+| `deleteSession`   | rm -rf                          | delete every key under the prefix                                                                              |
+| `flush?`          | (not needed)                    | write every session's buffer; called from graceful shutdown                                                    |
+| `compactSession?` | (not needed)                    | write the frames as `frames.ndjson`, then delete the parts; called in the background at end and by the sweeper |
 
 Frames always arrive in index order and are never rewritten, which is what makes the
-object-store variant simple. `store/s3-storage.ts` is the S3-compatible
+object-store variant simple; the two optional methods exist for a backend that buffers
+or whose write shape is not its cheapest read shape (see "Storage" in
+[ARCHITECTURE.md](ARCHITECTURE.md)). `store/s3-storage.ts` is the S3-compatible
 implementation (Lightsail buckets, real S3, MinIO); `store/create-storage.ts`
 exports `createStorage`, which builds the backend `AFK_STORAGE=disk|s3` (and the
 `AFK_S3_*` variables for the latter) selects. A new backend adds its variables to the
