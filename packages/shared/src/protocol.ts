@@ -79,7 +79,30 @@ export type SystemCollectorData = z.infer<typeof SystemCollectorData>;
  * derives rates. `output.flavor` names how the client looked at the output so richer
  * parsers (progress lines, JSON records) can be added without changing the envelope.
  */
-export const RunOutputVolume = z.object({
+/** How many lines of each of stdout and stderr a failed run's final frame carries at most. */
+export const RUN_TAIL_MAX_LINES = 20;
+/** Each tail line is cut to this many characters before it leaves the machine. */
+export const RUN_TAIL_MAX_LINE_CHARS = 200;
+
+/**
+ * The last lines a wrapped command printed, so a failure can say why without anyone
+ * going back to the laptop. Present only on the final (`exited`) frame of a run that
+ * exited non-zero, and only when the client's `AFK_RUN_TAIL_LINES` switch is not 0;
+ * a successful run's output never leaves the machine. `truncated` is true when either
+ * stream had more lines than were kept.
+ */
+export const RunOutputTail = z.object({
+  stdout: z.array(z.string().max(RUN_TAIL_MAX_LINE_CHARS)).max(RUN_TAIL_MAX_LINES),
+  stderr: z.array(z.string().max(RUN_TAIL_MAX_LINE_CHARS)).max(RUN_TAIL_MAX_LINES),
+  truncated: z.boolean(),
+});
+export type RunOutputTail = z.infer<typeof RunOutputTail>;
+
+/** Fields every output flavor carries; a new flavor extends this. */
+const RunOutputBase = z.object({
+  tail: RunOutputTail.optional(),
+});
+export const RunOutputVolume = RunOutputBase.extend({
   flavor: z.literal("volume"),
   stdoutBytes: z.number().int().nonnegative(),
   stderrBytes: z.number().int().nonnegative(),
@@ -321,6 +344,8 @@ export const AnomalyEventDetails = z.object({
     )
     .max(EVENT_TOP_PROCESSES_MAX)
     .optional(),
+  /** What a failed command last printed, copied from the `exited` frame's `output.tail`. */
+  outputTail: RunOutputTail.optional(),
 });
 export type AnomalyEventDetails = z.infer<typeof AnomalyEventDetails>;
 

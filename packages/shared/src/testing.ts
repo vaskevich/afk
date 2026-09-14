@@ -10,6 +10,7 @@ import type {
   ProcessesFrame,
   RunCollectorData,
   RunFrame,
+  RunOutputTail,
   SessionSummary,
   StoredFrame,
   SystemCollectorData,
@@ -93,17 +94,40 @@ export function makeRunData(overrides: Partial<RunCollectorData> = {}): RunColle
   };
 }
 
+/** A plausible `output.tail` of a failed migration; override only what the test is about. */
+export function makeRunTail(overrides: Partial<RunOutputTail> = {}): RunOutputTail {
+  return {
+    stdout: ["processing 299/10000 items", "processing 300/10000 items"],
+    stderr: ["migration-hang: fatal: lost connection to database after item 300"],
+    truncated: false,
+    ...overrides,
+  };
+}
+
+/**
+ * A run frame `atSeconds` after T0. `tail` puts an `output.tail` on the frame's
+ * output, as the client does on the final frame of a failed run, without the test
+ * having to restate the volume counts.
+ */
 export function makeRunFrame(
   atSeconds: number,
-  overrides: Partial<RunCollectorData> & { sequence?: number; runId?: string } = {},
+  overrides: Partial<RunCollectorData> & {
+    sequence?: number;
+    runId?: string;
+    tail?: RunOutputTail;
+  } = {},
 ): RunFrame {
-  const { sequence, runId, ...data } = overrides;
+  const { sequence, runId, tail, ...data } = overrides;
+  const runData = makeRunData({ elapsedSeconds: atSeconds, ...data });
+  if (tail !== undefined) {
+    runData.output = { ...runData.output, tail };
+  }
   return {
     stream: `run:${runId ?? "abcd1234"}`,
     collector: "run",
     sequence: sequence ?? atSeconds + 1,
     timestamp: T0_SECONDS + atSeconds,
-    data: makeRunData({ elapsedSeconds: atSeconds, ...data }),
+    data: runData,
   };
 }
 

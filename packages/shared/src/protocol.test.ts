@@ -5,6 +5,7 @@ import {
   makeProcessesData,
   makeProcessesFrame,
   makeRunFrame,
+  makeRunTail,
   makeSessionSummary,
   makeStoredFrames,
   makeSystemFrame,
@@ -20,6 +21,8 @@ import {
   MIN_CLIENT_VERSION,
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  RUN_TAIL_MAX_LINE_CHARS,
+  RUN_TAIL_MAX_LINES,
   StoredFrame,
   StreamEventName,
   UpgradeRequiredDetails,
@@ -145,6 +148,39 @@ describe("Frame", () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0]!.path).toEqual(["data", "state"]);
+    }
+  });
+
+  it("accepts an exited run frame carrying an output tail", () => {
+    const tail = makeRunTail({ truncated: true });
+    const frame = makeRunFrame(5, { state: "exited", exitCode: 3, tail });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result).toMatchObject({ success: true, data: { data: { output: { tail } } } });
+  });
+
+  it("rejects a tail with more than the maximum lines, naming the stream", () => {
+    const stderr = Array.from({ length: RUN_TAIL_MAX_LINES + 1 }, (_, i) => `line ${i}`);
+    const frame = makeRunFrame(5, { state: "exited", exitCode: 1, tail: makeRunTail({ stderr }) });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["data", "output", "tail", "stderr"]);
+    }
+  });
+
+  it("rejects a tail line longer than the maximum characters, naming the line", () => {
+    const stdout = ["x".repeat(RUN_TAIL_MAX_LINE_CHARS + 1)];
+    const frame = makeRunFrame(5, { state: "exited", exitCode: 1, tail: makeRunTail({ stdout }) });
+
+    const result = Frame.safeParse(frame);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["data", "output", "tail", "stdout", 0]);
     }
   });
 });
@@ -285,6 +321,27 @@ describe("AnomalyEvent", () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0]!.path).toEqual(["details", "topProcesses"]);
+    }
+  });
+
+  it("accepts details carrying a failed command's output tail", () => {
+    const outputTail = makeRunTail();
+
+    const result = AnomalyEvent.safeParse(makeEvent({ details: { outputTail } }));
+
+    expect(result).toMatchObject({ success: true, data: { details: { outputTail } } });
+  });
+
+  it("rejects an output tail with more than the maximum lines", () => {
+    const stdout = Array.from({ length: RUN_TAIL_MAX_LINES + 1 }, () => "line");
+
+    const result = AnomalyEvent.safeParse(
+      makeEvent({ details: { outputTail: makeRunTail({ stdout }) } }),
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.path).toEqual(["details", "outputTail", "stdout"]);
     }
   });
 });
