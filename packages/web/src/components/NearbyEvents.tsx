@@ -41,7 +41,7 @@ function EventList({
               )}
             </span>
             <span className="event-row-when">
-              +{formatOffset((event.startedAt - t0) / 1000)}
+              since {formatOffset((event.startedAt - t0) / 1000)}
               <small>
                 {event.endedAt === null
                   ? `ongoing for ${formatDuration(Math.max(0, latest - event.startedAt))}`

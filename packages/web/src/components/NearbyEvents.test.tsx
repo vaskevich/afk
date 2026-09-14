@@ -28,7 +28,8 @@ describe("NearbyEvents", () => {
       />,
     );
 
-    expect(screen.getByText("+00:00")).toBeTruthy();
+    // "since", not a bare "+00:00": an unlabeled offset read like a duration of nothing.
+    expect(screen.getByText("since 00:00")).toBeTruthy();
     expect(screen.getByText("ongoing for 10m 15s")).toBeTruthy();
   });
 
@@ -46,6 +47,7 @@ describe("NearbyEvents", () => {
       />,
     );
 
+    expect(screen.getByText("since 01:00")).toBeTruthy();
     expect(screen.getByText("2m 00s")).toBeTruthy();
   });
 });
