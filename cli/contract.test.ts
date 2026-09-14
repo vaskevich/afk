@@ -60,6 +60,21 @@ const MIN_SYSTEM_FRAMES = 2;
 const CATCH_UP_SEQUENCES = 3;
 /** Wall time the wrapped command in the owner scenario runs, so its session collects system frames. */
 const OWNED_RUN_SECONDS = 2;
+/**
+ * The chain scenario runs the server with this cap: the client chains a quarter of it
+ * (3 s) before the cap, so the successor exists about 9 s in.
+ */
+const CHAIN_CAP_SECONDS = 12;
+/**
+ * A joiner that outlives the first session, so its run stream has to follow the chain:
+ * long enough to span the chain moment on a slow machine, short enough to exit before
+ * the successor chains in turn.
+ */
+const CHAIN_RUN_SECONDS = 11;
+/** Deadline for the successor's URL to appear: the chain moment plus a slow machine. */
+const CHAIN_DEADLINE_MS = 15_000;
+/** The chain scenario needs the whole cap plus shutdown, more than the default. */
+const CHAIN_TEST_TIMEOUT_MS = 40_000;
 
 const SINGLE_SESSION_LIMITS: AdmissionLimits = {
   maxActiveSessions: 1,
@@ -116,8 +131,12 @@ interface TestServer {
 }
 
 /** The real app on a random loopback port, backed by an in-memory store. */
-async function startServer(limits: AdmissionLimits, webDistDir: string): Promise<TestServer> {
-  const store = new SessionStore(new MemorySessionStorage(), { limits });
+async function startServer(
+  limits: AdmissionLimits,
+  webDistDir: string,
+  storeOptions: { maxSessionDurationSeconds?: number } = {},
+): Promise<TestServer> {
+  const store = new SessionStore(new MemorySessionStorage(), { limits, ...storeOptions });
   // The app is built once the port is known, since dashboard URLs embed it. No request
   // can arrive before then because nobody knows the port either.
   const wiring: { app?: ReturnType<typeof createApp> } = {};
@@ -525,5 +544,73 @@ describe.skipIf(process.platform !== "darwin")(
       );
       expect(messages.at(-1)!.data).toMatchObject({ sessionId, status: "ended" });
     });
+
+    it(
+      "afk start chains to a successor before the cap, linked both ways, with sequences restarting at 1, and a joined afk run follows it",
+      { timeout: CHAIN_TEST_TIMEOUT_MS },
+      async () => {
+        await server.close();
+        server = await startServer(DEFAULT_LIMITS, webDistDir, {
+          maxSessionDurationSeconds: CHAIN_CAP_SECONDS,
+        });
+        const { proc, sessionId: first } = await startSession(afkHome);
+        await waitForSystemFrames(first, MIN_SYSTEM_FRAMES);
+        const run = spawnAfk(["run", "--", "sleep", String(CHAIN_RUN_SECONDS)], afkHome);
+
+        const second = await waitFor(
+          "the client to print its successor's URL",
+          () => {
+            const ids = [...proc.stdout().matchAll(new RegExp(DASHBOARD_URL_PATTERN, "g"))];
+            return ids.map((match) => match[1]).find((id) => id !== first);
+          },
+          CHAIN_DEADLINE_MS,
+        );
+        await run.exited;
+        // The joiner re-attaches a second after its first 410, then resends.
+        const { session: secondSession, frames: secondFrames } = await waitFor(
+          "the run's exited frame in the successor",
+          async () => {
+            const response = await readFrames(second);
+            return finalRunFrame(response.frames) ? response : undefined;
+          },
+          CATCH_UP_DEADLINE_MS,
+        );
+        proc.child.kill("SIGTERM");
+        await proc.exited;
+
+        const firstSession = await readSummary(first);
+        const { frames: firstFrames } = await readFrames(first);
+        expect(firstSession).toMatchObject({
+          status: "ended",
+          previousSessionId: null,
+          nextSessionId: second,
+        });
+        // Ended by the chain, before its cap, and with its whole queue delivered first.
+        expect(firstSession.endedAt).toBeLessThan(
+          firstSession.startedAt + CHAIN_CAP_SECONDS * 1000,
+        );
+        expect(await readdir(join(afkHome, "sessions", first, "queue"))).toEqual([]);
+        expect(await readdir(join(afkHome, "sessions", first))).toContain("done");
+        expect(secondSession).toMatchObject({
+          status: "active",
+          previousSessionId: first,
+          nextSessionId: null,
+        });
+        expect(secondSession.startedAt).toBeGreaterThanOrEqual(firstSession.endedAt!);
+        const secondSequences = systemSequences(secondFrames);
+        expect(secondSequences).toEqual(range(1, secondSequences.length));
+        expect(secondFrames.map((f) => f.index)).toEqual(range(1, secondFrames.length));
+        // The joiner's run stream spans the chain: sampled in the first session, exited in the second.
+        const runStream = finalRunFrame(secondFrames)!.frame.stream;
+        expect(firstFrames.some((f) => f.frame.stream === runStream)).toBe(true);
+        expect(finalRunFrame(secondFrames)!.frame.data).toMatchObject({ exitCode: 0 });
+        expect(run.stderr()).toContain(`session ${first} ended; continuing in session ${second}`);
+        expect(proc.stderr()).toContain(
+          `session ${first} reached its ${CHAIN_CAP_SECONDS}s cap; continuing in session ${second}`,
+        );
+        expect(await readSummary(second)).toMatchObject({ status: "ended" });
+        expect(await readStats()).toMatchObject({ activeSessions: 0 });
+      },
+    );
   },
 );
