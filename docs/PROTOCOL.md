@@ -594,13 +594,15 @@ by later verdicts, but `details` keeps what was running when the condition began
 
 The rule catalogue today:
 
-| kind              | collector | severity           | trigger                                                                                       | shape    |
-| ----------------- | --------- | ------------------ | --------------------------------------------------------------------------------------------- | -------- |
-| `cpu.high`        | `system`  | warning            | cpu ≥ 90% sustained 30 s; backdated to when it crossed; names the top 3 processes (see below) | spanning |
-| `memory.pressure` | `system`  | warning / critical | pressure level ≥ warn (critical if ≥ critical) sustained 5 s                                  | spanning |
-| `client.stale`    | `system`  | warning            | no frame from the stream for 60 s; opens on a tick, backdated to 60 s after the last frame    | spanning |
-| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero; ends with its last output line, see below)  | instant  |
-| `run.stalled`     | `run`     | warning            | still running but output volume unchanged for 60 s; backdated to when it stopped changing     | spanning |
+| kind              | collector | severity           | trigger                                                                                        | shape    |
+| ----------------- | --------- | ------------------ | ---------------------------------------------------------------------------------------------- | -------- |
+| `cpu.high`        | `system`  | warning            | cpu ≥ 90% sustained 30 s; backdated to when it crossed; names the top 3 processes (see below)  | spanning |
+| `memory.pressure` | `system`  | warning / critical | pressure level ≥ warn (critical if ≥ critical) sustained 5 s                                   | spanning |
+| `client.stale`    | `system`  | warning            | no frame from the stream for 60 s; opens on a tick, backdated to 60 s after the last frame     | spanning |
+| `run.exited`      | `run`     | info / critical    | the wrapped command exited (critical if non-zero; ends with its last output line, see below)   | instant  |
+| `run.stalled`     | `run`     | warning            | still running but output volume unchanged for 60 s; backdated to when it stopped changing      | spanning |
+| `agents.waiting`  | `agents`  | warning            | `claude.waitingOnInput` > 0 sustained 120 s; backdated to the first waiting sample (see below) | spanning |
+| `agents.all-idle` | `agents`  | info               | sessions > 0 with nothing working or waiting (subagents included) sustained 60 s; backdated    | spanning |
 
 A spanning event opens with `endedAt: null` and later gets an `endedAt` once the
 condition clears (or the session ends, which closes everything still open). An instant
@@ -619,6 +621,14 @@ message ends with the last non-blank stderr line (stdout's if stderr is empty), 
 "command failed with exit code 3 after 12s: fatal: lost connection to database", and
 the whole tail is stored in `details.outputTail`. A run whose client sent no tail
 (exit 0, or `AFK_RUN_TAIL_LINES=0`) gets the plain message and no `details`.
+
+`agents.waiting` is the reason the `agents` collector exists: "1 agent has been
+waiting on you for over 2m" ("2 agents have been…" while more are; the message
+follows the count) means a Claude Code session has sat at a permission prompt or a
+question for 2 minutes with nobody there to answer, and the timeline shows since when.
+`agents.all-idle` ("all 3 agents idle for over 60s", "1 agent idle for over 60s") is
+the good news: everything has finished and nothing is asking. Neither fires on a
+frame with `available: false`.
 
 ## GET /api/stats
 
