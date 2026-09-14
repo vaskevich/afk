@@ -102,6 +102,7 @@ describe("POST /api/sessions/:id/frames", () => {
     const { app, sessionId, ingestToken } = await startSession({
       maxActiveSessions: 20,
       maxStreamsPerSession: 1,
+      maxFramesPerSession: 15_000,
     });
     await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
 

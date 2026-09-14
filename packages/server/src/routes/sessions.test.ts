@@ -59,7 +59,11 @@ describe("POST /api/sessions", () => {
   });
 
   it("returns 503 with Retry-After once maxActiveSessions sessions are active, then 201 again after one ends", async () => {
-    const app = buildApp({ maxActiveSessions: 1, maxStreamsPerSession: 10 });
+    const app = buildApp({
+      maxActiveSessions: 1,
+      maxStreamsPerSession: 10,
+      maxFramesPerSession: 15_000,
+    });
     const first = await createTestSession(app);
     expect(first.res.status).toBe(201);
 
@@ -190,7 +194,11 @@ describe("POST /api/sessions version checks", () => {
 
 describe("GET /api/sessions/:id", () => {
   it("returns the session summary with zero streams and the configured max", async () => {
-    const app = buildApp({ maxActiveSessions: 20, maxStreamsPerSession: 5 });
+    const app = buildApp({
+      maxActiveSessions: 20,
+      maxStreamsPerSession: 5,
+      maxFramesPerSession: 15_000,
+    });
     const { sessionId } = await createTestSession(app);
 
     const res = await app.request(`/api/sessions/${sessionId}`);

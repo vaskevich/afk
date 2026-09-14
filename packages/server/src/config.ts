@@ -38,6 +38,7 @@ export const CONFIG_DEFAULTS = {
   port: 4141,
   maxActiveSessions: DEFAULT_LIMITS.maxActiveSessions,
   maxStreamsPerSession: DEFAULT_LIMITS.maxStreamsPerSession,
+  maxFramesPerSession: DEFAULT_LIMITS.maxFramesPerSession,
   maxSessionDurationSeconds: DEFAULT_STORE_OPTIONS.maxSessionDurationSeconds,
   retentionDays: DEFAULT_RETENTION_DAYS,
   sweepIntervalSeconds: DEFAULT_SWEEP_INTERVAL_MS / MS_PER_SECOND,
@@ -174,6 +175,7 @@ const EnvSchema = z
 
     AFK_MAX_ACTIVE_SESSIONS: integer(CONFIG_DEFAULTS.maxActiveSessions, 1),
     AFK_MAX_STREAMS_PER_SESSION: integer(CONFIG_DEFAULTS.maxStreamsPerSession, 1),
+    AFK_MAX_FRAMES_PER_SESSION: integer(CONFIG_DEFAULTS.maxFramesPerSession, 1),
     AFK_MAX_SESSION_DURATION_SECONDS: integer(CONFIG_DEFAULTS.maxSessionDurationSeconds, 1),
 
     AFK_RETENTION_DAYS: integer(CONFIG_DEFAULTS.retentionDays, 0),
@@ -244,6 +246,7 @@ export function loadConfig(
     limits: {
       maxActiveSessions: value.AFK_MAX_ACTIVE_SESSIONS,
       maxStreamsPerSession: value.AFK_MAX_STREAMS_PER_SESSION,
+      maxFramesPerSession: value.AFK_MAX_FRAMES_PER_SESSION,
     },
     maxSessionDurationSeconds: value.AFK_MAX_SESSION_DURATION_SECONDS,
     retentionDays: value.AFK_RETENTION_DAYS,
@@ -274,7 +277,7 @@ export function describeConfig(config: ServerConfig): string {
     `public base ${config.publicBaseUrl}`,
     `web dist ${config.webDistDir}`,
     describeStorage(config.storage),
-    `limits ${config.limits.maxActiveSessions} sessions x ${config.limits.maxStreamsPerSession} streams`,
+    `limits ${config.limits.maxActiveSessions} sessions x ${config.limits.maxStreamsPerSession} streams x ${config.limits.maxFramesPerSession} frames`,
     `max session ${config.maxSessionDurationSeconds}s`,
     `retention ${config.retentionDays}d (sweep every ${config.sweepIntervalSeconds}s)`,
     `tick ${config.tickIntervalSeconds}s`,

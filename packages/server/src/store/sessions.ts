@@ -77,6 +77,13 @@ export interface IngestResult {
 }
 
 /** Thrown by `ingest` when a batch would add an eleventh (etc.) stream to a session. */
+/** Thrown by `ingest` when a batch would push a session past `maxFramesPerSession`. */
+export class TooManyFramesError extends Error {
+  constructor(readonly limit: number) {
+    super(`session has reached the limit of ${limit} frames`);
+  }
+}
+
 export class TooManyStreamsError extends Error {
   constructor(
     readonly stream: string,
@@ -335,6 +342,9 @@ export class SessionStore {
         throw new TooManyStreamsError(frame.stream, this.options.limits.maxStreamsPerSession);
       }
       nextSequence.set(frame.stream, frame.sequence);
+      if (nextIndex > this.options.limits.maxFramesPerSession) {
+        throw new TooManyFramesError(this.options.limits.maxFramesPerSession);
+      }
       accepted.push({ index: nextIndex++, receivedAt, frame });
     }
     if (accepted.length === 0) {

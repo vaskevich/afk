@@ -11,6 +11,7 @@ import { MemorySessionStorage, type SessionRecord, type SessionStorage } from ".
 import {
   DEFAULT_STORE_OPTIONS,
   SessionStore,
+  TooManyFramesError,
   TooManyStreamsError,
   sessionEndMs,
   sessionStatus,
@@ -230,9 +231,20 @@ describe("SessionStore", () => {
       ]);
     });
 
+    it("throws TooManyFramesError once a session holds its maximum number of frames, and the client's retry is rejected too", async () => {
+      const store = new SessionStore(new MemorySessionStorage(), {
+        limits: { maxActiveSessions: 20, maxStreamsPerSession: 10, maxFramesPerSession: 3 },
+      });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1), makeSystemFrame(2)]);
+
+      await expect(store.ingest(session, [makeSystemFrame(3)])).rejects.toThrow(TooManyFramesError);
+      expect(session.frames).toHaveLength(3);
+    });
+
     it("throws TooManyStreamsError when a batch would add more streams than the session's limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 20, maxStreamsPerSession: 1 },
+        limits: { maxActiveSessions: 20, maxStreamsPerSession: 1, maxFramesPerSession: 15_000 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
@@ -319,7 +331,7 @@ describe("SessionStore", () => {
 
     it("summarizes the stream count and the session's stream limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 20, maxStreamsPerSession: 5 },
+        limits: { maxActiveSessions: 20, maxStreamsPerSession: 5, maxFramesPerSession: 15_000 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
@@ -341,7 +353,7 @@ describe("SessionStore", () => {
 
     it("hasCapacity is false once active sessions reach the configured limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 1, maxStreamsPerSession: 10 },
+        limits: { maxActiveSessions: 1, maxStreamsPerSession: 10, maxFramesPerSession: 15_000 },
       });
 
       await store.create({ host: makeHost(), clientVersion: "0.1.0" });
@@ -351,7 +363,7 @@ describe("SessionStore", () => {
 
     it("hasCapacity is true while active sessions are under the limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 2, maxStreamsPerSession: 10 },
+        limits: { maxActiveSessions: 2, maxStreamsPerSession: 10, maxFramesPerSession: 15_000 },
       });
 
       await store.create({ host: makeHost(), clientVersion: "0.1.0" });
@@ -361,7 +373,7 @@ describe("SessionStore", () => {
 
     it("reports session and frame totals", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 5, maxStreamsPerSession: 10 },
+        limits: { maxActiveSessions: 5, maxStreamsPerSession: 10, maxFramesPerSession: 15_000 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 

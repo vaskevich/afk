@@ -47,11 +47,19 @@ export const DEFAULT_MINIMUM_VERSIONS: MinimumVersions = {
 export interface AdmissionLimits {
   maxActiveSessions: number;
   maxStreamsPerSession: number;
+  /**
+   * Hard ceiling on stored frames per session. Streams and sessions are capped, but
+   * without this one anonymous session could push thousands of frames per request and
+   * exhaust memory. 15 000 is about four hours of one 1 Hz stream, or the one-hour cap
+   * with the system, processes, and a couple of run streams, at roughly 20 MB in memory.
+   */
+  maxFramesPerSession: number;
 }
 
 export const DEFAULT_LIMITS: AdmissionLimits = {
   maxActiveSessions: 20,
   maxStreamsPerSession: 10,
+  maxFramesPerSession: 15_000,
 };
 
 /** Everything route modules need. Passed in explicitly so tests can build an app with a fresh store. */

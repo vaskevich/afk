@@ -5,7 +5,7 @@ import { errorResponse } from "../http/errors.ts";
 import { limitBody } from "../middleware/body-limit.ts";
 import { clientVersion } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
-import { TooManyStreamsError } from "../store/sessions.ts";
+import { TooManyFramesError, TooManyStreamsError } from "../store/sessions.ts";
 import { parseFrames } from "../utils/ndjson.ts";
 import { describeFrame } from "../log/describe.ts";
 
@@ -47,6 +47,10 @@ export function frameRoutes(deps: AppDeps) {
         if (err instanceof TooManyStreamsError) {
           // 422 rather than 4xx-generic so the client knows the batch itself was well formed.
           return errorResponse(c, 422, err.message, { stream: err.stream, limit: err.limit });
+        }
+        if (err instanceof TooManyFramesError) {
+          // 410: the session is full and will accept nothing more, so the client stops.
+          return errorResponse(c, 410, err.message, { limit: err.limit });
         }
         throw err;
       }

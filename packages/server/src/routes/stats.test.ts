@@ -15,7 +15,11 @@ function buildApp(limits: AdmissionLimits) {
 
 describe("GET /api/stats", () => {
   it("reports active sessions, the configured limits, in-memory counts, and an integer uptime", async () => {
-    const limits: AdmissionLimits = { maxActiveSessions: 20, maxStreamsPerSession: 10 };
+    const limits: AdmissionLimits = {
+      maxActiveSessions: 20,
+      maxStreamsPerSession: 10,
+      maxFramesPerSession: 15_000,
+    };
     const app = buildApp(limits);
     await createTestSession(app);
 
