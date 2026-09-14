@@ -74,6 +74,14 @@ describe("session id validation", () => {
     });
   });
 
+  it("rejects a malformed id before the client version check, so no header is needed to get the 404", async () => {
+    const { app } = buildApp();
+
+    const res = await endTestSession(app, "does-not-exist", "whatever", {});
+
+    expect(res.status).toBe(404);
+  });
+
   it("lets a well-formed id through to the route", async () => {
     const { app } = buildApp();
     const { sessionId } = await createTestSession(app);

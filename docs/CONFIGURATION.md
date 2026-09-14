@@ -87,7 +87,10 @@ The bash client reads `AFK_SERVER` (the server origin) and `AFK_HOME` (its spool
 directory, default `~/.afk`). The `AFK_SERVER` default is `https://afk.osv.im` in the
 repo; a copy installed with `curl -fsSL <origin>/install | sh` defaults to the `<origin>`
 it was installed from, so a self-hosted server's users set nothing. Everything else the
-client needs, such as the session cap, comes from the server's create response.
+client needs, such as the session cap, comes from the server's create response. The
+remaining client knobs are documented in the script's own header: `AFK_SPOOL_MAX_BYTES`,
+`AFK_NO_QR`, `AFK_RUN_TAIL_LINES`, and `AFK_RUN_CAPTURE_MAX_BYTES` (the chunk size, 64 MiB
+by default, of the wrapped command's output `afk run` keeps on disk while it runs).
 
 The installer itself reads `AFK_INSTALL_DIR` (where to put `afk`, default `~/.local/bin`).
 

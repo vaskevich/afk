@@ -22,6 +22,11 @@ auth: the session id is the unguessable share link (22 chars of base62, ~131 bit
 The ingest token never appears in the dashboard URL, so sharing a trace never shares
 write access.
 
+Every route with a `:id` answers `404` with an `ErrorResponse` (`unknown session`) for
+an id that is not exactly 22 base62 characters, before anything else about the request
+is checked (the `X-Afk-Client` header, the bearer token, the session's state), and the
+same `404` for a well-formed id no session has.
+
 Every client request (create, ingest, end, qr) carries `X-Afk-Client: <name>/<semver>`,
 `bash/0.2.0` today. The server refuses clients below its minimum version, and requests
 on those four endpoints with a missing or malformed header, with `426 Upgrade
