@@ -80,8 +80,10 @@ the real `cli/afk` (`afk start`, `afk run`) as child processes against the real 
 `@hono/node-server`) and asserts the wire contract in [docs/PROTOCOL.md](PROTOCOL.md)
 end to end: session create with this machine's host info, schema-valid frames, resend
 and de-duplication across a server outage, `afk run` joining a session or starting its
-own, admission control (`afk start` waits, `afk run` falls back to no telemetry), and
-the SSE read path of an ended session.
+own, admission control (`afk start` waits, `afk run` falls back to no telemetry), the
+SSE read path of an ended session, chaining past the cap, and a delete from the
+dashboard side (the command keeps running, the client posts nothing more, the session
+reads as 404).
 
 It is the sanctioned exception to rules 6 and 8 above: it needs a real socket and real
 seconds, because the client samples at 1 Hz. Every wait is still a bounded poll with a

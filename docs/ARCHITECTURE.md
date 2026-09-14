@@ -321,6 +321,21 @@ span comes within a radius of the current cursor, falling back to the full list 
 nothing is nearby. Neither interprets raw measurements — they only render what the
 server's `AnomalyEvent`s already say.
 
+The session header's Delete control (`components/DeleteSession.tsx`, next to Share
+and the same size) asks once more on the button itself ("Really delete?"; Escape or a
+press elsewhere backs out) and then calls `DELETE /api/sessions/:id` through the
+`SessionSource` with no token, since the dashboard never has one and the link is
+enough. On success it navigates to the landing page with `?deleted=<id>`, which says so
+once; a refusal is shown under the button. It is hidden for the demo session, whose
+source refuses anyway and which the server refuses by name, and once the session has
+been deleted. A viewer whose session is deleted under them learns from the stream's
+`end` event (`StreamEndEvent.reason`, kept in `useSession` as `endReason`): the
+`StatusBanner` says "This session was deleted" in place of any verdict, and the frames
+already on the page stay, since they are all that is left. A link to a deleted
+session (a chain neighbour's `previousSessionId`, a stale bookmark) loads to "Could not
+load session: … was deleted" while the server remembers the deletion and "not found"
+after.
+
 The dashboard has a dark and a light theme. Every colour is a custom property on
 `:root` in `styles.css`, redefined under `:root[data-theme="light"]`; `theme.ts` is
 the pure model (`system` | `dark` | `light`, stored under `afk.theme` in
