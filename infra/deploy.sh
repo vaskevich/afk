@@ -35,6 +35,19 @@ ROLLOUT_POLL_ATTEMPTS=40 # 10 minutes
 VERIFY_POLL_INTERVAL_SECONDS=5
 VERIFY_POLL_ATTEMPTS=12 # 1 minute
 LOG_TAIL_LINES=50
+# How long the server may hold accepted frames in memory before writing them to
+# the bucket as a slab (AFK_S3_SLAB_FLUSH_SECONDS, default 60). Lowered here
+# because a deploy is exactly when that window costs data: Lightsail routes
+# traffic to the new container before the old one's SIGTERM flush lands, the new
+# one loads the session from the bucket without those frames, numbers its own
+# from the same index, and its slab PUT overwrites the old one under the same
+# frames/<index>.ndjson key -- silently, after the client was told the frames
+# were accepted. Measured on 2026-09-15: 106 of 1,472 frames lost across three
+# rollouts, 16 to 33 seconds each. Ten seconds shrinks the window; it does not
+# close it (the fix is the single-writer item under Storage & retention in
+# BACKLOG.md). The price is about six times as many slab objects while a session
+# is live, all of them replaced by one frames.ndjson when it ends.
+SLAB_FLUSH_SECONDS=10
 # The image tag to build and push: first CLI argument, else $IMAGE_TAG from the
 # environment, else "afk:latest". deploy.yml passes the commit SHA as the
 # argument so a pushed image can be traced back to the commit that built it.
@@ -118,7 +131,8 @@ cat >"${DEPLOYMENT_JSON}" <<EOF
         "AFK_S3_BUCKET": "${S3_BUCKET}",
         "AFK_S3_REGION": "${S3_REGION}",
         "AFK_S3_ACCESS_KEY_ID": "${S3_ACCESS_KEY_ID}",
-        "AFK_S3_SECRET_ACCESS_KEY": "${S3_SECRET_ACCESS_KEY}"
+        "AFK_S3_SECRET_ACCESS_KEY": "${S3_SECRET_ACCESS_KEY}",
+        "AFK_S3_SLAB_FLUSH_SECONDS": "${SLAB_FLUSH_SECONDS}"
       }
     }
   },
