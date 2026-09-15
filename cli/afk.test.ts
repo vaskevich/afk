@@ -398,12 +398,53 @@ describe("log", () => {
   });
 });
 
+/**
+ * A caller's locale with a comma for a decimal separator, in both shapes an
+ * environment carries one: LC_ALL, which beats everything, and LANG alone. Terminal.app
+ * sets one from the macOS region for German, French, Dutch, Spanish and Russian users,
+ * and under it awk, sysctl and ps print "52,0" instead of "52.0". The collectors must
+ * not follow it: the script runs under the C locale.
+ */
+const COMMA_DECIMAL_LOCALES: ReadonlyArray<[string, NodeJS.ProcessEnv]> = [
+  ["LC_ALL=de_DE.UTF-8", { LC_ALL: "de_DE.UTF-8" }],
+  ["LANG=de_DE.UTF-8 with LC_ALL unset", { LC_ALL: undefined, LANG: "de_DE.UTF-8" }],
+];
+
+/** A caller with no locale at all: every variable the client saves, cleared. */
+const NO_LOCALE: NodeJS.ProcessEnv = {
+  LANG: undefined,
+  LANGUAGE: undefined,
+  LC_ALL: undefined,
+  LC_COLLATE: undefined,
+  LC_CTYPE: undefined,
+  LC_MESSAGES: undefined,
+  LC_MONETARY: undefined,
+  LC_NUMERIC: undefined,
+  LC_TIME: undefined,
+};
+
 describe("collect_system", () => {
   // Uses ps, sysctl, and vm_stat, which only exist on macOS.
   it.skipIf(process.platform !== "darwin")(
     "prints a frame body that validates as SystemCollectorData",
     async () => {
       const { stdout, stderr, code } = await runBash("gather_host_info\ncollect_system");
+
+      expect(code, stderr).toBe(0);
+      const result = SystemCollectorData.safeParse(JSON.parse(stdout));
+      expect(result.success, JSON.stringify(result.success ? null : result.error.issues)).toBe(
+        true,
+      );
+    },
+  );
+
+  // Regression guard: awk's "%.1f" and sysctl's vm.loadavg followed the caller's locale,
+  // so cpu.percent and the load averages came out as `24,8` and every frame of the
+  // session was rejected as invalid JSON.
+  it.skipIf(process.platform !== "darwin").each(COMMA_DECIMAL_LOCALES)(
+    "prints decimal points, not commas, under %s",
+    async (_locale, env) => {
+      const { stdout, stderr, code } = await runBash("gather_host_info\ncollect_system", env);
 
       expect(code, stderr).toBe(0);
       const result = SystemCollectorData.safeParse(JSON.parse(stdout));
@@ -435,6 +476,28 @@ describe("collect_processes", () => {
         // comm is the path the process was execed with, which may be relative, so only
         // check that every entry has one.
         expect(top.every((entry) => entry.command.length > 0)).toBe(true);
+      }
+    },
+  );
+
+  // Regression guard: `ps -o %cpu` printed `70,0` under the caller's locale, which both
+  // made the numbers invalid JSON and threw off the column match that separates the
+  // five numeric columns from the command, so `command` swallowed the whole ps line.
+  it.skipIf(process.platform !== "darwin").each(COMMA_DECIMAL_LOCALES)(
+    "keeps the numeric columns parseable and out of the command under %s",
+    async (_locale, env) => {
+      const { stdout, stderr, code } = await runBash("collect_processes", env);
+
+      expect(code, stderr).toBe(0);
+      const result = ProcessesCollectorData.safeParse(JSON.parse(stdout));
+      expect(result.success, JSON.stringify(result.success ? null : result.error.issues)).toBe(
+        true,
+      );
+      if (result.success) {
+        // A command that still starts with the pid and ppid columns is a broken parse.
+        expect(result.data.top.every((entry) => !/^ *\d+ +\d+ +[\d.,]+ /.test(entry.command))).toBe(
+          true,
+        );
       }
     },
   );
@@ -555,6 +618,22 @@ describe("collect_agents", () => {
     expect(data).toEqual({
       available: true,
       claude: { sessions: 1, working: 1, idle: 0, waitingOnInput: 0, subagentsWorking: 0 },
+    });
+  });
+
+  // Regression guard: the collector compares transcript ages and prints counts, all of
+  // it through tools that follow the caller's locale. collectAgents validates the output
+  // against the schema, so a comma or a translated word would fail the parse.
+  it.each(COMMA_DECIMAL_LOCALES)("counts the same under %s", async (_locale, env) => {
+    const home = await makeClaudeHome([
+      { pid: LIVE_PID, status: "busy", transcriptAgeSeconds: 3, subagentAgesSeconds: [5, 900] },
+    ]);
+
+    const data = await collectAgents(home, { env });
+
+    expect(data).toEqual({
+      available: true,
+      claude: { sessions: 1, working: 1, idle: 0, waitingOnInput: 0, subagentsWorking: 1 },
     });
   });
 
@@ -4064,6 +4143,42 @@ describe("cmd_run", () => {
       expect(code, stderr).toBe(0);
       expect(stdout).toContain(callerUmask.trim());
       expect(stdout).not.toContain("0077");
+    },
+  );
+
+  // The client runs under LC_ALL=C so its collectors print machine-readable numbers;
+  // the wrapped command must not, or a command printing localized numbers or dates
+  // would change under afk.
+  it.skipIf(process.platform !== "darwin")(
+    "runs the command with the caller's locale, not the client's C",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+
+      const { code, stdout, stderr } = await runBash(`cmd_run -- sh -c 'echo "$LC_ALL"'`, {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+        LC_ALL: "de_DE.UTF-8",
+      });
+
+      expect(code, stderr).toBe(0);
+      expect(stdout).toContain("de_DE.UTF-8");
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "leaves the command with no locale set when the caller had none",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+
+      const { code, stdout, stderr } = await runBash(
+        `cmd_run -- sh -c 'echo "[\${LC_ALL-unset}] [\${LANG-unset}] [\${LC_NUMERIC-unset}]"'`,
+        { AFK_HOME: afkHome, AFK_SERVER: server.url, ...NO_LOCALE },
+      );
+
+      expect(code, stderr).toBe(0);
+      expect(stdout).toContain("[unset] [unset] [unset]");
     },
   );
 
