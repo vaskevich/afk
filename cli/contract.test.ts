@@ -43,11 +43,23 @@ const execFileAsync = promisify(execFile);
 const AFK_SCRIPT = fileURLToPath(new URL("./afk", import.meta.url));
 const LOOPBACK = "127.0.0.1";
 
-/** Each scenario runs the 1 Hz client for a few seconds; this leaves headroom for a slow machine. */
-const TEST_TIMEOUT_MS = 20_000;
+/**
+ * Each scenario runs the 1 Hz client for a few seconds; this leaves headroom for a
+ * slow machine, and for the waits below to report what they were waiting for rather
+ * than being cut short by the scenario's own deadline.
+ */
+const TEST_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 100;
-/** Deadline for a condition that needs one or two client ticks. */
-const WAIT_DEADLINE_MS = 5_000;
+/**
+ * Deadline for a condition that needs one or two client ticks. A tick is a second of
+ * sampling plus however long the collectors take, and the frame it produces waits for
+ * the sender's next second, so two ticks are three or four seconds on an idle machine
+ * and more on a busy one (this suite runs several clients at once, and CI runs it
+ * beside everything else). The deadline is generous because it costs nothing until a
+ * test is failing anyway, and a deadline tighter than the client's own cadence fails
+ * tests that are about to pass.
+ */
+const WAIT_DEADLINE_MS = 12_000;
 /** After an outage the client backs off 1 s before its first retry, then needs more ticks to catch up. */
 const CATCH_UP_DEADLINE_MS = 8_000;
 /** How long a signalled client gets to run its shutdown trap before it is killed outright. */
@@ -347,6 +359,25 @@ function exitedRunStreams(frames: StoredFrame[]): string[] {
     }
   }
   return [...last.entries()].filter(([, f]) => f.data.state === "exited").map(([s]) => s);
+}
+
+/**
+ * How many seconds each `run:` stream covers: its last frame's timestamp less its
+ * first's, which is how long the run was sampled for. Timestamps are whole seconds,
+ * so a span is a second either side of the wall time it stands for.
+ */
+function runSpanSeconds(frames: StoredFrame[]): Map<string, number> {
+  const first = new Map<string, number>();
+  const last = new Map<string, number>();
+  for (const { frame } of frames) {
+    if (frame.collector === "run") {
+      if (!first.has(frame.stream)) {
+        first.set(frame.stream, frame.timestamp);
+      }
+      last.set(frame.stream, frame.timestamp);
+    }
+  }
+  return new Map([...last].map(([stream, end]) => [stream, end - first.get(stream)!]));
 }
 
 /** Each `run:` stream's sequences in arrival order. */
@@ -773,12 +804,18 @@ describe.skipIf(process.platform !== "darwin")(
           expect(run.stderr()).not.toMatch(/server closed|rejected|no room|send failed/);
         });
         // Every run stream's sequences are contiguous from 1 (no gap, no duplicate),
-        // and each run sampled for about as long as its command ran.
+        // and each run sampled from the start of its command to the end of it. The
+        // span, not a frame count, is what says so: a run sampler sleeps a second
+        // between samples, so its frames are a second plus a sample apart and five
+        // runs sampling at once on a busy machine drift to nine frames in ten
+        // seconds without missing any of them.
         const sequences = runSequences(frames);
         expect(sequences.size).toBe(CONCURRENT_RUNS);
         for (const streamSequences of sequences.values()) {
           expect(streamSequences).toEqual(range(1, streamSequences.length));
-          expect(streamSequences.length).toBeGreaterThanOrEqual(CONCURRENT_RUN_SECONDS);
+        }
+        for (const span of runSpanSeconds(frames).values()) {
+          expect(span).toBeGreaterThanOrEqual(CONCURRENT_RUN_SECONDS - 1);
         }
         expect(systemSequences(frames)).toEqual(range(1, systemSequences(frames).length));
         expect(frames.map((f) => f.index)).toEqual(range(1, frames.length));

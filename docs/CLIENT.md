@@ -135,6 +135,18 @@ two runs started in the same instant with no session), and what holds them apart
   shared is the session on the server, whose ingest admits one batch at a time per
   session, so session-wide indexes stay distinct however many senders are in flight
   (see admission control in [ARCHITECTURE.md](ARCHITECTURE.md)).
+- **A run's sampler is stopped where it stands.** It is a background subshell the
+  main process kills the moment the command exits, and the sender can stop the run's
+  telemetry for good under it meanwhile, so neither end of a sample is a moment the
+  sampler chooses. Hence the sequence the final `exited` frame continues from
+  (`runs/<runId>/seq`) is recorded only once that sample is a file in the queue, and
+  the final frame takes the higher of that record and the highest run frame still
+  queued: a sequence reserved for a sample the kill cut short would be skipped, and a
+  gap in a stream is permanent, since the server de-duplicates per stream by sequence.
+  And a frame queued in the moment after the sender dropped the queue (`deleted`,
+  `no-room`) is cleared away by whoever is still there to do it: the sampler re-reads
+  the marker after queueing a frame, and the main process drops the queue on its way
+  out, once every sampler and the sender are stopped.
 - **Two `afk run`s started in the same instant, no session running.** Both find no
   `current`. `owner.pid` is claimed atomically (noclobber) before the create request
   (`claim_session_ownership`), so exactly one creates the session; the other waits

@@ -2373,6 +2373,35 @@ describe("chain_session", () => {
     expect(await queueFiles(oldDir)).toEqual(["0000000007-system.ndjson"]);
   });
 
+  it("goes ahead when a run frame is queued the moment after the flush drained the queue", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession");
+    const oldDir = await makeOldSession(afkHome, server.url);
+
+    const { stdout, stderr } = await runBash(
+      [
+        "sleep 30 & SENDER_PID=$!",
+        // The run sampler of an owning `afk run` writes into this queue while the
+        // system sampler chains, so a frame can land between the flush and the check
+        // that the flush emptied the queue. Wrapping flush_queue puts one exactly there.
+        'eval "flushed_queue() $(declare -f flush_queue | tail -n +2)"',
+        'flush_queue() { flushed_queue; printf "RUN\\n" > "$SESSION_DIR/queue/0000000003-run:ab12cd34.ndjson"; }',
+        'chain_session > "$AFK_HOME/chain.out"; printf "RC=%d\\n" "$?"',
+        'printf "SESSION_ID=%s\\n" "$SESSION_ID"',
+        'kill "$SENDER_PID"; wait "$SENDER_PID" 2>/dev/null',
+      ].join("\n"),
+      sessionEnv(afkHome, server.url),
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0", SESSION_ID: "newSession" });
+    expect(stderr).not.toContain("could not send");
+    // The frame followed the run into the successor, as run frames do.
+    expect(await queueFiles(oldDir)).toEqual([]);
+    expect(await queueFiles(join(afkHome, "sessions", "newSession"))).toEqual([
+      "0000000003-run:ab12cd34.ndjson",
+    ]);
+  });
+
   it("goes ahead when the old session already answers 410, since nothing more can reach it", async () => {
     const afkHome = await makeTempDir();
     const server = await chainServer("oldSession", "newSession", 410);
@@ -3927,6 +3956,95 @@ describe("collect_run", () => {
 
     const parsed = RunCollectorData.parse(JSON.parse(stdout));
     expect(parsed.output, stderr).toEqual({ flavor: "volume", stdoutBytes: 21, stderrBytes: 0 });
+  });
+});
+
+/**
+ * A collect_run that takes a whole second, so a test can stop the sampler, or drop its
+ * queue under it, at a chosen point of a sample instead of racing the real collectors.
+ * It answers like the real one: state from $1, exit code from $2.
+ */
+const SLOW_COLLECT_RUN = `collect_run() {
+  sleep 1
+  printf '{"command":"c","pid":1,"state":"%s","exitCode":%s,"elapsedSeconds":1,"process":{"cpuPercent":0,"rssBytes":0},"output":{"flavor":"volume","stdoutBytes":0,"stderrBytes":0}}' "$1" "\${2:-null}"
+}`;
+
+/**
+ * The run sampler and the main process are separate processes sharing one sequence
+ * counter (runs/<runId>/seq) and one queue, and neither of the moments below is one
+ * the sampler chooses: the command exits when it exits, and the sender learns the
+ * session has no room for the run when the server answers.
+ */
+describe("run_sampler_loop interrupted mid-sample", () => {
+  const SAMPLER_TIMEOUT_MS = 20_000;
+
+  /** A run directory with a queue and a pid, which is all the sampler needs to start. */
+  async function makeSamplerRun(): Promise<{ afkHome: string; runDir: string }> {
+    const afkHome = await makeTempDir();
+    const runDir = join(afkHome, "sessions", "abc123", "runs", "ab12cd34");
+    await mkdir(join(runDir, "queue"), { recursive: true });
+    await writeFile(join(runDir, "pid"), `${process.pid}\n`);
+    return { afkHome, runDir };
+  }
+
+  function samplerEnv(afkHome: string, runDir: string): NodeJS.ProcessEnv {
+    return {
+      AFK_HOME: afkHome,
+      SESSION_ID: "abc123",
+      SESSION_DIR: runDir,
+      SESSION_ROLE: "joiner",
+      RUN_DIR: runDir,
+      RUN_ID: "ab12cd34",
+      RUN_STARTED: "1",
+      RUN_COMMAND_JSON: "c",
+      EXIT_CODE: "0",
+    };
+  }
+
+  it("leaves no gap in the run's sequences when the command exits while it is sampling", async () => {
+    const { afkHome, runDir } = await makeSamplerRun();
+
+    // The sampler queues its first frame a second in and starts its second sample at
+    // 2 s; the command exiting at 2.5 s kills it in the middle of that one.
+    const { code, stderr } = await runBash(
+      [
+        SLOW_COLLECT_RUN,
+        "run_sampler_loop & SAMPLER=$!",
+        "sleep 2.5",
+        'stop_background_job "$SAMPLER"',
+        "emit_final_run_frame",
+      ].join("\n"),
+      samplerEnv(afkHome, runDir),
+      SAMPLER_TIMEOUT_MS,
+    );
+
+    expect(code, stderr).toBe(0);
+    const frames = await queuedFrames(runDir);
+    expect(frames.map((frame) => frame.sequence)).toEqual([1, 2]);
+    expect(frames.at(-1)).toMatchObject({ collector: "run", data: { state: "exited" } });
+  });
+
+  it("keeps no frame in the dropped queue of a run the session had no room for", async () => {
+    const { afkHome, runDir } = await makeSamplerRun();
+
+    // The sender's 422 lands at 2.5 s, in the middle of the sampler's second sample,
+    // so the frame that sample becomes is queued after the queue was dropped.
+    const { code, stderr } = await runBash(
+      [
+        SLOW_COLLECT_RUN,
+        "run_sampler_loop & SAMPLER=$!",
+        "sleep 2.5",
+        `session_no_room '{"details":{"limit":4}}'`,
+        "sleep 1.5",
+        'stop_background_job "$SAMPLER"',
+      ].join("\n"),
+      samplerEnv(afkHome, runDir),
+      SAMPLER_TIMEOUT_MS,
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(runDir)).toEqual([]);
+    expect(await exists(join(runDir, "no-room"))).toBe(true);
   });
 });
 

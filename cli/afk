@@ -999,10 +999,15 @@ collect_run() { # state [exitCode] [output-tail-json]
     "$RUN_COMMAND_JSON" "$pid" "$state" "$exit_code" "$elapsed" "$cpu" $((rss * 1024)) "$out" "$err" "$tail"
 }
 
-# Samples the run every second until killed. Keeps its sequence in a file so the
-# final "exited" frame, emitted by the main process, can continue the count. In an
-# `afk run` that owns its session (SESSION_CHAINING) the frames go to whichever
-# session `current` names, so a chain by the system sampler carries the run along.
+# Samples the run every second until killed. Keeps the sequence of the frames it has
+# queued in a file so the final "exited" frame, emitted by the main process, can
+# continue the count; the number is written after the frame is in the queue, never
+# before, because the main process kills this loop where it stands the moment the
+# command exits. A sequence recorded for a sample that never became a frame would
+# leave a gap in the run's stream, and a gap is permanent: the server de-duplicates
+# per stream by sequence and nothing ever fills it. In an `afk run` that owns its
+# session (SESSION_CHAINING) the frames go to whichever session `current` names, so a
+# chain by the system sampler carries the run along.
 run_sampler_loop() {
   local seq=0 data
   while [ ! -s "$RUN_DIR/pid" ]; do
@@ -1013,14 +1018,44 @@ run_sampler_loop() {
   # itself is not touched.
   while ! run_telemetry_stopped; do
     seq=$((seq + 1))
-    echo "$seq" > "$RUN_DIR/seq"
     data=$(collect_run running)
     if [ "${SESSION_CHAINING:-0}" = 1 ]; then
       follow_current_session || true
     fi
     emit_frame "run:$RUN_ID" run "$seq" "$data"
+    echo "$seq" > "$RUN_DIR/seq"
+    # The sender can have stopped this run's telemetry for good while the sample was
+    # being taken (session_deleted, session_no_room): it dropped the queue before this
+    # frame was in it, so this frame is for this loop to clear away, or it would
+    # outlive the run in a queue no sender will ever look at again.
+    if run_telemetry_stopped; then
+      drop_queue
+      break
+    fi
     sleep "$SAMPLE_INTERVAL_SECONDS"
   done
+}
+
+# The highest sequence this run has produced: what the sampler recorded of the frames
+# it queued, and anything higher still waiting in the queue. Both are consulted
+# because the sampler is killed where it stands when the command exits, which can be
+# between queueing a frame and recording it; the higher of the two continues the
+# stream whichever side of that the kill landed on, with no gap and no sequence used
+# twice.
+last_run_sequence() {
+  local last file name seq
+  last=$(cat "$RUN_DIR/seq" 2>/dev/null)
+  case "$last" in
+    ''|*[!0-9]*) last=0 ;;
+  esac
+  for file in "$SESSION_DIR"/queue/*-"run:$RUN_ID.ndjson"; do
+    [ -e "$file" ] || continue
+    name=$(basename "$file")
+    # Queue names are zero padded, which bash would otherwise read as octal.
+    seq=$((10#${name%%-*}))
+    [ "$seq" -gt "$last" ] && last=$seq
+  done
+  echo "$last"
 }
 
 # The run's last frame: `exited`, with the command's exit code and, only on failure,
@@ -1033,7 +1068,7 @@ emit_final_run_frame() {
   local seq
   [ "$FINAL_RUN_FRAME_EMITTED" = 0 ] || return 0
   FINAL_RUN_FRAME_EMITTED=1
-  seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
+  seq=$(( $(last_run_sequence) + 1 ))
   emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE" "$(run_output_tail "$EXIT_CODE")")"
   remove_run_captures
 }
@@ -1286,18 +1321,22 @@ chain_before_cap_seconds() {
 # session's sender running again, when the flush did not get through or the server
 # would not create the successor; the caller retries.
 chain_session() {
-  local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_cap=$MAX_DURATION_SECONDS rc f
+  local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_cap=$MAX_DURATION_SECONDS flushed rc f
   stop_background_job "$SENDER_PID"
-  flush_queue
+  flush_queue; flushed=$?
   # A session deleted under us (the flush got a 404) has no successor: the sampler
   # loop stops on the marker, and a create naming it would only be refused.
   if session_is_deleted; then
     return 1
   fi
-  # A 410 means the old session is already over on the server (it hit the cap, or its
-  # frame limit, or was ended after a long silence); nothing queued for it can be sent
-  # any more, and the server still links a successor to an ended session.
-  if [ "$(queue_count)" -gt 0 ] && [ "$HTTP_STATUS" != 410 ]; then
+  # Whether the flush got through, not whether the queue is empty now: the run sampler
+  # of an owning `afk run` writes into this queue too, and a frame of its own that
+  # landed the moment the last batch went out is no reason to put the chain off (it
+  # moves to the successor below with any other run frame). A 410 means the old
+  # session is already over on the server (it hit the cap, or its frame limit, or was
+  # ended after a long silence); nothing queued for it can be sent any more, and the
+  # server still links a successor to an ended session.
+  if [ "$flushed" != 0 ] && [ "$HTTP_STATUS" != 410 ]; then
     log "could not send the last ${old_cap}s session's queue yet; will try again"
     sender_loop &
     SENDER_PID=$!
@@ -1648,6 +1687,16 @@ dropped_bytes() { # session-dir
   awk '{ b += $2 } END { print b + 0 }' "$1/$DROPPED_RECORD_NAME"
 }
 
+# Everything queued for a session whose telemetry is over, and the scratch files of
+# the request that ended it: there is nothing left to send any of it to. Both ways
+# that happens (session_deleted, session_no_room) drop the queue, and so do the run
+# sampler and the main process afterwards, because either can queue a frame between
+# the check that found the telemetry still live and the drop.
+drop_queue() {
+  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
+    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+}
+
 # The session was deleted on the server (a 404 on ingest or end; see docs/PROTOCOL.md,
 # "Delete"): telemetry stops for good. What is queued is dropped, since there is
 # nothing to send it to; a `deleted` marker next to `stop` tells the sampler loops
@@ -1666,8 +1715,7 @@ session_deleted() {
     log "session $SESSION_ID was deleted on the server; telemetry stopped"
   fi
   touch "$SESSION_DIR/stop"
-  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
-    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+  drop_queue
 }
 
 # The server had no room for this run's stream (a 422 on a joiner's first batch; see
@@ -1685,8 +1733,7 @@ session_no_room() { # response-json
   local limit
   limit=$(json_get_number "$1" limit)
   touch "$SESSION_DIR/$NO_ROOM_MARKER_NAME" "$SESSION_DIR/stop"
-  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
-    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+  drop_queue
   log "session $SESSION_ID has no room for another run (the server allows ${limit:-?} streams per session); running without telemetry"
 }
 # A run whose telemetry is over while its command goes on: the session was deleted, or
@@ -1754,6 +1801,10 @@ adopt_interrupted_frames() {
   done
 }
 
+# Returns 0 once the queue is empty and 1 when a send failed and left frames behind,
+# which is not the same question as whether the queue is empty afterwards: a sampler
+# writing into the same queue (the run sampler of an owning `afk run`) can queue a
+# frame the moment the last batch went out. The caller that cares is chain_session.
 flush_queue() {
   local rc
   adopt_interrupted_frames
@@ -1762,8 +1813,9 @@ flush_queue() {
     if [ "$rc" = 4 ]; then
       session_deleted
     fi
-    [ "$rc" = 0 ] || break
+    [ "$rc" = 0 ] || return 1
   done
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2231,6 +2283,9 @@ cmd_run() {
   # flushed, or ended.
   if run_telemetry_stopped; then
     stop_background_job "$SENDER_PID"
+    # The samplers and the sender are all stopped now, so this is the last word on
+    # anything the run sampler queued after the queue was dropped.
+    drop_queue
     remove_run_captures
     if [ "$owner" = 1 ]; then
       discard_deleted_session
