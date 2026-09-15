@@ -395,6 +395,19 @@ a.icon-button:focus-visible {
   margin: 0 0 12px;
 }
 
+/* The privacy statement: one line per thing sent, the cadence or place in the text colour. */
+.landing-more .sent {
+  margin: 0 0 12px;
+  padding-left: 18px;
+}
+.landing-more .sent li {
+  margin: 0 0 6px;
+}
+.landing-more .sent strong {
+  font-weight: 600;
+  color: var(--fg);
+}
+
 .landing-more h2 {
   margin: 16px 0 6px;
   font-family: var(--font-mono);

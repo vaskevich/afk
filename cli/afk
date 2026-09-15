@@ -65,6 +65,8 @@
 #   AFK_HOME             state directory, default ~/.afk
 #   AFK_SPOOL_MAX_BYTES  cap on queued frames on disk, default 50 MiB; oldest dropped past it
 #   AFK_NO_QR            set to 1 to never print the QR code (same as --no-qr)
+#   AFK_NO_AGENTS        set to 1 to skip the agents collector: nothing under ~/.claude
+#                        or ~/.codex is looked at and no agent counts are sent
 #   NO_COLOR             set to anything and afk's own lines on a terminal keep the
 #                        plain `afk: ` prefix instead of the coloured `afk ▸` tag
 #   AFK_NO_UPDATE_PROMPT set to 1 to never be asked to update (the notice still prints)
@@ -622,7 +624,12 @@ agents_available() { claude_sessions_available || codex_available; }
 # The agents stream is worth a frame when a tool is here, and once per session
 # (sequence still 0; chaining resets it) when none is, so the dashboard can say "no
 # Claude Code or Codex found" without a frame every AGENTS_INTERVAL_SECONDS saying so.
-agents_frame_due() { agents_available || [ "$SEQ_AGENTS" -eq 0 ]; }
+# AFK_NO_AGENTS=1 is the privacy switch: nothing under ~/.claude or ~/.codex is
+# looked at and the stream never gets a frame, not even the unavailable one.
+agents_frame_due() {
+  [ "${AFK_NO_AGENTS:-0}" != 1 ] || return 1
+  agents_available || [ "$SEQ_AGENTS" -eq 0 ]
+}
 
 # The `,"claude":{...}` block, or nothing when Claude Code is not here.
 collect_claude_agents() {

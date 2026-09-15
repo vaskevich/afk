@@ -1,10 +1,15 @@
-import { ServiceStats } from "@afk/shared";
+import {
+  PROCESSES_TOP_MAX,
+  RUN_TAIL_MAX_LINES,
+  RUN_TAIL_MAX_LINE_CHARS,
+  ServiceStats,
+} from "@afk/shared";
 import { useQuery } from "@tanstack/react-query";
 import { Link, getRouteApi } from "@tanstack/react-router";
 import { ThemeToggle } from "../components/ThemeToggle.tsx";
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { AfkMark } from "../components/AfkMark.tsx";
-import { GitHubLink } from "../components/GitHubLink.tsx";
+import { GITHUB_URL, GitHubLink } from "../components/GitHubLink.tsx";
 import { formatDuration } from "../format.ts";
 
 /** How often the landing page refreshes the service numbers. */
@@ -13,6 +18,9 @@ const STATS_REFRESH_MS = 10_000;
 const COPIED_FEEDBACK_MS = 1_500;
 /** Sessions are deleted this long after they end (AFK_RETENTION_DAYS on the server). */
 const RETENTION_DAYS = 7;
+/** The hosted instance and where it runs (infra/variables.tf), named in the privacy statement. */
+const HOSTED_HOST = "afk.osv.im";
+const HOSTED_REGION = "us-west-2";
 /** Remembers whether the reader opened the details below the fold; absent means closed. */
 const DETAILS_STORAGE_KEY = "afk.landing.details";
 const DETAILS_OPEN_VALUE = "open";
@@ -219,17 +227,78 @@ export function LandingPage() {
 
       <details className="landing-more" open={detailsOpen} onToggle={onDetailsToggle}>
         <summary>What leaves your machine?</summary>
-        {/* TODO(copy): draft, the owner will refine */}
         <p>
-          Once a second: cpu, load averages, and memory numbers (pressure level, free, wired,
-          compressed, swap). Every five seconds: the busiest processes, as pid, cpu, memory, and
-          executable path. For a wrapped command: the command line as you typed it, how long it has
-          run, how many bytes it wrote, and its exit code, never the output itself. At the start:
-          host name, macOS version, core count, and memory size. Anyone with the link can see it,
-          and anyone with the link can delete it (the Delete button on the session page, or{" "}
-          <code>afk delete</code> on the machine); otherwise sessions are deleted {RETENTION_DAYS}{" "}
-          days after they end.
+          Everything below and nothing else: no file contents, no environment variables, no process
+          arguments, no agent transcripts, and no output of a command that succeeds. The{" "}
+          <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
+            client
+          </a>{" "}
+          is one bash script you can read first.
         </p>
+        <ul className="sent">
+          <li>
+            <strong>At the start:</strong> host name, macOS version, core count, memory size, and
+            the afk client version.
+          </li>
+          <li>
+            <strong>Once a second:</strong> cpu percent, load averages, the memory pressure level,
+            and memory numbers (free, active, inactive, wired, compressed, swap used and total).
+          </li>
+          <li>
+            <strong>Every five seconds:</strong> the {PROCESSES_TOP_MAX} busiest processes, each as
+            pid, parent pid, cpu and memory percent, resident size, and the executable&apos;s full
+            path (never its arguments), plus how many processes there were.
+          </li>
+          <li>
+            <strong>Every five seconds:</strong> how many Claude Code and Codex sessions are
+            running, working, waiting on you, or idle, and how many subagents are working. Counts
+            only: no session names, directories, or transcript contents.{" "}
+            <code>AFK_NO_AGENTS=1</code> turns this off.
+          </li>
+          <li>
+            <strong>
+              For <code>afk run</code>:
+            </strong>{" "}
+            the command line as typed, with a URL&apos;s user:password, the value of a{" "}
+            <code>KEY=value</code> argument named like a secret, and the value after{" "}
+            <code>--password</code>, <code>--token</code>, <code>-p</code> and the like replaced by{" "}
+            <code>***</code> before it is sent; then its pid, elapsed time, cpu and memory, how many
+            bytes it wrote to stdout and stderr, and its exit code.
+          </li>
+          <li>
+            <strong>When a wrapped command fails:</strong> the last {RUN_TAIL_MAX_LINES} lines of
+            its stdout and stderr ({RUN_TAIL_MAX_LINE_CHARS} characters each), so the dashboard can
+            say why. A command that exits 0 sends no output. <code>AFK_RUN_TAIL_LINES=0</code> sends
+            none at all.
+          </li>
+        </ul>
+        <h2>Where it goes</h2>
+        <ul className="sent">
+          <li>
+            To the server this page came from. <code>{HOSTED_HOST}</code> is one person&apos;s
+            server in AWS {HOSTED_REGION}, run best effort with no SLA; a self-hosted server is
+            whoever runs it, and <code>AFK_SERVER</code> points the client at one.
+          </li>
+          <li>
+            Kept for {RETENTION_DAYS} days after the session ends (<code>AFK_RETENTION_DAYS</code>{" "}
+            on your own server), then deleted.
+          </li>
+          <li>
+            Readable by anyone holding the link. There are no accounts: the session id is the
+            secret, and the client&apos;s write token is never in the URL.
+          </li>
+          <li>
+            Deletable by anyone holding the link, at once and with everything it recorded: the
+            Delete control on the session page, or <code>afk delete</code> on the machine.
+          </li>
+          <li>
+            Questions and takedowns:{" "}
+            <a href={`${GITHUB_URL}/issues`} target="_blank" rel="noopener noreferrer">
+              open an issue
+            </a>
+            .
+          </li>
+        </ul>
         <h2>The demo</h2>
         <p>
           Fifteen recorded minutes on one machine: a three-minute cpu burn with memory pressure

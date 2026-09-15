@@ -30,7 +30,8 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   than Claude Code's: it is a turn in progress whose rollout has been quiet for 120 s,
   since Codex writes no approval or question event. A machine with neither
   `~/.claude/sessions` nor `~/.codex/thread-writer-locks` sends one `available: false`
-  frame per session and nothing more on that stream.
+  frame per session and nothing more on that stream. `AFK_NO_AGENTS=1` skips the
+  collector altogether: neither directory is looked at and the stream gets no frame.
 - Spool to disk, retry forever with backoff, never lose or duplicate a frame. Without
   `flock` on macOS the only safe handoff between a sampler and a sender is one file
   per frame and an atomic rename; a shared append-only file races.

@@ -17,6 +17,44 @@ Read it first if you like: it is short, and so is [the client](cli/afk). A self-
 server serves the same installer at its own `/install`, and a client installed from it
 defaults to that server; set `AFK_SERVER` to point an existing client elsewhere.
 
+## What leaves your machine
+
+Everything below and nothing else: no file contents, no environment variables, no
+process arguments, no agent transcripts, and no output of a command that succeeds.
+The wire format is spelled out field by field in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+- **At the start:** host name, macOS version, core count, memory size, and the afk
+  client version.
+- **Once a second:** cpu percent, load averages, the memory pressure level, and memory
+  numbers (free, active, inactive, wired, compressed, swap used and total).
+- **Every five seconds:** the 10 busiest processes, each as pid, parent pid, cpu and
+  memory percent, resident size, and the executable's full path (never its arguments),
+  plus how many processes there were.
+- **Every five seconds:** how many Claude Code and Codex sessions are running, working,
+  waiting on you, or idle, and how many subagents are working. Counts only: no session
+  names, directories, or transcript contents. `AFK_NO_AGENTS=1` turns this off.
+- **For `afk run`:** the command line as typed, with a URL's user:password, the value of
+  a `KEY=value` argument named like a secret (`TOKEN`, `SECRET`, `PASSWORD`, `KEY`,
+  `AUTH`), and the value after `--password`, `--token`, `-p` and the like replaced by
+  `***` before it is sent; then its pid, elapsed time, cpu and memory, how many bytes it
+  wrote to stdout and stderr, and its exit code.
+- **When a wrapped command fails:** the last 20 lines of its stdout and stderr (200
+  characters each), so the dashboard can say why. A command that exits 0 sends no
+  output. `AFK_RUN_TAIL_LINES=0` sends none at all.
+
+Where it goes:
+
+- To the server the client points at. `afk.osv.im` is one person's server in AWS
+  us-west-2, run best effort with no SLA; a self-hosted server is whoever runs it, and
+  `AFK_SERVER` points the client at one.
+- Kept for 7 days after the session ends (`AFK_RETENTION_DAYS` on your own server), then
+  deleted.
+- Readable by anyone holding the link. There are no accounts: the session id is the
+  secret, and the client's write token is never in the URL.
+- Deletable by anyone holding the link, at once and with everything it recorded: the
+  Delete control on the session page, or `afk delete` on the machine.
+- Questions and takedowns: [open an issue](https://github.com/vaskevich/afk/issues).
+
 Status: early prototype. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 (every server environment variable), [docs/EXTENDING.md](docs/EXTENDING.md), and

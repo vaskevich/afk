@@ -39,6 +39,46 @@ describe("LandingPage header", () => {
   });
 });
 
+describe("LandingPage privacy statement", () => {
+  /** The text of the "What leaves your machine?" disclosure. */
+  async function statementText(): Promise<string> {
+    const summary = await screen.findByText("What leaves your machine?");
+    return summary.closest("details")!.textContent ?? "";
+  }
+
+  it("names the failed command's output tail and how to turn it off", async () => {
+    withoutStats();
+
+    await renderOnSessionRoute(null, "/", <LandingPage />);
+
+    const text = await statementText();
+    expect(text).toContain("the last 20 lines of its stdout and stderr");
+    expect(text).toContain("AFK_RUN_TAIL_LINES=0");
+  });
+
+  it("names the full executable paths of the busiest processes", async () => {
+    withoutStats();
+
+    await renderOnSessionRoute(null, "/", <LandingPage />);
+
+    const text = await statementText();
+    expect(text).toContain("10 busiest processes");
+    expect(text).toContain("full path");
+  });
+
+  it("says where a session goes, how long it is kept, and who can read and delete it", async () => {
+    withoutStats();
+
+    await renderOnSessionRoute(null, "/", <LandingPage />);
+
+    const text = await statementText();
+    expect(text).toContain("afk.osv.im");
+    expect(text).toContain("7 days after the session ends");
+    expect(text).toContain("anyone holding the link");
+    expect(text).toContain("afk delete");
+  });
+});
+
 describe("LandingPage after a delete", () => {
   it("says which session was deleted when sent here with ?deleted=", async () => {
     withoutStats();

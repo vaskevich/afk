@@ -1085,6 +1085,27 @@ describe("sample_once", () => {
   );
 
   it.skipIf(process.platform !== "darwin")(
+    "emits no agents frame at all with AFK_NO_AGENTS=1, even with Claude Code here",
+    async () => {
+      const sessionDir = await makeTempDir();
+      await mkdir(join(sessionDir, "queue"));
+      const home = await makeClaudeHome([
+        { pid: process.pid, status: "busy", transcriptAgeSeconds: 1 },
+      ]);
+
+      const { code, stderr } = await runBash(
+        "gather_host_info\nAGENTS_INTERVAL_SECONDS=1\nsample_once; sample_once; sample_once",
+        { SESSION_DIR: sessionDir, HOME: home, AFK_NO_AGENTS: "1" },
+      );
+
+      expect(code, stderr).toBe(0);
+      const frames = await queuedFrames(sessionDir);
+      expect(frames.filter((frame) => frame.stream === "agents")).toEqual([]);
+      expect(frames.filter((frame) => frame.stream === "system")).toHaveLength(3);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
     "emits a processes frame on the first tick and then only every PROCESSES_INTERVAL_SECONDS",
     async () => {
       const sessionDir = await makeTempDir();

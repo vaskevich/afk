@@ -537,7 +537,9 @@ subagent transcripts in this layout, so `codex.subagentsWorking` is always `0`.
 When neither directory is there the client emits the `available: false` frame once,
 at the start of the session (or of each chained successor), and nothing more on the
 stream; the dashboard can say "no Claude Code or Codex found" without a frame every
-5 s repeating it.
+5 s repeating it. With `AFK_NO_AGENTS=1` in the client's environment the collector
+never runs: nothing under either directory is looked at and the stream gets no frame
+at all, not even that one, so the dashboard shows no agents row.
 
 ## Reading a session
 
