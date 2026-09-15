@@ -13,6 +13,7 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -77,10 +78,26 @@ const CHAIN_TEST_TIMEOUT_MS = 40_000;
  * session to collect frames, be deleted under it, and still have lines left to print.
  */
 const DELETED_RUN_SECONDS = 4;
+/** How many `afk run`s join one `afk start` at once in the concurrency scenario. */
+const CONCURRENT_RUNS = 5;
+/** Each of them prints a line a second for this long. */
+const CONCURRENT_RUN_SECONDS = 10;
+/** A run joined to an owning `afk run` outlives the owner's command (OWNED_RUN_SECONDS) by this much. */
+const JOINED_RUN_SECONDS = 5;
+/** The concurrency scenarios run their commands for up to ten seconds, plus startup and shutdown. */
+const CONCURRENT_TEST_TIMEOUT_MS = 40_000;
+/** The streams `afk start` opens on its own: system, processes, agents. */
+const FIXED_STREAMS = 3;
 
 const SINGLE_SESSION_LIMITS: AdmissionLimits = {
   maxActiveSessions: 1,
   maxStreamsPerSession: DEFAULT_LIMITS.maxStreamsPerSession,
+  maxFramesPerSession: DEFAULT_LIMITS.maxFramesPerSession,
+};
+/** Room for the owner's streams and exactly one run. */
+const ONE_RUN_LIMITS: AdmissionLimits = {
+  ...DEFAULT_LIMITS,
+  maxStreamsPerSession: FIXED_STREAMS + 1,
 };
 
 /** The dashboard URL the client prints; the capture group is the session id. */
@@ -323,6 +340,33 @@ function finalRunFrame(frames: StoredFrame[]): (StoredFrame & { frame: RunFrame 
   );
   const last = runFrames.at(-1);
   return last?.frame.data.state === "exited" ? last : undefined;
+}
+
+/** The `run:` streams whose last frame says the command exited. */
+function exitedRunStreams(frames: StoredFrame[]): string[] {
+  const last = new Map<string, RunFrame>();
+  for (const { frame } of frames) {
+    if (frame.collector === "run") {
+      last.set(frame.stream, frame);
+    }
+  }
+  return [...last.entries()].filter(([, f]) => f.data.state === "exited").map(([s]) => s);
+}
+
+/** Each `run:` stream's sequences in arrival order. */
+function runSequences(frames: StoredFrame[]): Map<string, number[]> {
+  const sequences = new Map<string, number[]>();
+  for (const { frame } of frames) {
+    if (frame.collector === "run") {
+      sequences.set(frame.stream, [...(sequences.get(frame.stream) ?? []), frame.sequence]);
+    }
+  }
+  return sequences;
+}
+
+/** A shell command that prints `run <n> line <i>` once a second for `seconds` seconds. */
+function countingCommand(seconds: number, n: number): string {
+  return `i=1; while [ $i -le ${seconds} ]; do echo "run ${n} line $i"; sleep 1; i=$((i + 1)); done`;
 }
 
 async function waitForSystemFrames(sessionId: string, count: number): Promise<FramesResponse> {
@@ -699,6 +743,194 @@ describe.skipIf(process.platform !== "darwin")(
       const summary = await fetch(`${server.url}/api/sessions/${sessionId}`);
       expect(summary.status).toBe(404);
       expect(await summary.json()).toMatchObject({ details: { reason: "deleted" } });
+      expect(await readStats()).toMatchObject({ activeSessions: 0 });
+      expect(await readdir(join(afkHome, "sessions", sessionId, "queue"))).toEqual([]);
+    });
+
+    it(
+      "five afk runs joined to one afk start each land a contiguous run stream, leave the system stream whole, and empty their queues",
+      { timeout: CONCURRENT_TEST_TIMEOUT_MS },
+      async () => {
+        const { proc, sessionId } = await startSession(afkHome);
+        await waitForSystemFrames(sessionId, MIN_SYSTEM_FRAMES);
+
+        const runs = Array.from({ length: CONCURRENT_RUNS }, (_, i) =>
+          spawnAfk(["run", "--", "sh", "-c", countingCommand(CONCURRENT_RUN_SECONDS, i)], afkHome),
+        );
+        const exitCodes = await Promise.all(runs.map((run) => run.exited));
+        const { frames } = await waitFor(
+          `${CONCURRENT_RUNS} exited run frames`,
+          async () => {
+            const response = await readFrames(sessionId);
+            return exitedRunStreams(response.frames).length === CONCURRENT_RUNS
+              ? response
+              : undefined;
+          },
+          CATCH_UP_DEADLINE_MS,
+        );
+        proc.child.kill("SIGTERM");
+        await proc.exited;
+
+        expect(exitCodes).toEqual(runs.map(() => 0));
+        runs.forEach((run, i) => {
+          expect(run.stdout()).toContain(`run ${i} line ${CONCURRENT_RUN_SECONDS}`);
+          expect(run.stderr()).not.toMatch(/server closed|rejected|no room|send failed/);
+        });
+        // Every run stream's sequences are contiguous from 1 (no gap, no duplicate),
+        // and each run sampled for about as long as its command ran.
+        const sequences = runSequences(frames);
+        expect(sequences.size).toBe(CONCURRENT_RUNS);
+        for (const streamSequences of sequences.values()) {
+          expect(streamSequences).toEqual(range(1, streamSequences.length));
+          expect(streamSequences.length).toBeGreaterThanOrEqual(CONCURRENT_RUN_SECONDS);
+        }
+        expect(systemSequences(frames)).toEqual(range(1, systemSequences(frames).length));
+        expect(frames.map((f) => f.index)).toEqual(range(1, frames.length));
+        expect(await readSummary(sessionId)).toMatchObject({
+          status: "ended",
+          streamCount: new Set(frames.map((f) => f.frame.stream)).size,
+        });
+        expect(await readdir(join(afkHome, "sessions", sessionId, "queue"))).toEqual([]);
+        for (const runId of await readdir(join(afkHome, "sessions", sessionId, "runs"))) {
+          const runDir = join(afkHome, "sessions", sessionId, "runs", runId);
+          expect(await readdir(join(runDir, "queue"))).toEqual([]);
+          expect(await readdir(runDir)).not.toContain("rejected");
+        }
+      },
+    );
+
+    it(
+      "an afk run that owns its session keeps it open for the runs that joined it until they finish, then ends it",
+      { timeout: CONCURRENT_TEST_TIMEOUT_MS },
+      async () => {
+        const owner = spawnAfk(["run", "--", "sleep", String(OWNED_RUN_SECONDS)], afkHome);
+        const sessionId = await dashboardSessionId(owner);
+        const joiners = [0, 1].map((i) =>
+          spawnAfk(["run", "--", "sh", "-c", countingCommand(JOINED_RUN_SECONDS, i)], afkHome),
+        );
+
+        const joinerExits = await Promise.all(joiners.map((run) => run.exited));
+        const joinersDoneAt = Date.now();
+        const ownerExit = await owner.exited;
+        const ownerDoneAt = Date.now();
+
+        expect(joinerExits).toEqual([0, 0]);
+        expect(ownerExit).toBe(0);
+        for (const joiner of joiners) {
+          expect(joiner.stderr()).toContain(`joining session ${sessionId}`);
+          expect(joiner.stderr()).not.toMatch(/server closed the session|send failed/);
+        }
+        expect(owner.stderr()).toContain(
+          `2 joined afk run(s) still going; keeping session ${sessionId} open until they finish`,
+        );
+        // The owner's command was over long before; the owner itself outlived the joiners.
+        expect(ownerDoneAt).toBeGreaterThanOrEqual(joinersDoneAt);
+        const { session, frames } = await readFrames(sessionId);
+        expect(session).toMatchObject({ sessionId, status: "ended" });
+        // All three runs exited inside the one session, each stream contiguous.
+        expect(exitedRunStreams(frames)).toHaveLength(3);
+        for (const streamSequences of runSequences(frames).values()) {
+          expect(streamSequences).toEqual(range(1, streamSequences.length));
+        }
+        expect(systemSequences(frames).length).toBeGreaterThanOrEqual(JOINED_RUN_SECONDS);
+        expect(await readStats()).toMatchObject({ activeSessions: 0 });
+        expect(await readdir(join(afkHome, "sessions", sessionId, "queue"))).toEqual([]);
+        // The owner's own run has no queue of its own (it spools with the session); the joiners do.
+        const runDirs = await readdir(join(afkHome, "sessions", sessionId, "runs"));
+        const joinerQueues = (
+          await Promise.all(
+            runDirs.map((runId) => join(afkHome, "sessions", sessionId, "runs", runId, "queue")),
+          )
+        ).filter((queue) => existsSync(queue));
+        expect(joinerQueues).toHaveLength(2);
+        for (const queue of joinerQueues) {
+          expect(await readdir(queue)).toEqual([]);
+        }
+      },
+    );
+
+    it(
+      "at the stream cap, of two afk runs joining at once the one past the cap runs without telemetry and the rest of the session is untouched",
+      { timeout: CONCURRENT_TEST_TIMEOUT_MS },
+      async () => {
+        await server.close();
+        server = await startServer(ONE_RUN_LIMITS, webDistDir);
+        const { proc, sessionId } = await startSession(afkHome);
+        // The owner's three streams are what the cap leaves one slot beside.
+        await waitUntil(
+          "the owner's fixed streams to land",
+          async () => (await readSummary(sessionId)).streamCount === FIXED_STREAMS,
+        );
+
+        // Both check the stream count before either's first batch lands, so both join
+        // and the server turns the second first batch away.
+        const runs = [0, 1].map((i) =>
+          spawnAfk(["run", "--", "sh", "-c", countingCommand(JOINED_RUN_SECONDS, i)], afkHome),
+        );
+        const exitCodes = await Promise.all(runs.map((run) => run.exited));
+        const before = await readFrames(sessionId);
+        await waitForSystemFrames(sessionId, systemSequences(before.frames).length + 2);
+        proc.child.kill("SIGTERM");
+        await proc.exited;
+
+        expect(exitCodes).toEqual([0, 0]);
+        runs.forEach((run, i) => {
+          expect(run.stdout()).toContain(`run ${i} line ${JOINED_RUN_SECONDS}`);
+          expect(run.stderr()).toContain(`joining session ${sessionId}`);
+        });
+        const noRoom = runs.filter((run) =>
+          run
+            .stderr()
+            .includes(
+              `session ${sessionId} has no room for another run (the server allows ${ONE_RUN_LIMITS.maxStreamsPerSession} streams per session); running without telemetry`,
+            ),
+        );
+        expect(noRoom).toHaveLength(1);
+        const withRoom = runs.find((run) => run !== noRoom[0])!;
+        expect(withRoom.stderr()).not.toMatch(/no room|rejected|send failed/);
+        const { session, frames } = await readFrames(sessionId);
+        expect(session).toMatchObject({ status: "ended", streamCount: FIXED_STREAMS + 1 });
+        expect(exitedRunStreams(frames)).toHaveLength(1);
+        for (const streamSequences of runSequences(frames).values()) {
+          expect(streamSequences).toEqual(range(1, streamSequences.length));
+        }
+        expect(systemSequences(frames)).toEqual(range(1, systemSequences(frames).length));
+        // The turned-away run dropped its queue rather than parking it, and left its marker.
+        const runDirs = await readdir(join(afkHome, "sessions", sessionId, "runs"));
+        expect(runDirs).toHaveLength(2);
+        const markers = await Promise.all(
+          runDirs.map((runId) => readdir(join(afkHome, "sessions", sessionId, "runs", runId))),
+        );
+        expect(markers.filter((names) => names.includes("no-room"))).toHaveLength(1);
+        expect(markers.some((names) => names.includes("rejected"))).toBe(false);
+        for (const runId of runDirs) {
+          expect(
+            await readdir(join(afkHome, "sessions", sessionId, "runs", runId, "queue")),
+          ).toEqual([]);
+        }
+      },
+    );
+
+    it("two afk runs started in the same instant with no session running share one session: one creates it, the other joins", async () => {
+      const runs = [0, 1].map(() =>
+        spawnAfk(["run", "--", "sleep", String(OWNED_RUN_SECONDS)], afkHome),
+      );
+
+      const exitCodes = await Promise.all(runs.map((run) => run.exited));
+
+      expect(exitCodes).toEqual([0, 0]);
+      const creates = server.requests.filter((req) => req.line === "POST /api/sessions");
+      expect(creates).toHaveLength(1);
+      const sessionId = await dashboardSessionId(runs[0]!);
+      expect(await dashboardSessionId(runs[1]!)).toBe(sessionId);
+      const logs = runs.map((run) => run.stderr());
+      expect(
+        logs.filter((log) => log.includes(`started ${sessionId} with machine telemetry`)),
+      ).toHaveLength(1);
+      expect(logs.filter((log) => log.includes(`joining session ${sessionId}`))).toHaveLength(1);
+      const { session, frames } = await readFrames(sessionId);
+      expect(session).toMatchObject({ sessionId, status: "ended" });
+      expect(exitedRunStreams(frames)).toHaveLength(2);
       expect(await readStats()).toMatchObject({ activeSessions: 0 });
       expect(await readdir(join(afkHome, "sessions", sessionId, "queue"))).toEqual([]);
     });
