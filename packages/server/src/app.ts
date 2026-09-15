@@ -10,6 +10,7 @@ import { frameRoutes } from "./routes/frames.ts";
 import { streamRoutes } from "./routes/stream.ts";
 import { installRoutes } from "./routes/install.ts";
 import { webRoutes } from "./routes/web.ts";
+import { errorResponse, unhandledError } from "./http/errors.ts";
 import { requestTiming } from "./middleware/request-timing.ts";
 import { securityHeaders } from "./middleware/security-headers.ts";
 import { sessionIdParam } from "./middleware/session-id.ts";
@@ -57,8 +58,12 @@ export function createApp(config: AppConfig, store: SessionStore) {
       // Unknown API paths must be a JSON 404, never the dashboard's index.html from the
       // single-page fallback below: a client talking to an older server would otherwise
       // get HTML with a 200 and print it.
-      .all("/api/*", (c) => c.json({ error: `no such endpoint: ${c.req.path}` }, 404))
+      .all("/api/*", (c) => errorResponse(c, 404, `no such endpoint: ${c.req.path}`))
       .route("/", installRoutes(deps))
       .route("/", webRoutes(config.webDistDir))
+      // Last, so it covers every route above: a handler that throws answers a JSON
+      // ErrorResponse and logs its stack through the logger, instead of Hono's default
+      // console.error plus a plain-text body the bash client would print verbatim.
+      .onError(unhandledError)
   );
 }

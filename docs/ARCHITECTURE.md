@@ -160,6 +160,38 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   `dist/version.json` (`utils/web-version.ts`).
 - `rules/` is the anomaly-detection engine, described below.
 
+#### What the log shows
+
+The container log is the only view an operator has of a running deployment, so the
+default level (`info`, `AFK_LOG_LEVEL`) is meant to be readable by eye: every session's
+lifecycle, and every request the server refused, and nothing that repeats per second.
+
+- **Lifecycle**, one line each: `session created` (with the dashboard URL and the host),
+  the session's end (by the client, by a chain, by deletion, by the sweeper), its load
+  from storage, and the anomaly events the rules engine opens and closes.
+- **Ingest**: one `session ingesting` line per session at most every
+  `INGEST_SUMMARY_INTERVAL_MS` (`routes/frames.ts`), with the frames, duplicates, and
+  streams since the last one and the session's running total, so a live session visibly
+  ticks over. The batches themselves are `debug`: at the 1 Hz send interval an `info`
+  line each was tens of thousands of lines an hour at the session cap, which buried
+  everything above.
+- **Refusals**: every response of 400 or more is one `request rejected` line at `info`
+  (`request failed` at `warn` from 500), with `method`, `path`, `status`, the `error`
+  message the client was given, the `session` when the route has one, and `client`, the
+  `X-Afk-Client` header, which is what tells an old client apart from a broken one. They
+  all come from `errorResponse` in `http/errors.ts`, the single place error responses
+  are built, so a new refusal is visible without anyone remembering to log it. The
+  ingest token and the Authorization header are never logged.
+- **Bugs**: a handler that throws is one `unhandled error` line at `error` with the
+  stack and the session id, from the `app.onError` in `http/errors.ts`; the client gets
+  a JSON `ErrorResponse` with a flat "internal server error", never the stack.
+- **Slow requests**: a response that took `SLOW_REQUEST_MS` or longer to produce is a
+  `slow request` line (`middleware/request-timing.ts`).
+
+`debug` adds a line per request and per accepted frame and is only usable on one
+session at a time. The `afk run` command line is logged at no level: it is typed by the
+user and can carry a secret. Session ids at `info` are deliberate (see "Hardening").
+
 #### Rules engine
 
 Each session holds its own `RuleEngine` (`rules/engine.ts`), instantiated fresh in

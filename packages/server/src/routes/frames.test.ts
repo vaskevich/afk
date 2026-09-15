@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import type { AdmissionLimits } from "../env.ts";
 import { DEFAULT_LIMITS } from "../env.ts";
@@ -6,7 +6,8 @@ import { createApp } from "../app.ts";
 import { SessionStore, storedFrameBytes } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 import { log } from "../log/logger.ts";
-import { MAX_INGEST_BODY_BYTES } from "./frames.ts";
+import { INTERNAL_ERROR_MESSAGE } from "../http/errors.ts";
+import { INGEST_SUMMARY_INTERVAL_MS, MAX_INGEST_BODY_BYTES } from "./frames.ts";
 import {
   createTestSession,
   endTestSession,
@@ -53,10 +54,11 @@ describe("POST /api/sessions/:id/frames", () => {
     expect(await res.json()).toEqual({ accepted: 2, duplicates: 0, latestSequence: { system: 2 } });
   });
 
-  it("logs one info line per batch naming the session, its streams, and the counts, never one per frame", async () => {
+  it("logs one debug line per batch naming the session, its streams, and the counts, and nothing at info", async () => {
     const { app, sessionId, ingestToken } = await startSession();
     await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
     const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    const debug = vi.spyOn(log, "debug").mockImplementation(() => {});
 
     await postFrames(app, sessionId, ingestToken, [
       makeSystemFrame(0),
@@ -65,13 +67,13 @@ describe("POST /api/sessions/:id/frames", () => {
       makeRunFrame(0),
     ]);
 
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(info).toHaveBeenCalledWith("accepted batch", {
+    expect(debug).toHaveBeenCalledWith("accepted batch", {
       session: sessionId,
       streams: "system,run:abcd1234",
       accepted: 3,
       duplicates: 1,
     });
+    expect(info).not.toHaveBeenCalled();
   });
 
   // Regression: the per-frame debug line carried `command=<the command line>`, so a
@@ -268,5 +270,184 @@ describe("POST /api/sessions/:id/frames", () => {
     });
 
     expect(res.status).toBe(413);
+  });
+});
+
+/**
+ * The operator's view of a healthy session. `accepted batch` used to be an `info` line
+ * once a second per session; at ten concurrent users that is tens of thousands of lines
+ * an hour, so the live session is summarized instead.
+ */
+describe("what an operator watching info sees while a session ingests", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("says nothing at info for the batches inside one INGEST_SUMMARY_INTERVAL_MS", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS - 1);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("logs one summary of the frames, duplicates, streams, and running total once the interval has passed", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0), makeRunFrame(0)]);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1), makeSystemFrame(2)]);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith("session ingesting", {
+      session: sessionId,
+      streams: "system,run:abcd1234",
+      frames: 4,
+      duplicates: 1,
+      total: 4,
+      seconds: INGEST_SUMMARY_INTERVAL_MS / 1000,
+    });
+  });
+
+  it("counts the next window from the summary it just logged, not from the session's first batch", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(2)]);
+
+    expect(info).toHaveBeenCalledTimes(2);
+    expect(info).toHaveBeenLastCalledWith(
+      "session ingesting",
+      expect.objectContaining({ frames: 1, total: 3, seconds: INGEST_SUMMARY_INTERVAL_MS / 1000 }),
+    );
+  });
+
+  it("summarizes each session on its own window", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const other = await createTestSession(app);
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, other.sessionId, other.ingestToken, [makeSystemFrame(0)]);
+
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(
+      "session ingesting",
+      expect.objectContaining({ session: sessionId }),
+    );
+  });
+});
+
+/**
+ * The operator's view of a beta user in trouble. These assert on log lines rather than
+ * on the response (docs/TESTING.md rule 2) because the line is the feature: before it,
+ * every 4xx was a `debug` "request" line without the message, so at the default level
+ * nothing showed.
+ */
+describe("what an operator watching info sees when ingest fails", () => {
+  /** Spies on the logger after the session has been created, so its own lines are not counted. */
+  function watchLog() {
+    return {
+      info: vi.spyOn(log, "info").mockImplementation(() => {}),
+      warn: vi.spyOn(log, "warn").mockImplementation(() => {}),
+      error: vi.spyOn(log, "error").mockImplementation(() => {}),
+    };
+  }
+
+  it("logs a bad frame line at info with the status, the session, the client, and the message", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    const { info } = watchLog();
+
+    await postFrameBody(app, sessionId, ingestToken, "not json");
+
+    expect(info).toHaveBeenCalledWith("request rejected", {
+      method: "POST",
+      path: `/api/sessions/${sessionId}/frames`,
+      status: 400,
+      session: sessionId,
+      client: "bash/0.1.0",
+      error: expect.stringContaining("line 1"),
+    });
+  });
+
+  it("logs a 426 at info naming the client version, so an old client is told apart from a broken one", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    const { info } = watchLog();
+
+    await postFrameBody(app, sessionId, ingestToken, JSON.stringify(makeSystemFrame(0)), {
+      "x-afk-client": "bash/0.0.1",
+    });
+
+    expect(info).toHaveBeenCalledWith(
+      "request rejected",
+      expect.objectContaining({ status: 426, session: sessionId, client: "bash/0.0.1" }),
+    );
+  });
+
+  it("logs a 410 at info with the session, so a client that will not stop is visible", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    await endTestSession(app, sessionId, ingestToken);
+    const { info } = watchLog();
+
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+
+    expect(info).toHaveBeenCalledWith(
+      "request rejected",
+      expect.objectContaining({
+        status: 410,
+        session: sessionId,
+        client: "bash/0.1.0",
+        error: "session ended",
+      }),
+    );
+  });
+
+  it("answers a thrown error as a JSON ErrorResponse and logs its stack at error", async () => {
+    const store = new SessionStore(new MemorySessionStorage());
+    const app = createApp(makeAppConfig(), store);
+    const { sessionId, ingestToken } = await createTestSession(app);
+    const { error } = watchLog();
+    vi.spyOn(store, "ingest").mockRejectedValue(new Error("storage is on fire"));
+
+    const res = await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ error: INTERNAL_ERROR_MESSAGE });
+    expect(error).toHaveBeenCalledWith("unhandled error", {
+      method: "POST",
+      path: `/api/sessions/${sessionId}/frames`,
+      session: sessionId,
+      client: "bash/0.1.0",
+      error: "storage is on fire",
+      stack: expect.stringContaining("storage is on fire"),
+    });
+  });
+
+  it("keeps the stack out of the response body", async () => {
+    const store = new SessionStore(new MemorySessionStorage());
+    const app = createApp(makeAppConfig(), store);
+    const { sessionId, ingestToken } = await createTestSession(app);
+    watchLog();
+    vi.spyOn(store, "ingest").mockRejectedValue(new Error("storage is on fire"));
+
+    const res = await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+
+    expect(await res.text()).not.toContain("frames.ts");
   });
 });

@@ -5,33 +5,98 @@ import { errorResponse } from "../http/errors.ts";
 import { limitBody } from "../middleware/body-limit.ts";
 import { clientVersion } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
-import { TooManyBytesError, TooManyFramesError, type IngestResult } from "../store/sessions.ts";
+import {
+  TooManyBytesError,
+  TooManyFramesError,
+  type IngestResult,
+  type Session,
+} from "../store/sessions.ts";
 import { parseFrames } from "../utils/ndjson.ts";
 import { describeFrame } from "../log/describe.ts";
 import { log } from "../log/logger.ts";
 
+/** How often one live session's ingest is summarized at `info`. */
+export const INGEST_SUMMARY_INTERVAL_MS = 60_000;
+
+/** What a session has ingested since its last summary line. */
+interface IngestSummary {
+  /** When the current window opened: the first batch, or the last line logged. */
+  windowStartedAtMs: number;
+  frames: number;
+  duplicates: number;
+  streams: Set<string>;
+}
+
 /**
- * One `info` line per batch (an operator can find a session and see it is alive without
- * one line per frame; at the 20 x 10 cap that would be tens of thousands of lines an
- * hour) and one `debug` line per accepted frame. The `afk run` command line is logged
- * at no level: it is typed by the user and, redaction notwithstanding, can carry a
- * secret, and the run's stream id in `describeFrame` is enough to find it.
+ * Keyed by the session object rather than its id, so an entry is collected along with
+ * the session when the store evicts it and there is nothing here to prune.
  */
-function logBatch(sessionId: string, result: IngestResult): void {
+const ingestSummaries = new WeakMap<Session, IngestSummary>();
+
+/**
+ * What the log says about ingest. Every batch is a `debug` line, as is every accepted
+ * frame; at `info` a session gets one summary line at most every
+ * `INGEST_SUMMARY_INTERVAL_MS`, so an operator watching the default level sees each live
+ * session tick over without a line a second per session (ten of them at the 1 Hz send
+ * interval used to be tens of thousands of lines an hour, which buried everything else).
+ * The counts are since the last summary; `total` is the session's running total. The
+ * `afk run` command line is logged at no level: it is typed by the user and, redaction
+ * notwithstanding, can carry a secret, and the run's stream id in `describeFrame` is
+ * enough to find it.
+ */
+function logBatch(session: Session, result: IngestResult, nowMs = Date.now()): void {
+  const sessionId = session.sessionId;
   const streams = new Set(result.accepted.map((stored) => stored.frame.stream));
-  log.info("accepted batch", {
+  log.debug("accepted batch", {
     session: sessionId,
     streams: [...streams].join(","),
     accepted: result.accepted.length,
     duplicates: result.duplicates,
     ...(result.rejectedStreams.length > 0 ? { rejected: result.rejectedStreams.join(",") } : {}),
   });
-  if (!log.enabled("debug")) {
+  if (log.enabled("debug")) {
+    for (const { frame } of result.accepted) {
+      log.debug(describeFrame(frame), { session: sessionId });
+    }
+  }
+  summarizeIngest(session, result, streams, nowMs);
+}
+
+function summarizeIngest(
+  session: Session,
+  result: IngestResult,
+  batchStreams: ReadonlySet<string>,
+  nowMs: number,
+): void {
+  let summary = ingestSummaries.get(session);
+  if (!summary) {
+    // The first batch opens the window rather than logging: `session created` has just
+    // said this session exists, and the summary is worth reading once it has counts.
+    summary = { windowStartedAtMs: nowMs, frames: 0, duplicates: 0, streams: new Set() };
+    ingestSummaries.set(session, summary);
+  }
+  summary.frames += result.accepted.length;
+  summary.duplicates += result.duplicates;
+  for (const stream of batchStreams) {
+    summary.streams.add(stream);
+  }
+
+  const elapsedMs = nowMs - summary.windowStartedAtMs;
+  if (elapsedMs < INGEST_SUMMARY_INTERVAL_MS) {
     return;
   }
-  for (const { frame } of result.accepted) {
-    log.debug(describeFrame(frame), { session: sessionId });
-  }
+  log.info("session ingesting", {
+    session: session.sessionId,
+    streams: [...summary.streams].join(","),
+    frames: summary.frames,
+    duplicates: summary.duplicates,
+    total: session.frames.length,
+    seconds: Math.round(elapsedMs / 1000),
+  });
+  summary.windowStartedAtMs = nowMs;
+  summary.frames = 0;
+  summary.duplicates = 0;
+  summary.streams.clear();
 }
 
 /**
@@ -91,7 +156,7 @@ export function frameRoutes(deps: AppDeps) {
           { stream, limit },
         );
       }
-      logBatch(session.sessionId, result);
+      logBatch(session, result);
       const body: IngestResponse = {
         accepted: result.accepted.length,
         duplicates: result.duplicates,

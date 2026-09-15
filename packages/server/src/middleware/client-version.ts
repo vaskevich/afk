@@ -1,13 +1,11 @@
 import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
-import { PROTOCOL_VERSION } from "@afk/shared";
+import { CLIENT_HEADER, PROTOCOL_VERSION } from "@afk/shared";
 import type { UpgradeRequiredDetails } from "@afk/shared";
 import type { AppDeps, AppEnv, MinimumVersions } from "../env.ts";
 import { errorResponse } from "../http/errors.ts";
 import { compareSemver, parseSemver } from "../utils/semver.ts";
 
-/** Every client request carries this: `<name>/<semver>`, e.g. `bash/0.1.0`. */
-export const CLIENT_HEADER = "X-Afk-Client";
 const CLIENT_HEADER_PATTERN = /^([a-z][a-z0-9-]*)\/(\S+)$/i;
 
 /** The status a client the server will not talk to gets; see docs/VERSIONING.md. */
