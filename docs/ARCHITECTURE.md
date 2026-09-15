@@ -439,7 +439,7 @@ sessions active at the moment (see the decision log).
 The bucket layout (`store/s3-storage.ts`) reaches the same shape in two steps, since
 object stores cannot append. While a session is live, `appendFrames` buffers accepted
 frames in memory and writes them as one **slab** object,
-`sessions/<id>/frames/<first index, zero padded>.ndjson`, every
+`sessions/<id>/frames/<first index, zero padded>-<writerId>.ndjson`, every
 `AFK_S3_SLAB_FLUSH_SECONDS` (60) or `AFK_S3_SLAB_MAX_FRAMES` (100), whichever comes
 first (`flushed slab session= frames= trigger= ms=` at info); a graceful shutdown, a
 read of the session from the same process, and the session's end also flush it. A slab
@@ -452,7 +452,16 @@ recorded) or the sweeper finds it over, `compactSession` writes every frame as t
 prefers the compacted object and falls back to listing the `frames/` parts and fetching
 them `READ_CONCURRENCY` (16) at a time, so a session in either layout, one written
 before slabs existed (one object per ingested batch, same key scheme), or one caught
-between the two steps of a compaction all read the same. A cold load is therefore one
+between the two steps of a compaction all read the same.
+
+`writerId` is a short random id the storage instance takes at startup, so two server
+processes that hold the same session at once — the seconds of a deploy when Lightsail
+runs both containers — write their slabs under different keys instead of one
+`PutObject` silently replacing the other's frames. The parts a read finds are put back
+into one order by `orderFrames` (`store/frame-order.ts`): index first, arrival
+(`receivedAt`) second, one frame per (stream, sequence) keeping the copy that reached
+the server first. Slabs written before the suffix existed (`<first index>.ndjson`) read
+exactly the same way, since the order comes from the frames, not from the key. A cold load is therefore one
 GET for an ended session and at most a minute's worth of objects per hour for a live
 one (see the 2026-09-14 entries in the decision log).
 
