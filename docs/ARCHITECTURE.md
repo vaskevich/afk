@@ -294,6 +294,32 @@ implementations: the real API and a deterministic fixture for `/s/demo`.
 session is active, subscribes over SSE from the last loaded frame index and appends
 frames into that same cache. Everything downstream just re-renders from `query.data`.
 
+While it follows a live session it also keeps a freshness watchdog (`data/freshness.ts`).
+There are two kinds of staleness and they point at opposite ends of the wire:
+
+- **`client.stale`** is an anomaly event the server's ticker raises when the machine
+  has stopped sending (`rules/stale.ts`). The server is fine; the laptop went quiet.
+  It renders like any other warning.
+- **Lost contact** is the browser's own finding: nothing has come from the server
+  (a frame, a summary, an event, or the stream's `ping`) for `CONTACT_LOST_AFTER_MS`,
+  twice the keepalive interval, or the transport has reported itself down. The server
+  may be down, restarting, or behind a socket that died without a FIN. `useSession`
+  exposes it as `contactLostSince`; the `StatusBanner` turns neutral, neither green
+  nor red ("No fresh data: lost contact with afk.osv.im 32s ago, reconnecting…", the
+  host from `window.location`), the header pill says "no fresh data", and both return
+  to the anomaly-driven verdict the moment anything arrives. An ended or deleted
+  session never shows it: it has nothing to be late.
+
+The keepalive is a named `ping` event rather than an SSE comment because `EventSource`
+never delivers comments to JavaScript, so a comment could keep proxies happy while the
+page had no way to notice a silent connection. Its interval is not on the wire:
+`EXPECTED_KEEPALIVE_MS` mirrors the `AFK_SSE_KEEPALIVE_SECONDS` default, and
+[CONFIGURATION.md](CONFIGURATION.md) says what raising it does to every dashboard. A
+stream silent for that long is also closed and reopened from the last frame on the
+page, since `EventSource` reconnects on its own only when the socket fails outright,
+not when it is half-open or was refused for good (a 502 from the load balancer during
+a deploy closes it permanently).
+
 The timeline is a canvas per stream with a shared time axis and a scrubber. A
 registry keyed by collector name (`timeline/registry.ts`, `CollectorUi`) maps each
 collector to a row renderer (`drawRow`, imperative canvas drawing) and a `Details`
@@ -433,6 +459,19 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** The dashboard judges its own freshness rather than trusting the
+  server's verdict forever. The banner used to be driven only by anomaly events, so a
+  server that was down or restarting left a green "All normal" on every open phone,
+  and the one event that could have said otherwise (`client.stale`) is produced by
+  that same server's ticker. The browser now tracks when it last heard anything and
+  says "No fresh data" after two missed keepalives, in a neutral colour because it is
+  not a verdict about the machine, and separate from `client.stale`, which stays the
+  server's word that the machine went quiet. The keepalive became a named `ping`
+  event for this: `EventSource` never surfaces comment lines, so `: keepalive` kept
+  the connection alive without the page being able to tell. The interval is a mirrored
+  constant in the dashboard rather than a field on the wire; a self-hoster who raises
+  `AFK_SSE_KEEPALIVE_SECONDS` past 30 s gets a dashboard that says so, which is the
+  documented trade for not widening `SessionSummary`.
 - **2026-09-14** Codex is counted next to Claude Code, one block of the same five counts
   per tool found, a tool that is not there having no block (additive: both blocks are
   optional on the wire, frames from the previous client still parse, the protocol
