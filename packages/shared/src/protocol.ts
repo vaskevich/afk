@@ -585,6 +585,10 @@ export type StreamEndEvent = z.infer<typeof StreamEndEvent>;
  *            snapshot, then one per change (an event opening, updating, or closing);
  *            consumers upsert by id. No SSE id, so it never disturbs frame resumption.
  *   frame    data = StoredFrame; id = StoredFrame.index
+ *   ping     data empty; every keepalive interval (15 s by default) while nothing else
+ *            is being sent, so a browser can tell a quiet stream from a dead one. A
+ *            comment line would keep proxies happy just the same, but EventSource
+ *            never hands comments to JavaScript, so it has to be a named event.
  *   end      data = StreamEndEvent (the summary plus `reason`); sent once the session is
  *            over or has been deleted, then the stream closes
  * Reconnect with `Last-Event-ID` (or `?after=<index>`) to replay what was missed.
@@ -593,6 +597,7 @@ export const StreamEventName = {
   Session: "session",
   Event: "event",
   Frame: "frame",
+  Ping: "ping",
   End: "end",
 } as const;
 export type StreamEventName = (typeof StreamEventName)[keyof typeof StreamEventName];

@@ -123,8 +123,10 @@ export function streamRoutes(deps: AppDeps) {
         handle(event);
       }
     });
+    // A named event rather than a comment line: both keep proxies from closing an idle
+    // stream, but only an event reaches the dashboard, which counts it as a sign of life.
     const keepalive = setInterval(
-      () => void stream.write(": keepalive\n\n"),
+      () => void stream.writeSSE({ event: StreamEventName.Ping, data: "" }),
       config.sseKeepaliveMs,
     );
     stream.onAbort(() => finish());
