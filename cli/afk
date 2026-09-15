@@ -43,6 +43,12 @@
 # tagged `afk ▸` on a terminal and prefixed `afk: ` elsewhere, so a wrapped command's
 # own output is never mistaken for it.
 #
+# afk itself runs under the C locale, so that the numbers it reads out of ps, sysctl
+# and awk stay machine-readable (a German locale would print them as "52,0" and no
+# frame would be valid JSON). The command `afk run` wraps gets the caller's locale
+# back, along with the caller's umask, and so prints numbers and dates the way it
+# would unwrapped.
+#
 # `afk run` sends the command line with the obvious secrets replaced by `***` (a URL's
 # user:password, the value of a KEY=value argument named like a secret, the value
 # after --password, --token and the like; see redact_command) and, when the
@@ -130,6 +136,23 @@ set -u
 # own files are created the way they would be unwrapped.
 ORIGINAL_UMASK=$(umask)
 umask 077
+
+# The collectors read numbers and columns out of `ps`, `sysctl`, `awk` and `date`, all
+# of which follow the caller's locale: under de_DE.UTF-8 (what Terminal.app sets for a
+# German, French, Dutch, Spanish or Russian region) awk prints "52,0" and every frame
+# is invalid JSON. So the script runs under the C locale throughout. The caller's own
+# locale variables are saved first, unset told apart from empty, and handed back to the
+# command `afk run` wraps (restore_caller_locale), so a command that prints localized
+# numbers or dates does not change under afk. Printing is unaffected: bash writes the
+# bytes it was given, so the server's UTF-8 QR block still comes out as it arrived.
+LOCALE_VARIABLES="LANG LANGUAGE LC_ALL LC_COLLATE LC_CTYPE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME"
+for locale_variable in $LOCALE_VARIABLES; do
+  if eval "[ \"\${$locale_variable+set}\" = set ]"; then
+    eval "ORIGINAL_$locale_variable=\$$locale_variable"
+  fi
+done
+unset locale_variable
+export LC_ALL=C
 
 # Client version (semver, bumped on every release) and the protocol version it speaks
 # (bumped only for an incompatible wire change). See docs/VERSIONING.md.
@@ -2060,11 +2083,29 @@ cmd_start() {
   finish
 }
 
-# Replaces this process with the command, with the caller's umask rather than this
-# script's private one, for the cases where `afk run` cannot get a session.
+# Puts the caller's locale back in the current shell: every variable saved at the top
+# of the file is exported with the value it had, and one the caller did not have is
+# unset again, so the wrapped command sees exactly the locale it would have seen
+# unwrapped. Only ever called in the process that is about to become the command
+# (an exec, or the subshell in cmd_run); this script's own collectors stay under C.
+restore_caller_locale() {
+  local name saved
+  for name in $LOCALE_VARIABLES; do
+    saved="ORIGINAL_$name"
+    if eval "[ \"\${$saved+set}\" = set ]"; then
+      eval "export $name=\"\$$saved\""
+    else
+      unset "$name"
+    fi
+  done
+}
+
+# Replaces this process with the command, with the caller's umask and locale rather
+# than this script's private ones, for the cases where `afk run` cannot get a session.
 run_without_telemetry() { # command args...
   log "running without telemetry"
   umask "$ORIGINAL_UMASK"
+  restore_caller_locale
   exec "$@"
 }
 
@@ -2150,11 +2191,16 @@ cmd_run() {
   # The command runs in the foreground so Ctrl-C and stdin behave as usual. Bash
   # would normally exit when a foreground child dies of SIGINT; trapping it lets us
   # still report the exit. The sh wrapper records the pid the sampler should watch,
-  # then gives the command the caller's umask back (this script's own is private).
+  # then gives the command the caller's umask back (this script's own is private);
+  # the subshell around it does the same for the caller's locale, which the samplers
+  # still running in this process must not get back (see the top of the file). It
+  # execs, so the pid the wrapper writes is still the command's own.
   # TODO(run): tee and split add a little latency to the final byte counts; a short pause covers it.
   trap ':' INT TERM
-  sh -c 'echo $$ > "$1"; umask "$2"; shift 2; exec "$@"' sh "$RUN_DIR/pid" "$ORIGINAL_UMASK" "$@" \
-    > >(tee >(run_capture_sink stdout)) 2> >(tee >(run_capture_sink stderr) >&2)
+  (
+    restore_caller_locale
+    exec sh -c 'echo $$ > "$1"; umask "$2"; shift 2; exec "$@"' sh "$RUN_DIR/pid" "$ORIGINAL_UMASK" "$@"
+  ) > >(tee >(run_capture_sink stdout)) 2> >(tee >(run_capture_sink stderr) >&2)
   EXIT_CODE=$?
   trap - INT TERM
   log "command exited with status $EXIT_CODE"

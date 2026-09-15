@@ -96,6 +96,28 @@ delete session demo (HTTP 403): the demo session cannot be deleted`).
   lines instead, and `caffeinate -s ./cli/afk start` is the way to hold the machine
   awake for the session's length.
 
+## Locale
+
+The client runs under `LC_ALL=C`, exported at the top of `cli/afk` next to `umask 077`.
+Everything the collectors read is locale-sensitive: `awk`'s `printf "%.1f"`, `sysctl -n
+vm.loadavg`, and `ps -o %cpu` all print `52,0` under a locale whose decimal separator is
+a comma (de_DE, fr_FR, nl_NL, es_ES, ru_RU and others, which Terminal.app sets from the
+macOS region), which made `collect_system` emit `{"cpu":{"percent":52,0}` and threw off
+the column match in `collect_processes`, so every batch was rejected as invalid JSON,
+once a second, for the whole session. Forcing C on the script as a whole, rather than
+prefixing the commands that need it, is what keeps a collector added later from bringing
+the bug back.
+
+The caller's own locale is saved before that (`LANG`, `LANGUAGE`, and the `LC_*`
+variables in `LOCALE_VARIABLES`, with unset kept apart from empty) and handed back to
+the command `afk run` wraps, by `restore_caller_locale` in the subshell that execs it,
+the way `ORIGINAL_UMASK` already is. How a wrapped command formats numbers and dates is
+its own business and does not change under afk.
+
+Printing is unaffected either way: bash writes out the bytes it was given rather than
+transcoding them, so the UTF-8 the server sends (the QR block) and afk's own `afk ▸` tag
+reach the terminal as they are.
+
 ## Concurrent runs
 
 Several `afk run`s on one machine share one session (the one `afk start` owns, or the
