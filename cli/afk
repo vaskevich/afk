@@ -1024,6 +1024,14 @@ run_sampler_loop() {
     fi
     emit_frame "run:$RUN_ID" run "$seq" "$data"
     echo "$seq" > "$RUN_DIR/seq"
+    # The sender can have stopped this run's telemetry for good while the sample was
+    # being taken (session_deleted, session_no_room): it dropped the queue before this
+    # frame was in it, so this frame is for this loop to clear away, or it would
+    # outlive the run in a queue no sender will ever look at again.
+    if run_telemetry_stopped; then
+      drop_queue
+      break
+    fi
     sleep "$SAMPLE_INTERVAL_SECONDS"
   done
 }
@@ -1675,6 +1683,16 @@ dropped_bytes() { # session-dir
   awk '{ b += $2 } END { print b + 0 }' "$1/$DROPPED_RECORD_NAME"
 }
 
+# Everything queued for a session whose telemetry is over, and the scratch files of
+# the request that ended it: there is nothing left to send any of it to. Both ways
+# that happens (session_deleted, session_no_room) drop the queue, and so do the run
+# sampler and the main process afterwards, because either can queue a frame between
+# the check that found the telemetry still live and the drop.
+drop_queue() {
+  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
+    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+}
+
 # The session was deleted on the server (a 404 on ingest or end; see docs/PROTOCOL.md,
 # "Delete"): telemetry stops for good. What is queued is dropped, since there is
 # nothing to send it to; a `deleted` marker next to `stop` tells the sampler loops
@@ -1693,8 +1711,7 @@ session_deleted() {
     log "session $SESSION_ID was deleted on the server; telemetry stopped"
   fi
   touch "$SESSION_DIR/stop"
-  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
-    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+  drop_queue
 }
 
 # The server had no room for this run's stream (a 422 on a joiner's first batch; see
@@ -1712,8 +1729,7 @@ session_no_room() { # response-json
   local limit
   limit=$(json_get_number "$1" limit)
   touch "$SESSION_DIR/$NO_ROOM_MARKER_NAME" "$SESSION_DIR/stop"
-  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
-    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+  drop_queue
   log "session $SESSION_ID has no room for another run (the server allows ${limit:-?} streams per session); running without telemetry"
 }
 # A run whose telemetry is over while its command goes on: the session was deleted, or
@@ -2258,6 +2274,9 @@ cmd_run() {
   # flushed, or ended.
   if run_telemetry_stopped; then
     stop_background_job "$SENDER_PID"
+    # The samplers and the sender are all stopped now, so this is the last word on
+    # anything the run sampler queued after the queue was dropped.
+    drop_queue
     remove_run_captures
     if [ "$owner" = 1 ]; then
       discard_deleted_session

@@ -3994,6 +3994,29 @@ describe("run_sampler_loop interrupted mid-sample", () => {
     expect(frames.map((frame) => frame.sequence)).toEqual([1, 2]);
     expect(frames.at(-1)).toMatchObject({ collector: "run", data: { state: "exited" } });
   });
+
+  it("keeps no frame in the dropped queue of a run the session had no room for", async () => {
+    const { afkHome, runDir } = await makeSamplerRun();
+
+    // The sender's 422 lands at 2.5 s, in the middle of the sampler's second sample,
+    // so the frame that sample becomes is queued after the queue was dropped.
+    const { code, stderr } = await runBash(
+      [
+        SLOW_COLLECT_RUN,
+        "run_sampler_loop & SAMPLER=$!",
+        "sleep 2.5",
+        `session_no_room '{"details":{"limit":4}}'`,
+        "sleep 1.5",
+        'stop_background_job "$SAMPLER"',
+      ].join("\n"),
+      samplerEnv(afkHome, runDir),
+      SAMPLER_TIMEOUT_MS,
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(await queueFiles(runDir)).toEqual([]);
+    expect(await exists(join(runDir, "no-room"))).toBe(true);
+  });
 });
 
 describe("redact_command", () => {
