@@ -999,10 +999,15 @@ collect_run() { # state [exitCode] [output-tail-json]
     "$RUN_COMMAND_JSON" "$pid" "$state" "$exit_code" "$elapsed" "$cpu" $((rss * 1024)) "$out" "$err" "$tail"
 }
 
-# Samples the run every second until killed. Keeps its sequence in a file so the
-# final "exited" frame, emitted by the main process, can continue the count. In an
-# `afk run` that owns its session (SESSION_CHAINING) the frames go to whichever
-# session `current` names, so a chain by the system sampler carries the run along.
+# Samples the run every second until killed. Keeps the sequence of the frames it has
+# queued in a file so the final "exited" frame, emitted by the main process, can
+# continue the count; the number is written after the frame is in the queue, never
+# before, because the main process kills this loop where it stands the moment the
+# command exits. A sequence recorded for a sample that never became a frame would
+# leave a gap in the run's stream, and a gap is permanent: the server de-duplicates
+# per stream by sequence and nothing ever fills it. In an `afk run` that owns its
+# session (SESSION_CHAINING) the frames go to whichever session `current` names, so a
+# chain by the system sampler carries the run along.
 run_sampler_loop() {
   local seq=0 data
   while [ ! -s "$RUN_DIR/pid" ]; do
@@ -1013,14 +1018,36 @@ run_sampler_loop() {
   # itself is not touched.
   while ! run_telemetry_stopped; do
     seq=$((seq + 1))
-    echo "$seq" > "$RUN_DIR/seq"
     data=$(collect_run running)
     if [ "${SESSION_CHAINING:-0}" = 1 ]; then
       follow_current_session || true
     fi
     emit_frame "run:$RUN_ID" run "$seq" "$data"
+    echo "$seq" > "$RUN_DIR/seq"
     sleep "$SAMPLE_INTERVAL_SECONDS"
   done
+}
+
+# The highest sequence this run has produced: what the sampler recorded of the frames
+# it queued, and anything higher still waiting in the queue. Both are consulted
+# because the sampler is killed where it stands when the command exits, which can be
+# between queueing a frame and recording it; the higher of the two continues the
+# stream whichever side of that the kill landed on, with no gap and no sequence used
+# twice.
+last_run_sequence() {
+  local last file name seq
+  last=$(cat "$RUN_DIR/seq" 2>/dev/null)
+  case "$last" in
+    ''|*[!0-9]*) last=0 ;;
+  esac
+  for file in "$SESSION_DIR"/queue/*-"run:$RUN_ID.ndjson"; do
+    [ -e "$file" ] || continue
+    name=$(basename "$file")
+    # Queue names are zero padded, which bash would otherwise read as octal.
+    seq=$((10#${name%%-*}))
+    [ "$seq" -gt "$last" ] && last=$seq
+  done
+  echo "$last"
 }
 
 # The run's last frame: `exited`, with the command's exit code and, only on failure,
@@ -1033,7 +1060,7 @@ emit_final_run_frame() {
   local seq
   [ "$FINAL_RUN_FRAME_EMITTED" = 0 ] || return 0
   FINAL_RUN_FRAME_EMITTED=1
-  seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
+  seq=$(( $(last_run_sequence) + 1 ))
   emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE" "$(run_output_tail "$EXIT_CODE")")"
   remove_run_captures
 }

@@ -3930,6 +3930,72 @@ describe("collect_run", () => {
   });
 });
 
+/**
+ * A collect_run that takes a whole second, so a test can stop the sampler, or drop its
+ * queue under it, at a chosen point of a sample instead of racing the real collectors.
+ * It answers like the real one: state from $1, exit code from $2.
+ */
+const SLOW_COLLECT_RUN = `collect_run() {
+  sleep 1
+  printf '{"command":"c","pid":1,"state":"%s","exitCode":%s,"elapsedSeconds":1,"process":{"cpuPercent":0,"rssBytes":0},"output":{"flavor":"volume","stdoutBytes":0,"stderrBytes":0}}' "$1" "\${2:-null}"
+}`;
+
+/**
+ * The run sampler and the main process are separate processes sharing one sequence
+ * counter (runs/<runId>/seq) and one queue, and neither of the moments below is one
+ * the sampler chooses: the command exits when it exits, and the sender learns the
+ * session has no room for the run when the server answers.
+ */
+describe("run_sampler_loop interrupted mid-sample", () => {
+  const SAMPLER_TIMEOUT_MS = 20_000;
+
+  /** A run directory with a queue and a pid, which is all the sampler needs to start. */
+  async function makeSamplerRun(): Promise<{ afkHome: string; runDir: string }> {
+    const afkHome = await makeTempDir();
+    const runDir = join(afkHome, "sessions", "abc123", "runs", "ab12cd34");
+    await mkdir(join(runDir, "queue"), { recursive: true });
+    await writeFile(join(runDir, "pid"), `${process.pid}\n`);
+    return { afkHome, runDir };
+  }
+
+  function samplerEnv(afkHome: string, runDir: string): NodeJS.ProcessEnv {
+    return {
+      AFK_HOME: afkHome,
+      SESSION_ID: "abc123",
+      SESSION_DIR: runDir,
+      SESSION_ROLE: "joiner",
+      RUN_DIR: runDir,
+      RUN_ID: "ab12cd34",
+      RUN_STARTED: "1",
+      RUN_COMMAND_JSON: "c",
+      EXIT_CODE: "0",
+    };
+  }
+
+  it("leaves no gap in the run's sequences when the command exits while it is sampling", async () => {
+    const { afkHome, runDir } = await makeSamplerRun();
+
+    // The sampler queues its first frame a second in and starts its second sample at
+    // 2 s; the command exiting at 2.5 s kills it in the middle of that one.
+    const { code, stderr } = await runBash(
+      [
+        SLOW_COLLECT_RUN,
+        "run_sampler_loop & SAMPLER=$!",
+        "sleep 2.5",
+        'stop_background_job "$SAMPLER"',
+        "emit_final_run_frame",
+      ].join("\n"),
+      samplerEnv(afkHome, runDir),
+      SAMPLER_TIMEOUT_MS,
+    );
+
+    expect(code, stderr).toBe(0);
+    const frames = await queuedFrames(runDir);
+    expect(frames.map((frame) => frame.sequence)).toEqual([1, 2]);
+    expect(frames.at(-1)).toMatchObject({ collector: "run", data: { state: "exited" } });
+  });
+});
+
 describe("redact_command", () => {
   // `-p` is deliberately not redacted: `mkdir -p dir` and `ps -p 123` are far more
   // common than a password after a short flag, and the dashboard should show them as typed.
