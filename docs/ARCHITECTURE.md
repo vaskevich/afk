@@ -107,7 +107,14 @@ and on failure the output tail, has closed the row.
 Telemetry must never get in the way of the command: if the server is at capacity, or
 the session it would join already has `maxStreams` streams, `afk run` logs it and
 `exec`s the command directly with no session at all, rather than delaying or failing
-it.
+it; a run that only learns there is no room from the 422 on its first batch (several
+runs started in the same second) stops its telemetry there and lets the command run.
+Two runs that find no session in the same instant do not both create one: `owner.pid`
+is claimed atomically before the create, and the loser joins the winner's session. An
+owning run whose command exits while other runs are still joined keeps the session
+open, its samplers and sender running, until the last of them is gone (their
+`afk.pid` files under `runs/`), rather than ending it under them; Ctrl-C or `afk stop`
+ends it at once. See "Concurrent runs" in [CLIENT.md](CLIENT.md).
 
 ### Server (`packages/server`)
 
@@ -210,9 +217,16 @@ streams) use a fraction of that.
 `POST /api/sessions` checks `store.hasCapacity()` before creating a session; at
 capacity it returns 503 with `Retry-After`, and `create_session_or_wait` in the client
 polls until there is room. `store.ingest` checks the per-session stream cap as it
-processes a batch and throws `TooManyStreamsError` for the frame that would add an
-eleventh stream, which the frames route turns into 422 — the batch itself is
-well-formed, just over the limit, so a different status than a generic bad request.
+processes a batch and skips the frames of a stream that would be the eleventh, naming
+it in the response's `rejectedStreams` while the rest of the batch lands; the frames
+route answers 422 only when every frame in the batch was such a frame (a joining
+`afk run`'s first batch) — the batch itself is well-formed, just over the limit, so a
+different status than a generic bad request. Admission is decided inside the
+session's serial write queue, together with the write: the senders of one session run
+concurrently (an `afk start` and each joined `afk run` have one each), and deciding
+against the in-memory state outside the queue handed overlapping batches the same
+session-wide index (which the dashboard drops as already seen) and let two new streams
+through a cap with one slot left.
 
 Ended sessions with no active SSE listeners are evicted from the in-memory cache after
 `AFK_EVICT_ENDED_AFTER_SECONDS` (10 minutes) of no access, in the same `tick()` pass that runs
@@ -697,6 +711,23 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   `makeEvent`, …) over literals, real implementations (`MemorySessionStorage`,
   `app.request()`) over mocks. See [TESTING.md](TESTING.md). The bash client is tested
   by sourcing it with `AFK_SOURCED=1` and calling functions directly from Vitest.
+- **2026-09-14** An `afk run` that owns its session keeps it open, in the foreground,
+  until the runs joined to it have finished, instead of ending it when its own
+  command exits (which turned the joiners' remaining frames into 410s). The wait
+  holds the terminal; a background caretaker was considered and rejected because it
+  would hold open the pipe the command's stdout went to and print into a terminal
+  that has moved on. Alongside: `owner.pid` is claimed atomically before a session
+  is created, so two runs started in the same instant share one session, and a run
+  whose first batch is turned away by the stream cap (422) stops its telemetry and
+  lets the command run. See "Concurrent runs" in [CLIENT.md](CLIENT.md).
+- **2026-09-14** Ingest admits one batch at a time per session, inside the session's
+  serial write queue, and a stream past the per-session cap is skipped and named in
+  the response (`rejectedStreams`) rather than failing the batch; 422 is kept for a
+  batch made only of such frames. The senders of one session run concurrently (an
+  `afk start` plus each joined `afk run`), and admitting against the in-memory state
+  before the write was awaited handed overlapping batches the same session-wide index,
+  which the dashboard drops as already seen, and let two runs through a cap with one
+  slot left. Found while checking whether concurrent `afk run`s can drop frames.
 - **2026-09-14** Admission control caps active sessions (20) and streams per session
   (10), sized for the smallest Lightsail container node (0.25 vCPU, 512 MB): a
   one-hour stream at 1 Hz is roughly 5 MB of JS objects, so the worst case stays under

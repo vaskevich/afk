@@ -19,7 +19,8 @@
 #                        run a command and report its progress; joins the session
 #                        started by `afk start` if one is running on this machine,
 #                        otherwise starts one (with machine telemetry) for the
-#                        lifetime of the command
+#                        lifetime of the command, and of any `afk run` that joins it
+#                        meanwhile
 #   afk status           show the session running on this machine, its queue (the
 #                        joined runs' included), what the queue cap dropped, and the
 #                        runs still going
@@ -83,8 +84,11 @@
 # Layout of ~/.afk:
 #   current                        the active session (id, token, server) so other
 #                                  afk processes can join it
-#   owner.pid                      pid of the process that created it; a dead owner
-#                                  marks `current` stale without asking the server
+#   owner.pid                      pid of the process that created it, claimed (an
+#                                  atomic create) before the session is, so two afk
+#                                  processes starting at once do not both create one;
+#                                  a dead owner marks `current` stale without asking
+#                                  the server
 #   sessions/<id>/session.json     the same record, kept with the session's files so a
 #                                  later `afk start` can send what was left in its queue
 #                                  (a session that ended while the server was unreachable)
@@ -104,9 +108,14 @@
 #                                  dropped, and nothing chains; a joiner's copy lives
 #                                  under its runs/<runId>/ next to its own queue
 #   sessions/<id>/runs/<runId>/    an `afk run`: the command's pid and command line, the
-#                                  newest chunks of its stdout and stderr (capped, and
-#                                  deleted when it exits), and (when it joined an
-#                                  existing session) its own queue
+#                                  pid of the `afk run` process itself (afk.pid, which
+#                                  an owning run waits on before ending the session),
+#                                  the newest chunks of its stdout and stderr (capped,
+#                                  and deleted when it exits), and (when it joined an
+#                                  existing session) its own queue and, if the server
+#                                  had no room for its stream (a 422 on its first
+#                                  batch), a `no-room` marker: the run's telemetry
+#                                  stops and the command is not touched
 # The directory and everything in it are readable by the user alone (mode 700 and 600).
 #
 # The client is deliberately dumb: it ships raw measurements and lets the server
@@ -208,6 +217,11 @@ SPOOL_DROP_LOG_INTERVAL_SECONDS=60
 # When the server is at capacity, `afk start` waits and retries this often, for at most this long.
 CAPACITY_RETRY_SECONDS=30
 CAPACITY_MAX_WAIT_SECONDS=600
+# An `afk run` that finds another afk claiming the session at this very moment waits
+# for its `current` this often, at most SESSION_CLAIM_WAIT_POLLS times (15 s, one
+# create request's --max-time), before running without telemetry. See claim_session_ownership.
+SESSION_CLAIM_POLL_SECONDS=0.2
+SESSION_CLAIM_WAIT_POLLS=75
 # `afk start` on a terminal waits this long for an answer to "update now?" before
 # taking it as no; a start nobody is watching is delayed by at most this.
 UPDATE_PROMPT_TIMEOUT_SECONDS=10
@@ -391,6 +405,49 @@ process_tree() { # pid
 owner_pid() { cat "$AFK_HOME/owner.pid" 2>/dev/null; }
 
 remove_current_session_files() { rm -f "$AFK_HOME/current" "$AFK_HOME/owner.pid"; }
+
+# `owner.pid` doubles as the lock on creating this machine's session: it is claimed,
+# through the atomic create that noclobber makes of `>`, before the create request is
+# sent, so two afk processes that found no session here in the same instant (two
+# `afk run`s started together) do not both create one; the loser waits for the
+# winner's `current` and joins it (wait_for_session_creation). A pid nobody runs is a
+# claim a crash left behind and is taken over. Returns 1 while another live process
+# holds the claim. The claim is released with the rest of the owner's state on exit
+# (the trap create_session would set otherwise), or by release_session_claim when the
+# create fails and the command goes on without a session; bash does not run the EXIT
+# trap on `exec`.
+claim_session_ownership() {
+  local pid
+  if ! (set -C; echo "$$" > "$AFK_HOME/owner.pid") 2>/dev/null; then
+    pid=$(owner_pid)
+    if [ -z "$pid" ] || pid_alive "$pid"; then
+      return 1
+    fi
+    rm -f "$AFK_HOME/owner.pid"
+    (set -C; echo "$$" > "$AFK_HOME/owner.pid") 2>/dev/null || return 1
+  fi
+  trap remove_owner_state EXIT
+}
+release_session_claim() {
+  remove_owner_state
+  trap - EXIT
+}
+
+# For an `afk run` that lost the claim: waits for the winner's `current` to appear,
+# for at most SESSION_CLAIM_WAIT_POLLS polls, and gives up early when the claim is
+# gone or its holder is (the winner's create failed and it went on without a session).
+wait_for_session_creation() {
+  local polls=0 pid
+  while [ ! -e "$AFK_HOME/current" ] && [ "$polls" -lt "$SESSION_CLAIM_WAIT_POLLS" ]; do
+    [ -e "$AFK_HOME/owner.pid" ] || break
+    pid=$(owner_pid)
+    if [ -n "$pid" ] && ! pid_alive "$pid"; then
+      break
+    fi
+    sleep "$SESSION_CLAIM_POLL_SECONDS"
+    polls=$((polls + 1))
+  done
+}
 
 # The queue holds one frame per file (see emit_frame); these size it up for the
 # sender's log, `afk status`, and the disk cap. They take the session's own queue
@@ -928,9 +985,10 @@ run_sampler_loop() {
   while [ ! -s "$RUN_DIR/pid" ]; do
     sleep 0.1
   done
-  # A session deleted on the server (the sender leaves the marker) has nowhere for
-  # these frames to go; the command itself is not touched.
-  while ! session_is_deleted; do
+  # A session deleted on the server, or one with no room for this run's stream (the
+  # sender leaves either marker), has nowhere for these frames to go; the command
+  # itself is not touched.
+  while ! run_telemetry_stopped; do
     seq=$((seq + 1))
     echo "$seq" > "$RUN_DIR/seq"
     data=$(collect_run running)
@@ -940,6 +998,58 @@ run_sampler_loop() {
     emit_frame "run:$RUN_ID" run "$seq" "$data"
     sleep "$SAMPLE_INTERVAL_SECONDS"
   done
+}
+
+# The run's last frame: `exited`, with the command's exit code and, only on failure,
+# the tail of its output (see run_output_tail), continuing the sampler's sequence.
+# Emitted once: an owning run emits it before waiting for the runs joined to its
+# session, and the common path after. The captured output has served its purpose once
+# the frame is built.
+FINAL_RUN_FRAME_EMITTED=0
+emit_final_run_frame() {
+  local seq
+  [ "$FINAL_RUN_FRAME_EMITTED" = 0 ] || return 0
+  FINAL_RUN_FRAME_EMITTED=1
+  seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
+  emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE" "$(run_output_tail "$EXIT_CODE")")"
+  remove_run_captures
+}
+
+# How many `afk run`s other than this one are still going on this machine: each
+# leaves its own pid in runs/<runId>/afk.pid (the command's pid is in `pid`, but a
+# run still sends its final frame after its command has exited). Every session
+# directory is looked at, since a run that followed its owner to a successor keeps
+# the run directory under the session it joined.
+RUN_PID_NAME=afk.pid
+live_joined_runs() {
+  local file pid count=0
+  for file in "$AFK_HOME"/sessions/*/runs/*/"$RUN_PID_NAME"; do
+    [ -e "$file" ] || continue
+    pid=$(cat "$file" 2>/dev/null)
+    if [ "$pid" != "$$" ] && pid_alive "$pid"; then
+      count=$((count + 1))
+    fi
+  done
+  echo "$count"
+}
+
+# An `afk run` that owns its session (no `afk start` was running) keeps the session
+# open once its own command has exited while other `afk run`s are still joined to
+# it: ending it would leave them sending into a 410, and their last frames would be
+# lost. The wait is in the foreground and says why; Ctrl-C or `afk stop` cuts it
+# short and the session is ended as usual. It also ends when the session is over
+# anyway (the system sampler stopped: deleted, or past the cap with no successor),
+# and when the last joined run is gone.
+wait_for_joined_runs() {
+  local count interrupted=0
+  count=$(live_joined_runs)
+  [ "$count" -gt 0 ] || return 0
+  log "$count joined afk run(s) still going; keeping session $SESSION_ID open until they finish (Ctrl-C or 'afk stop' ends it now)"
+  trap 'interrupted=1' INT TERM
+  while [ "$interrupted" = 0 ] && pid_alive "$SYSTEM_PID" && [ "$(live_joined_runs)" -gt 0 ]; do
+    sleep 1
+  done
+  trap - INT TERM
 }
 
 # ---------------------------------------------------------------------------
@@ -1389,8 +1499,9 @@ sample_once() { # [scheduled-seconds]
 # Sends up to SEND_MAX_FILES_PER_BATCH oldest queue files (one frame each) as one request.
 # Returns 0 on success (files deleted), 1 on a retryable failure, 2 when the session is
 # over on the server (410), 3 when the server will no longer talk to this client
-# version (426), and 4 when the server no longer knows the session at all (404), which
-# means it was deleted (see session_deleted). The queue is kept on 2, 3, and 4; the
+# version (426), 4 when the server no longer knows the session at all (404), which
+# means it was deleted (see session_deleted), and 5 when the session has no room for
+# a joiner's run stream (422, see session_no_room). The queue is kept on 2 to 5; the
 # caller decides what becomes of it.
 send_oldest_batch() {
   local batch="$SESSION_DIR/batch.ndjson" files="" count=0 f status
@@ -1428,17 +1539,36 @@ send_oldest_batch() {
       # server never forgets a live session for any other reason, so this is not
       # something a retry, a park, or a successor session can do anything about.
       return 4 ;;
-    400|401|413|422)
-      # The server will never accept this batch; keep it out of the way so we don't stall.
-      # TODO(hardening): decide whether to keep these for debugging or drop them.
-      log "server rejected batch with HTTP $status: $(cat "$SESSION_DIR/response.json" 2>/dev/null)"
-      mkdir -p "$SESSION_DIR/rejected"
+    422)
+      # Every frame in the batch is of a stream the session has no room for
+      # (docs/PROTOCOL.md, "Ingest"). For a joiner that is its own run stream, which
+      # no retry or park can help (the caller stops, see session_no_room); an owner
+      # only sees this under a cap below its own streams and parks the batch like any
+      # permanent rejection.
+      if [ "${SESSION_ROLE:-owner}" = joiner ]; then
+        return 5
+      fi
       # shellcheck disable=SC2086
-      mv $files "$SESSION_DIR/rejected/"
+      park_rejected_batch "$status" $files
+      return 0 ;;
+    400|401|413)
+      # shellcheck disable=SC2086
+      park_rejected_batch "$status" $files
       return 0 ;;
     *)
       return 1 ;;
   esac
+}
+
+# Keeps a batch the server will never accept out of the queue's way, so it cannot stall
+# what comes after it.
+# TODO(hardening): decide whether to keep these for debugging or drop them.
+park_rejected_batch() { # status queue-file...
+  local status=$1
+  shift
+  log "server rejected batch with HTTP $status: $(cat "$SESSION_DIR/response.json" 2>/dev/null)"
+  mkdir -p "$SESSION_DIR/rejected"
+  mv "$@" "$SESSION_DIR/rejected/"
 }
 
 # Drops the oldest queued frames until the queue is back under SPOOL_MAX_BYTES. Only
@@ -1517,12 +1647,36 @@ session_deleted() {
     "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
 }
 
+# The server had no room for this run's stream (a 422 on a joiner's first batch; see
+# docs/PROTOCOL.md, "Ingest"): the session filled up between load_current_session's
+# check of its stream count and the first send, which is what several `afk run`s
+# started in the same second do to each other. No retry can change the answer, so the
+# run goes on without telemetry, the way a deleted session leaves it: a `no-room`
+# marker next to `stop` stops the run sampler and tells the main process to skip the
+# final frame, the flush, and the end; the queue, all of it this run's, is dropped;
+# and one line says so. Only a joiner gets here (an owner's batch is never all new
+# streams under a cap that fits its own), so this touches nothing of the owner's.
+NO_ROOM_MARKER_NAME=no-room
+session_has_no_room() { [ -e "$SESSION_DIR/$NO_ROOM_MARKER_NAME" ]; }
+session_no_room() { # response-json
+  local limit
+  limit=$(json_get_number "$1" limit)
+  touch "$SESSION_DIR/$NO_ROOM_MARKER_NAME" "$SESSION_DIR/stop"
+  rm -f "$SESSION_DIR"/queue/*.ndjson "$SESSION_DIR"/queue/.*.ndjson.tmp \
+    "$SESSION_DIR/batch.ndjson" "$SESSION_DIR/response.json"
+  log "session $SESSION_ID has no room for another run (the server allows ${limit:-?} streams per session); running without telemetry"
+}
+# A run whose telemetry is over while its command goes on: the session was deleted, or
+# had no room for the run's stream.
+run_telemetry_stopped() { session_is_deleted || session_has_no_room; }
+
 # The session being over on the server (410) ends the sender, and with it the sampler,
 # except that a joiner follows its owner to a successor session, and an `afk start`
 # owner is told (a `gone` marker, see system_sampler_loop) so it can open one itself.
 # A session deleted on the server (404) ends the sender the same way, but for good (see
 # session_deleted); only a joiner whose owner has already moved on to a successor
-# (someone deleted the old session after the chain) follows it there.
+# (someone deleted the old session after the chain) follows it there. A joiner whose
+# run stream the session has no room for (422) stops for good too (session_no_room).
 sender_loop() {
   local backoff=1 rc
   while true; do
@@ -1553,6 +1707,9 @@ sender_loop() {
           continue
         fi
         session_deleted
+        return ;;
+      5)
+        session_no_room "$(cat "$SESSION_DIR/response.json" 2>/dev/null)"
         return ;;
     esac
   done
@@ -1856,6 +2013,8 @@ cmd_start() {
   cleanup_old_sessions
   resend_leftover_queues
   gather_host_info
+  claim_session_ownership \
+    || die "another afk (pid $(owner_pid)) is starting a session on this machine right now; try again in a moment"
   create_session_or_wait
   check_client_update prompt
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
@@ -1920,6 +2079,18 @@ cmd_run() {
   # of streams, just run the command.
   local owner=0 joined
   load_current_session; joined=$?
+  # No session here, but another afk may have found the same a moment ago and be
+  # creating one this instant (two `afk run`s started together): the claim on
+  # owner.pid tells, and the loser joins the winner's session once its `current` is
+  # there rather than creating a second one.
+  if [ "$joined" = 1 ] && ! claim_session_ownership; then
+    wait_for_session_creation
+    load_current_session; joined=$?
+    if [ "$joined" = 1 ] && ! claim_session_ownership; then
+      log "another afk (pid $(owner_pid)) is still starting a session on this machine"
+      joined=3
+    fi
+  fi
   case "$joined" in
     0)
       log "joining session $SESSION_ID"
@@ -1929,6 +2100,7 @@ cmd_run() {
       owner=1
       gather_host_info
       if ! create_session; then
+        release_session_claim
         run_without_telemetry "$@"
       fi
       log "no session running here; started $SESSION_ID with machine telemetry for the length of this command"
@@ -1954,6 +2126,8 @@ cmd_run() {
   else
     printf '\n  %s\n\n' "$DASHBOARD_URL"
   fi
+  # For an owning `afk run` to know which joined runs are still going (live_joined_runs).
+  echo "$$" > "$RUN_DIR/$RUN_PID_NAME"
 
   sender_loop &
   SENDER_PID=$!
@@ -1980,9 +2154,20 @@ cmd_run() {
     > >(tee >(run_capture_sink stdout)) 2> >(tee >(run_capture_sink stderr) >&2)
   EXIT_CODE=$?
   trap - INT TERM
+  log "command exited with status $EXIT_CODE"
 
   stop_background_job "$RUN_SAMPLER_PID"
   sleep 0.3
+  # An owning run whose command finished while other runs are still joined to its
+  # session keeps the session open for them (wait_for_joined_runs). Its own final
+  # frame goes out now, through the sender still running, into whichever session
+  # `current` names: the sampler may still chain meanwhile, and chain_session moves
+  # run frames along the way it does the run sampler's.
+  if [ "$owner" = 1 ] && [ "$(live_joined_runs)" -gt 0 ]; then
+    follow_current_session || true
+    run_telemetry_stopped || emit_final_run_frame
+    wait_for_joined_runs
+  fi
   # The system sampler goes first so that `current` holds still: if it chained during
   # the command, the final frame and the flush below go to the successor, whose
   # sender (started under the sampler) died with it; the sender started here was
@@ -1992,24 +2177,18 @@ cmd_run() {
     SENDER_PID=""
   fi
   # The session was deleted on the server while the command ran (the sender noticed,
-  # stopped the samplers, and said so): only the telemetry is over. The command's exit
-  # code is still its own, and nothing is sent, flushed, or ended.
-  if session_is_deleted; then
+  # stopped the samplers, and said so), or had no room for this run's stream: only the
+  # telemetry is over. The command's exit code is still its own, and nothing is sent,
+  # flushed, or ended.
+  if run_telemetry_stopped; then
     stop_background_job "$SENDER_PID"
     remove_run_captures
-    log "command exited with status $EXIT_CODE"
     if [ "$owner" = 1 ]; then
       discard_deleted_session
     fi
     exit "$EXIT_CODE"
   fi
-  local seq
-  seq=$(( $(cat "$RUN_DIR/seq" 2>/dev/null || echo 0) + 1 ))
-  # Only a failure ships any output, and only its tail (empty for exit code 0). The
-  # captured output has served its purpose once the final frame is built.
-  emit_frame "run:$RUN_ID" run "$seq" "$(collect_run exited "$EXIT_CODE" "$(run_output_tail "$EXIT_CODE")")"
-  remove_run_captures
-  log "command exited with status $EXIT_CODE"
+  emit_final_run_frame
 
   stop_background_job "$SENDER_PID"
   flush_queue

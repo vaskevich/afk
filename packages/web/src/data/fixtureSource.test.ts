@@ -42,10 +42,9 @@ describe("generateDemoSession", () => {
       maxGapSeconds = Math.max(maxGapSeconds, timestamps[i]! - timestamps[i - 1]!);
     }
 
-    // The doc comment promises a 90 s stretch with no frames at all; the measured gap
-    // between the last frame before it and the first frame after it is one second
-    // wider, since STALE_END itself is excluded from the stretch but still marks the
-    // far edge of the gap between samples.
+    // 90 samples are skipped (STALE_START inclusive, STALE_END exclusive), so the gap
+    // between the last frame before the stretch and the first after it is 91 s, as the
+    // doc comment on STALE_START/STALE_END says.
     expect(maxGapSeconds).toBe(91);
   });
 

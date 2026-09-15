@@ -14,7 +14,6 @@ import {
   DEFAULT_STORE_OPTIONS,
   SessionStore,
   TooManyFramesError,
-  TooManyStreamsError,
   UNKNOWN_ID_CACHE_MAX_ENTRIES,
   UNKNOWN_ID_TTL_MS,
   sessionEndMs,
@@ -56,6 +55,17 @@ class FlakyAppendStorage implements SessionStorage {
   }
   deleteSession(sessionId: string): Promise<void> {
     return this.inner.deleteSession(sessionId);
+  }
+}
+
+/**
+ * A storage whose append yields to the event loop the way a file or bucket write does,
+ * so two ingests of one session can interleave the way concurrent senders make them.
+ */
+class YieldingStorage extends MemorySessionStorage {
+  override async appendFrames(sessionId: string, frames: StoredFrame[]): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await super.appendFrames(sessionId, frames);
   }
 }
 
@@ -305,7 +315,7 @@ describe("SessionStore", () => {
       // The 31st frame (offset 30) carries sequence 31; re-ingesting it proves the
       // per-stream sequence map was rebuilt from storage, not left empty.
       const result = await store.ingest(loaded!, [makeSystemFrame(30, { cpuPercent: 95 })]);
-      expect(result).toEqual({ accepted: [], duplicates: 1 });
+      expect(result).toEqual({ accepted: [], duplicates: 1, rejectedStreams: [] });
     });
 
     it("logs one line with the frame count and the time taken when a session is loaded from storage", async () => {
@@ -530,7 +540,7 @@ describe("SessionStore", () => {
 
       const result = await store.ingest(session, [makeSystemFrame(0)]);
 
-      expect(result).toEqual({ accepted: [], duplicates: 1 });
+      expect(result).toEqual({ accepted: [], duplicates: 1, rejectedStreams: [] });
     });
 
     it("persists before advancing state, so a rejected write leaves the session untouched and a retry is accepted", async () => {
@@ -576,15 +586,53 @@ describe("SessionStore", () => {
       expect(session.frames).toHaveLength(3);
     });
 
-    it("throws TooManyStreamsError when a batch would add more streams than the session's limit", async () => {
+    it("skips the frames of a stream the session has no room for, stores the rest of the batch, and names the stream", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { maxActiveSessions: 20, maxStreamsPerSession: 1, maxFramesPerSession: 15_000 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
 
-      await expect(store.ingest(session, [makeRunFrame(0)])).rejects.toThrow(TooManyStreamsError);
-      expect(session.frames).toHaveLength(1);
+      const result = await store.ingest(session, [makeRunFrame(0), makeSystemFrame(1)]);
+
+      expect(result).toMatchObject({ duplicates: 0, rejectedStreams: ["run:abcd1234"] });
+      expect(result.accepted.map((f) => f.frame.stream)).toEqual(["system"]);
+      expect(session.frames).toHaveLength(2);
+      expect([...session.latestSequence.keys()]).toEqual(["system"]);
+    });
+
+    // Regression: the index was taken from the frame count before the write was awaited,
+    // so two senders of one session (an `afk start` and a joined `afk run`) whose batches
+    // overlapped were both given the same index, and the dashboard dropped one frame.
+    it("gives two batches whose writes overlap distinct indexes, in the order they were admitted", async () => {
+      const store = new SessionStore(new YieldingStorage());
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      const [first, second] = await Promise.all([
+        store.ingest(session, [makeSystemFrame(0)]),
+        store.ingest(session, [makeRunFrame(0)]),
+      ]);
+
+      expect(first.accepted.map((f) => f.index)).toEqual([1]);
+      expect(second.accepted.map((f) => f.index)).toEqual([2]);
+      expect(session.frames.map((f) => f.index)).toEqual([1, 2]);
+    });
+
+    it("admits only one of two new streams whose batches race for the last slot under the cap", async () => {
+      const store = new SessionStore(new YieldingStorage(), {
+        limits: { maxActiveSessions: 20, maxStreamsPerSession: 2, maxFramesPerSession: 15_000 },
+      });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      const results = await Promise.all([
+        store.ingest(session, [makeRunFrame(0, { runId: "aaaaaaaa" })]),
+        store.ingest(session, [makeRunFrame(0, { runId: "bbbbbbbb" })]),
+      ]);
+
+      expect(results.map((r) => r.accepted.length)).toEqual([1, 0]);
+      expect(results.map((r) => r.rejectedStreams)).toEqual([[], ["run:bbbbbbbb"]]);
+      expect(session.latestSequence.size).toBe(2);
     });
   });
 

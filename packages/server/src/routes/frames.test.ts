@@ -139,7 +139,7 @@ describe("POST /api/sessions/:id/frames", () => {
     expect(body.details.fieldErrors.sequence).toBeDefined();
   });
 
-  it("returns 422 naming the stream when a batch would add a stream beyond maxStreamsPerSession", async () => {
+  it("returns 422 naming the stream when every frame of a batch belongs to a stream beyond maxStreamsPerSession", async () => {
     const { app, sessionId, ingestToken } = await startSession({
       maxActiveSessions: 20,
       maxStreamsPerSession: 1,
@@ -147,11 +147,42 @@ describe("POST /api/sessions/:id/frames", () => {
     });
     await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
 
-    const res = await postFrames(app, sessionId, ingestToken, [makeRunFrame(0)]);
+    const res = await postFrames(app, sessionId, ingestToken, [makeRunFrame(0), makeRunFrame(1)]);
 
     expect(res.status).toBe(422);
     const body = await res.json();
     expect(body.details).toMatchObject({ stream: "run:abcd1234", limit: 1 });
+    expect(
+      (await (await app.request(`/api/sessions/${sessionId}/frames`)).json()).frames,
+    ).toHaveLength(1);
+  });
+
+  // Regression: the whole batch was refused, so the known streams' frames in it were lost.
+  it("accepts the known streams of a batch and names the one beyond the cap in rejectedStreams", async () => {
+    const { app, sessionId, ingestToken } = await startSession({
+      maxActiveSessions: 20,
+      maxStreamsPerSession: 1,
+      maxFramesPerSession: 15_000,
+    });
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+
+    const res = await postFrames(app, sessionId, ingestToken, [
+      makeSystemFrame(1),
+      makeRunFrame(0),
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      accepted: 1,
+      duplicates: 0,
+      latestSequence: { system: 2 },
+      rejectedStreams: ["run:abcd1234"],
+    });
+    const stored = await (await app.request(`/api/sessions/${sessionId}/frames`)).json();
+    expect(stored.frames.map((f: { frame: { stream: string } }) => f.frame.stream)).toEqual([
+      "system",
+      "system",
+    ]);
   });
 
   it("returns 410 when posting to a session that has ended", async () => {

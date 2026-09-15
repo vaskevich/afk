@@ -353,6 +353,12 @@ export const IngestResponse = z.object({
   duplicates: z.number().int().nonnegative(),
   /** Highest sequence accepted so far, per stream, so a client can resync after a hiccup. */
   latestSequence: z.record(z.string(), z.number().int()),
+  /**
+   * Streams in the batch that the session had no room for (`maxStreamsPerSession`):
+   * their frames were skipped while the rest of the batch was accepted. Absent when
+   * there were none; a batch made only of such frames is a 422 instead.
+   */
+  rejectedStreams: z.array(z.string()).optional(),
 });
 export type IngestResponse = z.infer<typeof IngestResponse>;
 

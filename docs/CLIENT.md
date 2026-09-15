@@ -91,6 +91,61 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
 delete session demo (HTTP 403): the demo session cannot be deleted`).
 - Today: macOS only. Wanted: Linux.
 
+## Concurrent runs
+
+Several `afk run`s on one machine share one session (the one `afk start` owns, or the
+one the first `afk run` created) and are each their own `run:<runId>` stream in it.
+Checked end to end by the contract test (five runs joined to an `afk start`, an
+owning run outlived by its joiners, two runs racing for the last slot under the cap,
+two runs started in the same instant with no session), and what holds them apart:
+
+- **Queues are per process, never shared.** The owner spools under
+  `sessions/<id>/queue/` and each joined run under `sessions/<id>/runs/<runId>/queue/`,
+  each with a sender of its own, so no two senders ever list, send, or delete the
+  same files: a batch is the oldest files of one process's queue, and only that
+  process deletes them, on a 2xx. (Two senders on one directory would race between
+  listing and `cat`, and between a failed send and the other's deletion.) What is
+  shared is the session on the server, whose ingest admits one batch at a time per
+  session, so session-wide indexes stay distinct however many senders are in flight
+  (see admission control in [ARCHITECTURE.md](ARCHITECTURE.md)).
+- **Two `afk run`s started in the same instant, no session running.** Both find no
+  `current`. `owner.pid` is claimed atomically (noclobber) before the create request
+  (`claim_session_ownership`), so exactly one creates the session; the other waits
+  for its `current` (at most 15 s, one create request's worth; less if the winner's
+  create fails) and joins it. A second `afk start` in that window is refused, naming
+  the pid.
+- **The stream cap.** `maxStreamsPerSession` is 10 and the owner takes three
+  (`system`, `processes`, `agents`), so a session has room for seven runs. A joiner
+  checks `streamCount` against `maxStreams` before joining and runs without telemetry
+  when the session is already full. Several runs started in the same second all pass
+  that check and fill the session between it and their first batch; the ones past the
+  cap learn from a 422 on that batch, which the server keeps nothing of since every
+  frame in it was theirs (see "Ingest" in [PROTOCOL.md](PROTOCOL.md)). The sender
+  then leaves a `no-room` marker next to `stop`, drops the run's queue, and prints
+  once `session <id> has no room for another run (the server allows 10 streams per
+session); running without telemetry`; the run sampler stops on the marker and the
+  main process skips the final frame, the flush, and the end. The command runs on
+  exactly as it would have, and the owner's streams and the other runs are untouched,
+  since the joiner's queue and markers are its own. An owner's batch mixes streams
+  and the server keeps the known ones, naming the others in `rejectedStreams`; only a
+  cap below the owner's own three could turn an owner's batch away whole, and that
+  batch is parked in `rejected/` like any permanent rejection.
+- **Ownership when the owner's command finishes first.** `afk start` ends its session
+  on Ctrl-C whatever is joined to it: that is a decision. An `afk run` that owns its
+  session (no `afk start` was running) has no such moment: its command exiting is not
+  a decision to end the session, and ending it would leave the runs joined to it
+  sending into 410 for the rest of their lives, their final frames lost. So the owner
+  sends its own final frame at once and then keeps the session open, samplers and
+  sender running, until the last joined run's afk process is gone
+  (`runs/<runId>/afk.pid`, not the command's pid: a run still flushes after its
+  command has exited). One line says `N joined afk run(s) still going; keeping
+session <id> open until they finish (Ctrl-C or 'afk stop' ends it now)`, the exit
+  status stays the command's, and Ctrl-C or `afk stop` ends the session at once as
+  usual. This holds the terminal (a pipeline or `&&` chain waits with it), which is
+  the honest trade: the alternative, a caretaker left running in the background,
+  would hold open the pipe the command's stdout went to and print into a terminal
+  that has moved on. Reopen if the wait turns out to bite in scripts.
+
 ## Current decision
 
 Bash 3.2, single file, curl only. Chosen for the download-and-read story and zero

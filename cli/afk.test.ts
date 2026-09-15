@@ -1441,6 +1441,42 @@ describe("send_oldest_batch", () => {
     expect(await exists(join(sessionDir, "queue", "0000000001.ndjson"))).toBe(false);
   });
 
+  const NO_ROOM_RESPONSE =
+    '{"error":"stream \\"run:ab12cd34\\" would exceed the limit of 10 streams per session","details":{"stream":"run:ab12cd34","limit":10}}';
+
+  it("returns 5 and keeps the queued files, without parking them, on a 422 for a joiner", async () => {
+    const sessionDir = await makeQueue();
+    await writeFile(join(sessionDir, "queue", "0000000001-run:ab12cd34.ndjson"), "RUN\n");
+    const server = await startServer(() => ({ status: 422, body: NO_ROOM_RESPONSE }));
+
+    const { stdout, stderr } = await runBash('send_oldest_batch; printf "RC=%d" "$?"', {
+      ...baseEnv,
+      SESSION_DIR: sessionDir,
+      AFK_SERVER: server.url,
+      SESSION_ROLE: "joiner",
+    });
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "5" });
+    expect(await queueFiles(sessionDir)).toEqual(["0000000001-run:ab12cd34.ndjson"]);
+    expect(await exists(join(sessionDir, "rejected"))).toBe(false);
+  });
+
+  it("parks the batch in rejected/ on a 422 for an owner, as for any permanent rejection", async () => {
+    const sessionDir = await makeQueue();
+    await writeFile(join(sessionDir, "queue", "0000000001-processes.ndjson"), "PROC\n");
+    const server = await startServer(() => ({ status: 422, body: NO_ROOM_RESPONSE }));
+
+    const { stdout, stderr } = await runBash('send_oldest_batch; printf "RC=%d" "$?"', {
+      ...baseEnv,
+      SESSION_DIR: sessionDir,
+      AFK_SERVER: server.url,
+    });
+
+    expect(parseKeyValueLines(stdout), stderr).toMatchObject({ RC: "0" });
+    expect(await exists(join(sessionDir, "rejected", "0000000001-processes.ndjson"))).toBe(true);
+    expect(await queueFiles(sessionDir)).toEqual([]);
+  });
+
   it("ships frames emitted by two streams in sequence order within each stream", async () => {
     const sessionDir = await makeQueue();
     const server = await startServer(() => ({ status: 200 }));
@@ -2508,6 +2544,42 @@ describe("sender_loop when the session was deleted on the server", () => {
   });
 });
 
+describe("sender_loop when the session has no room for a joiner's run", () => {
+  const baseEnv = { INGEST_TOKEN: "tok-old", SESSION_ID: "oldSession", AFK_VERSION: "0.1.0" };
+  const NO_ROOM_LINE =
+    "afk: session oldSession has no room for another run (the server allows 4 streams per session); running without telemetry";
+
+  it("stops, drops the run's queue, leaves no-room and stop markers, and says so once naming the server's limit", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startServer(() => ({
+      status: 422,
+      body: '{"error":"stream \\"run:ab12cd34\\" would exceed the limit of 4 streams per session","details":{"stream":"run:ab12cd34","limit":4}}',
+    }));
+    const runDir = join(afkHome, "sessions", "oldSession", "runs", "ab12cd34");
+    await mkdir(join(runDir, "queue"), { recursive: true });
+    await writeFile(join(runDir, "queue", "0000000001-run:ab12cd34.ndjson"), "RUN\n");
+    await writeFile(join(runDir, "queue", "0000000002-run:ab12cd34.ndjson"), "RUN\n");
+
+    const { code, stderr } = await runBash("sender_loop", {
+      ...baseEnv,
+      AFK_HOME: afkHome,
+      AFK_SERVER: server.url,
+      SESSION_DIR: runDir,
+      SESSION_ROLE: "joiner",
+    });
+
+    expect(code, stderr).toBe(0);
+    expect(stderr.split("\n").filter((line) => line === NO_ROOM_LINE)).toHaveLength(1);
+    expect(server.requests.map((req) => req.url)).toEqual(["/api/sessions/oldSession/frames"]);
+    expect(await queueFiles(runDir)).toEqual([]);
+    expect(await exists(join(runDir, "rejected"))).toBe(false);
+    expect(await exists(join(runDir, "no-room"))).toBe(true);
+    expect(await exists(join(runDir, "stop"))).toBe(true);
+    // Nothing of the owner's is touched: no marker in the session directory.
+    expect(await exists(join(afkHome, "sessions", "oldSession", "stop"))).toBe(false);
+  });
+});
+
 describe("flush_queue when the session was deleted on the server", () => {
   it("drops the rest of the queue, leaves the markers, and prints the deleted line once", async () => {
     const afkHome = await makeTempDir();
@@ -2573,6 +2645,69 @@ describe("owner exit", () => {
     );
 
     expect(parseKeyValueLines(stdout), stderr).toEqual({ CURRENT: "yes", OWNER: "yes" });
+  });
+});
+
+describe("claim_session_ownership", () => {
+  /** No process has this pid on macOS (pids stop at 99998) or on any common Linux default. */
+  const DEAD_PID = "999999";
+
+  it("takes the claim when there is none and refuses a second while the first holder is alive", async () => {
+    const afkHome = await makeTempDir();
+
+    const { stdout, stderr } = await runBash(
+      [
+        'claim_session_ownership && echo "FIRST=$(cat "$AFK_HOME/owner.pid")"',
+        'printf "SELF=%s\\n" "$$"',
+        // A second afk (another process; this one's pid is alive either way).
+        "(claim_session_ownership && echo SECOND=taken || echo SECOND=refused)",
+      ].join("\n"),
+      { AFK_HOME: afkHome },
+    );
+
+    const values = parseKeyValueLines(stdout);
+    expect(values.FIRST, stderr).toBe(values.SELF);
+    expect(values.SECOND).toBe("refused");
+  });
+
+  it("refuses while another live process holds the claim, even with no current session yet", async () => {
+    const afkHome = await makeTempDir();
+    await writeFile(join(afkHome, "owner.pid"), `${process.pid}\n`);
+
+    const { stdout, stderr } = await runBash(
+      "claim_session_ownership && echo CLAIM=taken || echo CLAIM=refused",
+      { AFK_HOME: afkHome },
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ CLAIM: "refused" });
+    expect((await readFile(join(afkHome, "owner.pid"), "utf8")).trim()).toBe(String(process.pid));
+  });
+
+  it("takes over a claim whose holder is gone, as a crash leaves behind", async () => {
+    const afkHome = await makeTempDir();
+    await writeFile(join(afkHome, "owner.pid"), `${DEAD_PID}\n`);
+
+    const { stdout, stderr } = await runBash(
+      'claim_session_ownership && echo "CLAIM=$(cat "$AFK_HOME/owner.pid")"; printf "SELF=%s\\n" "$$"',
+      { AFK_HOME: afkHome },
+    );
+
+    const values = parseKeyValueLines(stdout);
+    expect(values.CLAIM, stderr).toBe(values.SELF);
+  });
+
+  it("is released with the owner's state on exit, and by release_session_claim before an exec", async () => {
+    const afkHome = await makeTempDir();
+
+    const onExit = await runBash("claim_session_ownership", { AFK_HOME: afkHome });
+    const released = await runBash(
+      'claim_session_ownership; release_session_claim; exec test -e "$AFK_HOME/owner.pid"',
+      { AFK_HOME: afkHome },
+    );
+
+    expect(onExit.code, onExit.stderr).toBe(0);
+    expect(released.code, released.stderr).toBe(1);
+    expect(await exists(join(afkHome, "owner.pid"))).toBe(false);
   });
 });
 
@@ -4091,6 +4226,185 @@ describe("cmd_run when the session is deleted on the server mid-command", () => 
       expect(urls.filter((url) => url.endsWith("/frames"))).toHaveLength(2);
       // The owner's files are the owner's to remove.
       expect(await exists(join(afkHome, "current"))).toBe(true);
+    },
+  );
+});
+
+describe("cmd_run joining a session that has no room for its run", () => {
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  const noRoom =
+    '{"error":"stream \\"run:ab12cd34\\" would exceed the limit of 4 streams per session","details":{"stream":"run:ab12cd34","limit":4}}';
+  const NO_ROOM_LINE =
+    "afk: session abc123 has no room for another run (the server allows 4 streams per session); running without telemetry";
+  const RUN_TIMEOUT_MS = 30_000;
+
+  it.skipIf(process.platform !== "darwin")(
+    "stops its telemetry on the first batch's 422, drops the queue, and lets the command run to the end",
+    { timeout: RUN_TIMEOUT_MS },
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startServer((req) => {
+        if (req.url === "/api/sessions/abc123") {
+          // Room when checked: the session fills up before the first batch lands.
+          return {
+            status: 200,
+            body: '{"status":"active","maxDurationSeconds":3600,"streamCount":3,"maxStreams":4}',
+          };
+        }
+        if (req.url.endsWith("/frames")) {
+          return { status: 422, body: noRoom };
+        }
+        return { status: 200, body: accepted };
+      });
+      await mkdir(join(afkHome, "sessions", "abc123"), { recursive: true });
+      await writeFile(
+        join(afkHome, "current"),
+        `sessionId=abc123\ningestToken=tok-abc\nserver=${server.url}\ndashboardUrl=http://example.test/s/abc123\n`,
+      );
+      // This test process stands in for the owner, alive for the whole run.
+      await writeFile(join(afkHome, "owner.pid"), `${process.pid}\n`);
+
+      const { code, stdout, stderr } = await runBash(
+        `cmd_run -- sh -c 'for i in 1 2 3; do echo out $i; sleep 1; done; exit 6'`,
+        { AFK_HOME: afkHome, AFK_SERVER: server.url },
+        RUN_TIMEOUT_MS,
+      );
+
+      expect(code).toBe(6);
+      expect(stdout).toContain("out 1\nout 2\nout 3\n");
+      expect(stderr).toContain("joining session abc123");
+      expect(stderr.split("\n").filter((line) => line === NO_ROOM_LINE)).toHaveLength(1);
+      expect(stderr).toContain("command exited with status 6");
+      const urls = server.requests.map((req) => req.url);
+      // One batch learned there was no room; no final frame, flush, end, or successor followed.
+      expect(urls.filter((url) => url.endsWith("/frames"))).toHaveLength(1);
+      expect(urls.filter((url) => url.endsWith("/end"))).toEqual([]);
+      expect(urls.filter((url) => url === "/api/sessions")).toEqual([]);
+      const runsDir = join(afkHome, "sessions", "abc123", "runs");
+      const [runId] = await readdir(runsDir);
+      expect(await queueFiles(join(runsDir, runId!))).toEqual([]);
+      expect(await exists(join(runsDir, runId!, "rejected"))).toBe(false);
+      expect(await exists(join(runsDir, runId!, "no-room"))).toBe(true);
+      // The owner's files are the owner's to remove.
+      expect(await exists(join(afkHome, "current"))).toBe(true);
+    },
+  );
+});
+
+describe("cmd_run owning a session that other runs join", () => {
+  const SESSION_ID = "sess123";
+  const created = `{"sessionId":"${SESSION_ID}","ingestToken":"tok","dashboardUrl":"http://example.test/s/${SESSION_ID}","maxDurationSeconds":3600}`;
+  const summary = '{"status":"active","maxDurationSeconds":3600,"streamCount":3,"maxStreams":10}';
+  const accepted = '{"accepted":1,"duplicates":0,"latestSequence":{}}';
+  /** The joined run outlives the owner's command by this much, so the owner has to wait. */
+  const JOINER_SECONDS = 3;
+  const RUN_TIMEOUT_MS = 30_000;
+
+  /** A stand-in server that creates one session, reports it active, and accepts everything. */
+  function acceptingServer(): Promise<TestServer> {
+    return startServer((req) => {
+      if (req.url === "/api/sessions") {
+        return { status: 201, body: created };
+      }
+      if (req.url === `/api/sessions/${SESSION_ID}`) {
+        return { status: 200, body: summary };
+      }
+      return { status: 200, body: accepted };
+    });
+  }
+
+  /** The exited run frames a server received, with the request they came in, in arrival order. */
+  function exitedFrames(server: TestServer): { command: string; request: number }[] {
+    return server.requests.flatMap((req, request) =>
+      req.url.endsWith("/frames")
+        ? req.body
+            .split("\n")
+            .filter((line) => line !== "")
+            .map((line) => Frame.parse(JSON.parse(line)))
+            .filter((frame): frame is RunFrame => frame.collector === "run")
+            .filter((frame) => frame.data.state === "exited")
+            .map((frame) => ({ command: frame.data.command, request }))
+        : [],
+    );
+  }
+
+  // Regression: the owner ended the session the moment its own command exited, so the
+  // joined run's later frames, its final one included, were refused with 410. Runs the
+  // real collectors for the session it owns, so macOS only.
+  it.skipIf(process.platform !== "darwin")(
+    "keeps the session open until the joined run is done, then ends it, with both runs' final frames delivered",
+    { timeout: RUN_TIMEOUT_MS },
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await acceptingServer();
+      const env = { AFK_HOME: afkHome, AFK_SERVER: server.url };
+
+      const owner = runBash("cmd_run -- sleep 1", env, RUN_TIMEOUT_MS);
+      await waitUntil(
+        "the owner to publish its session",
+        () => exists(join(afkHome, "current")),
+        RUN_TIMEOUT_MS,
+      );
+      const joinerStarted = Date.now();
+      const joiner = runBash(`cmd_run -- sleep ${JOINER_SECONDS}`, env, RUN_TIMEOUT_MS);
+      const joinerResult = await joiner;
+      const joinerExited = Date.now();
+      const ownerResult = await owner;
+      const ownerExited = Date.now();
+
+      expect(joinerResult.code, joinerResult.stderr).toBe(0);
+      expect(ownerResult.code, ownerResult.stderr).toBe(0);
+      expect(joinerResult.stderr).toContain(`joining session ${SESSION_ID}`);
+      expect(ownerResult.stderr).toContain("command exited with status 0");
+      expect(ownerResult.stderr).toContain(
+        `1 joined afk run(s) still going; keeping session ${SESSION_ID} open until they finish`,
+      );
+      expect(ownerResult.stderr).toContain("session ended. Dashboard stays available");
+      // The owner's command was over after a second; the owner itself outlived the joiner.
+      expect(ownerExited).toBeGreaterThanOrEqual(joinerExited);
+      expect(joinerExited - joinerStarted).toBeGreaterThanOrEqual(JOINER_SECONDS * 1000);
+      // Both runs' final frames arrived before the one end, the owner's first (it went
+      // out when its command exited, not when the session ended).
+      const ends = server.requests
+        .map((req, index) => ({ url: req.url, index }))
+        .filter(({ url }) => url.endsWith("/end"));
+      expect(ends.map(({ url }) => url)).toEqual([`/api/sessions/${SESSION_ID}/end`]);
+      const exited = exitedFrames(server);
+      expect(exited.map(({ command }) => command)).toEqual(["sleep 1", `sleep ${JOINER_SECONDS}`]);
+      expect(Math.max(...exited.map(({ request }) => request))).toBeLessThan(ends[0]!.index);
+      expect(server.requests.filter((req) => req.url === "/api/sessions")).toHaveLength(1);
+      expect(await queueFiles(join(afkHome, "sessions", SESSION_ID))).toEqual([]);
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+    },
+  );
+
+  // Regression: both found no session and both created one; the second's `current`
+  // overwrote the first's, and the first's exit trap then removed it.
+  it.skipIf(process.platform !== "darwin")(
+    "started at the same moment as another afk run, exactly one creates the session and the other joins it",
+    { timeout: RUN_TIMEOUT_MS },
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await acceptingServer();
+      const env = { AFK_HOME: afkHome, AFK_SERVER: server.url };
+
+      const [first, second] = await Promise.all([
+        runBash("cmd_run -- sleep 2", env, RUN_TIMEOUT_MS),
+        runBash("cmd_run -- sleep 2", env, RUN_TIMEOUT_MS),
+      ]);
+
+      expect(first.code, first.stderr).toBe(0);
+      expect(second.code, second.stderr).toBe(0);
+      const logs = [first.stderr, second.stderr];
+      expect(
+        logs.filter((log) => log.includes(`started ${SESSION_ID} with machine telemetry`)),
+      ).toHaveLength(1);
+      expect(logs.filter((log) => log.includes(`joining session ${SESSION_ID}`))).toHaveLength(1);
+      expect(server.requests.filter((req) => req.url === "/api/sessions")).toHaveLength(1);
+      expect(exitedFrames(server)).toHaveLength(2);
+      expect(server.requests.filter((req) => req.url.endsWith("/end"))).toHaveLength(1);
+      expect(await exists(join(afkHome, "current"))).toBe(false);
+      expect(await exists(join(afkHome, "owner.pid"))).toBe(false);
     },
   );
 });

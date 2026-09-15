@@ -111,6 +111,8 @@ export function sessionEndMs(record: SessionRecord): number {
 export interface IngestResult {
   accepted: StoredFrame[];
   duplicates: number;
+  /** Streams the batch carried that the session had no room for; their frames were skipped. */
+  rejectedStreams: string[];
 }
 
 /** Thrown by `ingest` when a batch would push a session past `maxFramesPerSession`. */
@@ -127,16 +129,6 @@ export class AlreadyContinuedError extends Error {
     readonly nextSessionId: string,
   ) {
     super(`session ${sessionId} already continues in ${nextSessionId}`);
-  }
-}
-
-/** Thrown by `ingest` when a batch would add an eleventh (etc.) stream to a session. */
-export class TooManyStreamsError extends Error {
-  constructor(
-    readonly stream: string,
-    readonly limit: number,
-  ) {
-    super(`stream "${stream}" would exceed the limit of ${limit} streams per session`);
   }
 }
 
@@ -580,13 +572,47 @@ export class SessionStore {
    * its stream. That makes client retries idempotent: a batch that was received but whose
    * acknowledgement was lost is simply resent and ignored.
    *
+   * A frame of a stream the session has no room for (`maxStreamsPerSession`) is skipped
+   * too and its stream reported in `rejectedStreams`, so the rest of the batch still
+   * lands; the frames route answers 422 only when every frame in the batch was one.
+   *
+   * Admission (de-duplication, the stream cap, the index each new frame gets) is decided
+   * inside the session's write queue, together with the write it leads to. The senders
+   * of one session run concurrently (an `afk start` and every `afk run` joined to it
+   * each have their own), and two batches admitted against the same in-memory state
+   * would both take the same next index, which the dashboard drops as already seen, and
+   * both pass a stream cap with one slot left.
+   *
    * Frames are persisted before the in-memory state advances, so a failed write leaves the
    * session untouched and the client's retry is not mistaken for a duplicate.
    */
   async ingest(session: Session, frames: Frame[]): Promise<IngestResult> {
     const receivedAt = Date.now();
     session.lastAccessAt = receivedAt;
+    return session.writeQueue.run(async () => {
+      const { nextSequence, ...result } = this.admit(session, frames, receivedAt);
+      if (result.accepted.length === 0) {
+        return result;
+      }
+
+      await this.storage.appendFrames(session.sessionId, result.accepted);
+
+      session.latestSequence = nextSequence;
+      session.frames.push(...result.accepted);
+      this.emit(session, { type: "frames", frames: result.accepted });
+      this.emitEvents(session, session.engine.onFrames(result.accepted));
+      return result;
+    });
+  }
+
+  /** The admission decision for one batch against the session's state right now. */
+  private admit(
+    session: Session,
+    frames: Frame[],
+    receivedAt: number,
+  ): IngestResult & { nextSequence: Map<string, number> } {
     const accepted: StoredFrame[] = [];
+    const rejectedStreams: string[] = [];
     const nextSequence = new Map(session.latestSequence);
     let duplicates = 0;
     let nextIndex = session.frames.length + 1;
@@ -600,7 +626,10 @@ export class SessionStore {
         !nextSequence.has(frame.stream) &&
         nextSequence.size >= this.options.limits.maxStreamsPerSession
       ) {
-        throw new TooManyStreamsError(frame.stream, this.options.limits.maxStreamsPerSession);
+        if (!rejectedStreams.includes(frame.stream)) {
+          rejectedStreams.push(frame.stream);
+        }
+        continue;
       }
       nextSequence.set(frame.stream, frame.sequence);
       if (nextIndex > this.options.limits.maxFramesPerSession) {
@@ -608,16 +637,6 @@ export class SessionStore {
       }
       accepted.push({ index: nextIndex++, receivedAt, frame });
     }
-    if (accepted.length === 0) {
-      return { accepted, duplicates };
-    }
-
-    await session.writeQueue.run(() => this.storage.appendFrames(session.sessionId, accepted));
-
-    session.latestSequence = nextSequence;
-    session.frames.push(...accepted);
-    this.emit(session, { type: "frames", frames: accepted });
-    this.emitEvents(session, session.engine.onFrames(accepted));
-    return { accepted, duplicates };
+    return { accepted, duplicates, rejectedStreams, nextSequence };
   }
 }
