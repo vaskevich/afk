@@ -271,7 +271,9 @@ key=value ...`, threshold from `AFK_LOG_LEVEL` (default `info`). `info` is one l
   identify sessions for as long as they are kept, and that retention is Lightsail's
   (the container service's log, not something the server controls), not the seven-day
   session retention. The `afk run` command line, which a user types and can contain a
-  secret, appears only at `debug`; `describeFrame` never includes it.
+  secret (it is redacted on the client, but only the obvious shapes), is logged at no
+  level: `describeFrame` never includes it and the per-frame `debug` line names the
+  run by its stream id only.
 - **Graceful shutdown** (`shutdown.ts`). On SIGTERM or SIGINT the server stops the
   ticker and sweeper, closes the listener, waits for every in-memory session's write
   queue to drain so no accepted batch is half-written, closes the remaining
@@ -440,9 +442,10 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   the dashboard still shows what ran. On the client rather than the server because
   the server's bucket and container logs are exactly where a secret must never land,
   and a server that has seen a secret once has it for the log's lifetime; the
-  server now never sees the original at all. A pattern the redaction misses is a
-  client bug, fixed by a client release, and the dashboard's Delete control is the
-  backstop.
+  server now never sees the original at all, and its logs carry no command line at
+  any level (the per-frame `debug` line used to). A pattern the redaction misses is
+  a client bug, fixed by a client release, and the dashboard's Delete control is
+  the backstop.
 - **2026-09-14** Codex is counted next to Claude Code, one block of the same five counts
   per tool found, a tool that is not there having no block (additive: both blocks are
   optional on the wire, frames from the previous client still parse, the protocol

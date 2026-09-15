@@ -13,8 +13,8 @@
  * every module; `index.ts` sets its level from `AFK_LOG_LEVEL` (config.ts) before
  * anything else runs. Tests that care about a line spy on `log`, never on `console`.
  *
- * What goes where: `debug` is per-frame detail (and the only level that ever carries
- * an `afk run` command line); `info` is one line per batch, per session lifecycle
+ * What goes where: `debug` is per-frame detail (the `afk run` command line is logged
+ * at no level, see routes/frames.ts); `info` is one line per batch, per session lifecycle
  * step, per anomaly event, and per sweeper run; `warn` is something the server worked
  * around; `error` is something it could not. Session ids appear at `info` on purpose:
  * an operator needs them to find a session, which means logs identify sessions for as

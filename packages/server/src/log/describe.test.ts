@@ -65,6 +65,20 @@ describe("describeFrame", () => {
       expect(describeFrame(frame)).toContain("exited=3");
     });
 
+    it("names the run by its stream id, never by its command line, on the final frame too", () => {
+      const frame = makeRunFrame(1, {
+        state: "exited",
+        exitCode: 3,
+        command: "psql postgres://me:hunter2@db/app",
+      });
+
+      const description = describeFrame(frame);
+
+      expect(description).toContain(`${frame.stream} #${frame.sequence}`);
+      expect(description).not.toContain("psql");
+      expect(description).not.toContain("hunter2");
+    });
+
     it("counts the tail lines of a failed command on one line without printing them", () => {
       const tail = makeRunTail({ stdout: ["a", "b"], stderr: ["fatal: boom"] });
       const frame = makeRunFrame(1, { state: "exited", exitCode: 3, tail });

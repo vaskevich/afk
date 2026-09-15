@@ -13,8 +13,9 @@ import { log } from "../log/logger.ts";
 /**
  * One `info` line per batch (an operator can find a session and see it is alive without
  * one line per frame; at the 20 x 10 cap that would be tens of thousands of lines an
- * hour) and one `debug` line per accepted frame. The `afk run` command line only ever
- * appears on the debug line: it is typed by the user and can carry secrets.
+ * hour) and one `debug` line per accepted frame. The `afk run` command line is logged
+ * at no level: it is typed by the user and, redaction notwithstanding, can carry a
+ * secret, and the run's stream id in `describeFrame` is enough to find it.
  */
 function logBatch(sessionId: string, result: IngestResult): void {
   const streams = new Set(result.accepted.map((stored) => stored.frame.stream));
@@ -28,8 +29,7 @@ function logBatch(sessionId: string, result: IngestResult): void {
     return;
   }
   for (const { frame } of result.accepted) {
-    const command = frame.collector === "run" ? frame.data.command : undefined;
-    log.debug(describeFrame(frame), { session: sessionId, command });
+    log.debug(describeFrame(frame), { session: sessionId });
   }
 }
 

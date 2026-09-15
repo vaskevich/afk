@@ -74,19 +74,22 @@ describe("POST /api/sessions/:id/frames", () => {
     });
   });
 
-  it("keeps the run command line out of the info summary and puts it on the debug line", async () => {
+  // Regression: the per-frame debug line carried `command=<the command line>`, so a
+  // secret typed on the command line reached the container logs at that level.
+  it("keeps the run command line out of every log line, the per-frame debug line included", async () => {
     const { app, sessionId, ingestToken } = await startSession();
-    const frame = makeRunFrame(0);
+    const frame = makeRunFrame(0, { command: "psql postgres://me:hunter2@db/app" });
     const info = vi.spyOn(log, "info").mockImplementation(() => {});
     const debug = vi.spyOn(log, "debug").mockImplementation(() => {});
     vi.spyOn(log, "enabled").mockReturnValue(true);
 
     await postFrames(app, sessionId, ingestToken, [frame]);
 
-    expect(JSON.stringify(info.mock.calls)).not.toContain(frame.data.command);
-    expect(debug).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({ session: sessionId, command: frame.data.command }),
+    expect(debug).toHaveBeenCalledWith(expect.stringContaining(frame.stream), {
+      session: sessionId,
+    });
+    expect(JSON.stringify([...info.mock.calls, ...debug.mock.calls])).not.toContain(
+      frame.data.command,
     );
   });
 

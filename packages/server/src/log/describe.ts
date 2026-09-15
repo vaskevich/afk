@@ -34,8 +34,8 @@ export function describeFrame(frame: Frame): string {
       const { state, exitCode, elapsedSeconds, process, output } = frame.data;
       const status = state === "exited" ? `exited=${exitCode}` : "running";
       // The tail itself stays out of the log; one line per frame is the contract here.
-      // So does the command line: it is typed by the user and can carry a secret, so
-      // only the debug-level per-frame line in routes/frames.ts attaches it.
+      // So does the command line, at every level: it is typed by the user and can
+      // carry a secret, and the stream id is enough to find the run.
       const tail =
         output.tail === undefined
           ? ""
