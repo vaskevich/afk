@@ -467,7 +467,14 @@ runs both containers — write their slabs under different keys instead of one
 into one order by `orderFrames` (`store/frame-order.ts`): index first, arrival
 (`receivedAt`) second, one frame per (stream, sequence) keeping the copy that reached
 the server first. Slabs written before the suffix existed (`<first index>.ndjson`) read
-exactly the same way, since the order comes from the frames, not from the key. A cold load is therefore one
+exactly the same way, since the order comes from the frames, not from the key.
+
+A slab can also land _after_ the session was read: during a deploy the new container
+loads the session before the old one's SIGTERM flush. So the first `ingest` after a
+load reads storage once more (`Session.mergeStorageBeforeIngest`) and merges anything
+new into the session — inside the write queue, before the batch is admitted, so the
+indexes it hands out are past everything that exists. One extra read per session per
+process, and only for a session that is still receiving frames. A cold load is therefore one
 GET for an ended session and at most a minute's worth of objects per hour for a live
 one (see the 2026-09-14 entries in the decision log).
 

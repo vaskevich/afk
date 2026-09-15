@@ -14,6 +14,7 @@ import { RuleEngine } from "../rules/engine.ts";
 import { randomId, randomToken } from "../utils/ids.ts";
 import { hashIngestToken } from "../utils/ingest-token.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
+import { mergeFrames } from "./frame-order.ts";
 import type { SessionRecord, SessionStorage } from "./storage.ts";
 
 export type { StoredFrame };
@@ -54,6 +55,13 @@ export interface Session extends SessionRecord {
   engine: RuleEngine;
   /** Last read or write, server clock; idle ended sessions are evicted from memory. */
   lastAccessAt: number;
+  /**
+   * Set on a session loaded from storage, cleared by the first `ingest` after that
+   * load, which re-reads storage first: the writer this process is taking over from
+   * (the container a deploy is replacing) may land its last slab after the load. A
+   * session created here has nothing to catch up on.
+   */
+  mergeStorageBeforeIngest: boolean;
 }
 
 /** Policy the store applies to every session. `index.ts` fills this from config.ts. */
@@ -413,6 +421,9 @@ export class SessionStore {
     const frames = await this.storage.readFrames(sessionId);
     const storageMs = Math.round(performance.now() - started);
     const session = this.hydrate(record, frames);
+    // Another process may have been writing this session as it was read (a deploy's
+    // overlap); the first ingest checks storage once more before it numbers anything.
+    session.mergeStorageBeforeIngest = true;
     this.sessions.set(sessionId, session);
     log.info("session loaded from storage", {
       session: sessionId,
@@ -424,6 +435,31 @@ export class SessionStore {
   }
 
   private hydrate(record: SessionRecord, frames: StoredFrame[]): Session {
+    const session: Session = {
+      ...record,
+      latestSequence: new Map(),
+      frames: [],
+      nextIndex: 1,
+      byteCount: 0,
+      sseConnections: 0,
+      listeners: new Set(),
+      writeQueue: new SerialQueue(),
+      engine: new RuleEngine(),
+      lastAccessAt: Date.now(),
+      mergeStorageBeforeIngest: false,
+    };
+    this.adoptFrames(session, frames);
+    return session;
+  }
+
+  /**
+   * Makes `frames` the session's history: the per-stream sequence bookkeeping, the
+   * byte count, the next index, and a fresh rule engine replayed over them. Used when
+   * a session is hydrated and again when a late slab is merged in, so both go through
+   * one derivation. Replaying history through fresh rules is also what makes an
+   * improved rule apply to old sessions.
+   */
+  private adoptFrames(session: Session, frames: StoredFrame[]): void {
     const latestSequence = new Map<string, number>();
     let byteCount = 0;
     let highestIndex = 0;
@@ -438,25 +474,40 @@ export class SessionStore {
       }
       byteCount += storedFrameBytes(stored);
     }
-    // Replay history through fresh rules so improved rules apply to old sessions too.
     const engine = new RuleEngine();
     engine.onFrames(frames);
-    const session: Session = {
-      ...record,
-      latestSequence,
-      frames,
-      nextIndex: highestIndex + 1,
-      byteCount,
-      sseConnections: 0,
-      listeners: new Set(),
-      writeQueue: new SerialQueue(),
-      engine,
-      lastAccessAt: Date.now(),
-    };
+    session.frames = frames;
+    session.latestSequence = latestSequence;
+    session.byteCount = byteCount;
+    session.nextIndex = highestIndex + 1;
+    session.engine = engine;
     if (this.status(session) !== "active") {
       engine.closeAll(sessionEndMs(session));
     }
-    return session;
+  }
+
+  /**
+   * Re-reads the session from storage and merges in whatever appeared since it was
+   * loaded — the last slab of the process this one is taking the session over from,
+   * which a deploy's overlap lands after the load. Runs once per session per process,
+   * inside the write queue and before the batch that triggered it is admitted, so the
+   * indexes handed out are past everything that exists rather than on top of it.
+   * Nothing is emitted to live subscribers: the merged frames are older than anything
+   * a viewer following this process has, and a viewer's next load reads them in order.
+   */
+  private async mergeFramesFromStorage(session: Session): Promise<void> {
+    const stored = await this.storage.readFrames(session.sessionId);
+    const merged = mergeFrames(session.frames, stored);
+    const added = merged.length - session.frames.length;
+    if (added === 0) {
+      return;
+    }
+    this.adoptFrames(session, merged);
+    log.info("merged frames another process wrote", {
+      session: session.sessionId,
+      added,
+      frames: merged.length,
+    });
   }
 
   private record(session: Session): SessionRecord {
@@ -707,6 +758,10 @@ export class SessionStore {
     const receivedAt = Date.now();
     session.lastAccessAt = receivedAt;
     return session.writeQueue.run(async () => {
+      if (session.mergeStorageBeforeIngest) {
+        session.mergeStorageBeforeIngest = false;
+        await this.mergeFramesFromStorage(session);
+      }
       const { nextSequence, nextIndex, byteCount, ...result } = this.admit(
         session,
         frames,

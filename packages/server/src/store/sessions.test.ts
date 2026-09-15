@@ -22,6 +22,7 @@ import {
   sessionEndMs,
   sessionStatus,
   storedFrameBytes,
+  type Session,
   type SessionEvent,
 } from "./sessions.ts";
 
@@ -1272,6 +1273,89 @@ describe("SessionStore", () => {
       expect(store.framesAfter(loaded!, 4)).toEqual([stored[2], ...accepted]);
       expect(store.framesAfter(loaded!, 5)).toEqual(accepted);
       expect(store.framesAfter(loaded!, 6)).toEqual([]);
+    });
+  });
+
+  // Regression: a deploy hands the live session to the new container before the old
+  // one's last slab is written, so storage grows after the load. The frames in that
+  // slab used to be overwritten (same key) or compacted away (end from memory alone).
+  describe("frames that reach storage after the session was loaded", () => {
+    /** A session in storage with three frames, loaded into a store of its own. */
+    async function loadedSession(): Promise<{
+      store: SessionStore;
+      storage: MemorySessionStorage;
+      session: Session;
+      stored: StoredFrame[];
+    }> {
+      const storage = new MemorySessionStorage();
+      const record: SessionRecord = {
+        sessionId: "existingSession",
+        ingestTokenHash: hashIngestToken("existingToken"),
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        startedAt: Date.now(),
+        endedAt: null,
+        maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+        previousSessionId: null,
+        nextSessionId: null,
+      };
+      await storage.putSession(record);
+      const stored = makeStoredFrames([makeSystemFrame(0), makeSystemFrame(1), makeSystemFrame(2)]);
+      await storage.appendFrames(record.sessionId, stored);
+      const store = new SessionStore(storage);
+      const session = await store.get(record.sessionId);
+
+      return { store, storage, session: session!, stored };
+    }
+
+    /** What the writer this process took over from flushed after the load: indexes 4 and 5. */
+    function lateFrames(): StoredFrame[] {
+      return makeStoredFrames([makeSystemFrame(3), makeSystemFrame(4)]).map((frame) => ({
+        ...frame,
+        index: frame.index + 3,
+      }));
+    }
+
+    it("merges them on the first ingest and numbers the new batch past them", async () => {
+      const { store, storage, session, stored } = await loadedSession();
+      const late = lateFrames();
+      await storage.appendFrames(session.sessionId, late);
+
+      const result = await store.ingest(session, [makeSystemFrame(5)]);
+
+      expect(session.frames).toEqual([...stored, ...late, ...result.accepted]);
+      expect(result.accepted.map((f) => f.index)).toEqual([6]);
+    });
+
+    it("counts a frame of the merged slab as a duplicate when the client resends it", async () => {
+      const { store, storage, session } = await loadedSession();
+      const late = lateFrames();
+      await storage.appendFrames(session.sessionId, late);
+
+      const result = await store.ingest(session, [makeSystemFrame(4)]);
+
+      expect(result).toEqual({ accepted: [], duplicates: 1, rejectedStreams: [] });
+    });
+
+    it("re-reads storage once per load, not on every batch", async () => {
+      const { store, storage, session } = await loadedSession();
+      const readFrames = vi.spyOn(storage, "readFrames");
+
+      await store.ingest(session, [makeSystemFrame(3)]);
+      await store.ingest(session, [makeSystemFrame(4)]);
+
+      expect(readFrames).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not re-read storage for a session this process created", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const readFrames = vi.spyOn(storage, "readFrames");
+
+      await store.ingest(session, [makeSystemFrame(0)]);
+
+      expect(readFrames).not.toHaveBeenCalled();
     });
   });
 
