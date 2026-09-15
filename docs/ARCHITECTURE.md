@@ -433,6 +433,16 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-14** The `afk run` command line is redacted on the client, before it is
+  spooled (`redact_command` in `cli/afk`): a URL's userinfo, the value of a
+  `KEY=value` argument named like a secret, and the value after `--password`,
+  `--token`, `-p` and the like become `***`; everything else stays byte for byte so
+  the dashboard still shows what ran. On the client rather than the server because
+  the server's bucket and container logs are exactly where a secret must never land,
+  and a server that has seen a secret once has it for the log's lifetime; the
+  server now never sees the original at all. A pattern the redaction misses is a
+  client bug, fixed by a client release, and the dashboard's Delete control is the
+  backstop.
 - **2026-09-14** Codex is counted next to Claude Code, one block of the same five counts
   per tool found, a tool that is not there having no block (additive: both blocks are
   optional on the wire, frames from the previous client still parse, the protocol

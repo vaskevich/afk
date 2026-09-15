@@ -42,6 +42,12 @@
 # tagged `afk ▸` on a terminal and prefixed `afk: ` elsewhere, so a wrapped command's
 # own output is never mistaken for it.
 #
+# `afk run` sends the command line with the obvious secrets replaced by `***` (a URL's
+# user:password, the value of a KEY=value argument named like a secret, the value
+# after --password, --token, -p and the like; see redact_command) and, when the
+# command fails, the last lines it printed unless AFK_RUN_TAIL_LINES is 0. Its output
+# is never sent otherwise.
+#
 # When the server serves a newer client than this one, `afk start` (and an `afk run`
 # that started its own session) says so; on a terminal `afk start` also asks whether
 # to update now, waiting ten seconds for the answer and taking silence as no. The new
@@ -180,6 +186,13 @@ esac
 RUN_CAPTURE_KEEP_CHUNKS=2
 # The wrapped command line is kept for `afk status` cut to this many characters.
 RUN_COMMAND_MAX_CHARS=256
+# What redact_command replaces with REDACT_PLACEHOLDER before the command line leaves
+# the machine: the value of a KEY=value argument whose name contains one of these
+# words (BSD sed has no case-insensitive flag, so every letter is spelled as a class),
+# and the value after one of these options. Add to the lists, do not weaken them.
+REDACT_KEY_WORDS='[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Kk][Ee][Yy]|[Aa][Uu][Tt][Hh]'
+REDACT_OPTIONS='--password|--passwd|--token|--api-key|--apikey|--secret|--access-token|--auth-token|--client-secret|-p'
+REDACT_PLACEHOLDER='***'
 # split names chunks with this many letters after the prefix: 26^6 chunks of 64 MiB.
 RUN_CAPTURE_SUFFIX_LENGTH=6
 SEND_INTERVAL_SECONDS=1
@@ -772,6 +785,23 @@ collect_agents() {
 # added later under output.flavor without changing the rest of the frame.
 # Set up by cmd_run: RUN_ID, RUN_DIR (output chunks, pid, seq), RUN_STARTED, RUN_COMMAND_JSON.
 # ---------------------------------------------------------------------------
+
+# The command line with the obvious secrets replaced by *** and everything else byte
+# for byte as typed, so the dashboard still shows what ran: the userinfo of a URL
+# (`https://me:hunter2@host` becomes `https://***@host`), the value of an argument
+# named like a secret anywhere on the line (`API_TOKEN=hunter2` becomes
+# `API_TOKEN=***`; the name stays), and the value after one of REDACT_OPTIONS,
+# separated by a space or `=` (`--password hunter2`, `--password=hunter2`,
+# `-p hunter2`). A value in quotes is taken whole. This is the only form of the
+# command line that leaves the machine; the server never sees the original. Runs
+# under the C locale so sed takes bytes that are not UTF-8 as they are.
+redact_command() { # command-line
+  local value="'[^']*'|\"[^\"]*\"|[^[:space:]]"
+  printf '%s\n' "$1" | LC_ALL=C sed -E \
+    -e "s#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+@#\\1$REDACT_PLACEHOLDER@#g" \
+    -e "s#(^|[[:space:]])([A-Za-z0-9_]*($REDACT_KEY_WORDS)[A-Za-z0-9_]*)=($value*)#\\1\\2=$REDACT_PLACEHOLDER#g" \
+    -e "s#(^|[[:space:]])($REDACT_OPTIONS)([[:space:]]+|=)($value+)#\\1\\2\\3$REDACT_PLACEHOLDER#g"
+}
 
 # Where the wrapped command's output goes, once per stream (cmd_run wires stdout and
 # stderr through `tee`, which mirrors them to the terminal and hands a copy here).
@@ -1900,7 +1930,7 @@ cmd_run() {
 
   RUN_ID=$(random_id)
   RUN_STARTED=$(now_seconds)
-  RUN_COMMAND_JSON=$(json_string "$*" | cut -c1-200)
+  RUN_COMMAND_JSON=$(json_string "$(redact_command "$*")" | cut -c1-200)
   RUN_DIR="$AFK_HOME/sessions/$SESSION_ID/runs/$RUN_ID"
   mkdir -p "$RUN_DIR"
   # For `afk status`, which lists the runs still going.

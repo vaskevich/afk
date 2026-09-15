@@ -3681,6 +3681,81 @@ describe("collect_run", () => {
   });
 });
 
+describe("redact_command", () => {
+  /** The command line after redact_command, printed back without a trailing newline. */
+  async function redact(command: string): Promise<string> {
+    const { stdout, stderr, code } = await runBash('printf "%s" "$(redact_command "$INPUT")"', {
+      INPUT: command,
+    });
+    expect(code, stderr).toBe(0);
+    return stdout;
+  }
+
+  it("replaces the userinfo of a URL and keeps the scheme, host, port, and path", async () => {
+    expect(await redact("psql postgres://me:hunter2@db.internal:5432/app")).toBe(
+      "psql postgres://***@db.internal:5432/app",
+    );
+  });
+
+  it.each([
+    ["API_TOKEN=hunter2 npm start", "API_TOKEN=*** npm start"],
+    ["client_secret=hunter2 npm start", "client_secret=*** npm start"],
+    ["DB_Password=hunter2 npm start", "DB_Password=*** npm start"],
+    ["AWS_SECRET_ACCESS_KEY=hunter2 aws s3 ls", "AWS_SECRET_ACCESS_KEY=*** aws s3 ls"],
+    ["basicAuth=me:hunter2 curl https://h", "basicAuth=*** curl https://h"],
+  ])(
+    "replaces the value of a KEY=value argument named like a secret, whatever its case, and keeps the name: %s",
+    async (command, redacted) => {
+      expect(await redact(command)).toBe(redacted);
+    },
+  );
+
+  it("redacts a KEY=value argument anywhere on the line, not only as a prefix", async () => {
+    expect(await redact("docker run -e API_KEY=hunter2 -e PORT=80 img")).toBe(
+      "docker run -e API_KEY=*** -e PORT=80 img",
+    );
+  });
+
+  it("takes a quoted value whole, spaces included", async () => {
+    expect(await redact("sh -c TOKEN='hunter 2' cmd")).toBe("sh -c TOKEN=*** cmd");
+  });
+
+  it.each([
+    ["curl --password hunter2 https://h", "curl --password *** https://h"],
+    ["curl --password=hunter2 https://h", "curl --password=*** https://h"],
+    ["gh auth login --token hunter2", "gh auth login --token ***"],
+    ["tool --api-key hunter2 run", "tool --api-key *** run"],
+    ["mysql -p hunter2 db", "mysql -p *** db"],
+  ])(
+    "replaces the value after a secret-taking option, after a space or an equals sign: %s",
+    async (command, redacted) => {
+      expect(await redact(command)).toBe(redacted);
+    },
+  );
+
+  it("leaves a command with nothing to redact byte for byte as typed", async () => {
+    const command = 'NODE_ENV=production npm test -- --grep "cpu high" && make -j8 TARGET=all';
+
+    expect(await redact(command)).toBe(command);
+  });
+
+  // Regression guard: sed under a UTF-8 locale refuses bytes that are not UTF-8
+  // ("illegal byte sequence") and would leave the command line empty.
+  it("keeps bytes that are not UTF-8 as they are under a UTF-8 locale", async () => {
+    const { stdout, code } = await runBash(
+      'typed=$(printf "ls \\377 TOKEN=x"); printf "%s" "$(redact_command "$typed")" | od -An -c',
+      { LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
+    );
+
+    expect(code).toBe(0);
+    expect(stdout.split(/\s+/).filter((token) => token !== "")).toEqual([
+      ..."ls",
+      "377",
+      ..."TOKEN=***",
+    ]);
+  });
+});
+
 describe("cmd_run", () => {
   const SESSION_ID = "sess123";
 
@@ -3866,6 +3941,23 @@ describe("cmd_run", () => {
       expect(final?.data.exitCode).toBe(2);
       expect(final?.data.output.tail).toBeUndefined();
       expect(server.requests.some((req) => req.body.includes("secret"))).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "ships the command line with its secrets redacted, so the original never reaches the server",
+    async () => {
+      const afkHome = await makeTempDir();
+      const server = await startAcceptingServer();
+
+      const { code, stderr } = await runBash("cmd_run -- env API_TOKEN=hunter2 true", {
+        AFK_HOME: afkHome,
+        AFK_SERVER: server.url,
+      });
+
+      expect(code, stderr).toBe(0);
+      expect(exitedRunFrame(server)?.data.command).toBe("env API_TOKEN=*** true");
+      expect(server.requests.some((req) => req.body.includes("hunter2"))).toBe(false);
     },
   );
 });

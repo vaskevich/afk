@@ -348,15 +348,30 @@ wrapped command gets its own row.
 }
 ```
 
-| field            | meaning                                                               |
-| ---------------- | --------------------------------------------------------------------- |
-| `command`        | the command line as typed, truncated to 256 chars for display         |
-| `pid`            | the wrapped process's pid (0 once it is gone)                         |
-| `state`          | `"running"` or `"exited"`                                             |
-| `exitCode`       | set on the final frame only; `null` while running                     |
-| `elapsedSeconds` | since the command started                                             |
-| `process`        | the wrapped process itself: cpu percent, rss bytes (both 0 once gone) |
-| `output`         | how the client looked at stdout/stderr, see `output.flavor` below     |
+| field            | meaning                                                                           |
+| ---------------- | --------------------------------------------------------------------------------- |
+| `command`        | the command line as typed, its obvious secrets redacted (below), cut to 256 chars |
+| `pid`            | the wrapped process's pid (0 once it is gone)                                     |
+| `state`          | `"running"` or `"exited"`                                                         |
+| `exitCode`       | set on the final frame only; `null` while running                                 |
+| `elapsedSeconds` | since the command started                                                         |
+| `process`        | the wrapped process itself: cpu percent, rss bytes (both 0 once gone)             |
+| `output`         | how the client looked at stdout/stderr, see `output.flavor` below                 |
+
+`command` is redacted on the client (`redact_command` in `cli/afk`) before the frame
+is spooled, so the server never sees the original and nothing server-side (a log
+level, a rule, storage) can leak it. Three things are replaced by `***`, everything
+else is byte for byte what was typed: the userinfo of a URL
+(`postgres://me:hunter2@db/app` arrives as `postgres://***@db/app`), the value of a
+`KEY=value` argument anywhere on the line whose name contains `TOKEN`, `SECRET`,
+`PASSWORD`, `KEY`, or `AUTH` in any case (`API_TOKEN=***`; the name stays), and the
+value after `--password`, `--passwd`, `--token`, `--api-key`, `--apikey`, `--secret`,
+`--access-token`, `--auth-token`, `--client-secret`, or `-p`, whether separated by a
+space or `=` (`--password ***`, `--password=***`). The lists are the named constants
+`REDACT_KEY_WORDS` and `REDACT_OPTIONS` at the top of the script. A secret in any
+other shape (`-pSECRET` with no space, a positional argument) is sent as typed: the
+redaction catches the obvious, and the dashboard's Delete control and `afk delete`
+are there for the rest.
 
 `output.flavor` names how the client looked at the output, so richer parsers can be
 added later without changing the rest of the frame. Today there is one flavor:

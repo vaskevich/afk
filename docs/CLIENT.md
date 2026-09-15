@@ -44,6 +44,16 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   startup.
 - Wrap a foreground command, pass signals and stdin through, count its output, report
   its exit code.
+- Redact the command line before it leaves the machine. `redact_command` replaces
+  the obvious secrets with `***` and keeps every other byte as typed, so the
+  dashboard still shows what ran: a URL's userinfo (`https://***@host`), the value
+  of a `KEY=value` argument named like a secret (`TOKEN`, `SECRET`, `PASSWORD`,
+  `KEY`, `AUTH`, any case; the name stays), and the value after `--password`,
+  `--token`, `--api-key`, `-p`, and the rest of `REDACT_OPTIONS`, after a space or
+  `=`. The redacted form is the only one spooled or sent; the server never sees the
+  original (see the `run` collector in [PROTOCOL.md](PROTOCOL.md)). The copy kept
+  locally for `afk status` (`runs/<runId>/command`, mode 600, gone with the session
+  directory) is as typed.
 - Print readable errors for capacity, version, and network problems, including curl's
   own reason when the server cannot be reached.
 - Keep its own lines apart from a wrapped command's. `afk run` passes the command's
