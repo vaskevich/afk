@@ -402,8 +402,9 @@ The dashboard has a dark and a light theme. Every colour is a custom property on
 the pure model (`system` | `dark` | `light`, stored under `afk.theme` in
 localStorage, `system` by default and whenever storage is unavailable or holds junk)
 and `ThemeProvider` / `useTheme` (`useTheme.tsx`) keep `data-theme` on `<html>` in
-step with the choice and with `prefers-color-scheme`. An inline script in
-`index.html` applies the attribute before the first paint. Canvas renderers read
+step with the choice and with `prefers-color-scheme`. `public/theme-init.js`, loaded
+by `index.html` ahead of the bundle (external, because the content security policy
+allows no inline script), applies the attribute before the first paint. Canvas renderers read
 their colours from the stylesheet at draw time, so `useCanvas` redraws whenever the
 resolved theme changes. The control in the header (`components/ThemeToggle.tsx`) is
 a single glyph for the theme in use, with a dot when it was chosen here rather than
