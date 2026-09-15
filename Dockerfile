@@ -59,6 +59,11 @@ RUN pnpm install --frozen-lockfile --prod --filter "@afk/server..."
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# The heap ceiling matches the admission math (AdmissionLimits in
+# packages/server/src/env.ts, sized for the 512 MB Lightsail node): if the limits are
+# ever wrong, V8 fails with a heap trace at 384 MB instead of the container being
+# SIGKILLed by the OOM killer with nothing in the log.
+ENV NODE_OPTIONS=--max-old-space-size=384
 # Build identity, reported by GET /versionz and compared by infra/deploy.sh after a
 # rollout. Both come from --build-arg (see deploy.sh); empty means unset.
 ARG GIT_SHA=""

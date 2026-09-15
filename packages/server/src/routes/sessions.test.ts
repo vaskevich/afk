@@ -83,11 +83,7 @@ describe("POST /api/sessions", () => {
   });
 
   it("returns 503 with Retry-After once maxActiveSessions sessions are active, then 201 again after one ends", async () => {
-    const app = buildApp({
-      maxActiveSessions: 1,
-      maxStreamsPerSession: 10,
-      maxFramesPerSession: 15_000,
-    });
+    const app = buildApp({ ...DEFAULT_LIMITS, maxActiveSessions: 1 });
     const first = await createTestSession(app);
     expect(first.res.status).toBe(201);
 
@@ -207,11 +203,7 @@ describe("POST /api/sessions with previousSessionId (chaining)", () => {
   });
 
   it("is admitted at capacity because it replaces the active session it continues", async () => {
-    const app = buildApp({
-      maxActiveSessions: 1,
-      maxStreamsPerSession: 10,
-      maxFramesPerSession: 15_000,
-    });
+    const app = buildApp({ ...DEFAULT_LIMITS, maxActiveSessions: 1 });
     const first = await createTestSession(app);
     expect((await createTestSession(app)).res.status).toBe(503);
 
@@ -225,11 +217,7 @@ describe("POST /api/sessions with previousSessionId (chaining)", () => {
   });
 
   it("still returns 503 at capacity when the previous session is already over", async () => {
-    const app = buildApp({
-      maxActiveSessions: 1,
-      maxStreamsPerSession: 10,
-      maxFramesPerSession: 15_000,
-    });
+    const app = buildApp({ ...DEFAULT_LIMITS, maxActiveSessions: 1 });
     const first = await createTestSession(app);
     await endTestSession(app, first.sessionId, first.ingestToken);
     const blocker = await createTestSession(app);
@@ -337,11 +325,7 @@ describe("POST /api/sessions version checks", () => {
 
 describe("GET /api/sessions/:id", () => {
   it("returns the session summary with zero streams and the configured max", async () => {
-    const app = buildApp({
-      maxActiveSessions: 20,
-      maxStreamsPerSession: 5,
-      maxFramesPerSession: 15_000,
-    });
+    const app = buildApp({ ...DEFAULT_LIMITS, maxStreamsPerSession: 5 });
     const { sessionId } = await createTestSession(app);
 
     const res = await app.request(`/api/sessions/${sessionId}`);
@@ -623,11 +607,7 @@ describe("DELETE /api/sessions/:id", () => {
   });
 
   it("frees the slot a running session held, so a create at capacity succeeds again", async () => {
-    const app = buildApp({
-      maxActiveSessions: 1,
-      maxStreamsPerSession: 10,
-      maxFramesPerSession: 15_000,
-    });
+    const app = buildApp({ ...DEFAULT_LIMITS, maxActiveSessions: 1 });
     const first = await createTestSession(app);
     expect((await createTestSession(app)).res.status).toBe(503);
 

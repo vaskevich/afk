@@ -34,6 +34,8 @@ export interface Session extends SessionRecord {
   latestSequence: Map<string, number>;
   /** Every frame so far, in index order. */
   frames: StoredFrame[];
+  /** Bytes of `frames` as stored NDJSON (`storedFrameBytes`); what `maxBytesPerSession` bounds. */
+  byteCount: number;
   listeners: Set<SessionListener>;
   /** Serializes storage appends so frames land on disk in index order. */
   writeQueue: SerialQueue;
@@ -122,6 +124,22 @@ export class TooManyFramesError extends Error {
   }
 }
 
+/** Thrown by `ingest` when a batch would push a session past `maxBytesPerSession`. */
+export class TooManyBytesError extends Error {
+  constructor(readonly limit: number) {
+    super(`session has reached the limit of ${limit} bytes`);
+  }
+}
+
+/**
+ * What one stored frame costs against `maxBytesPerSession`: its NDJSON line as the
+ * storage backends write it, newline included. Counted the same way on ingest and on
+ * load, so the cap holds across a restart.
+ */
+export function storedFrameBytes(stored: StoredFrame): number {
+  return Buffer.byteLength(JSON.stringify(stored)) + 1;
+}
+
 /** Thrown by `create` when the session to chain from already has a successor. */
 export class AlreadyContinuedError extends Error {
   constructor(
@@ -137,7 +155,6 @@ export class AlreadyContinuedError extends Error {
  * `SessionStorage`. Sessions not in memory (after a restart, or ended ones being
  * viewed) are loaded from storage on first access, and idle ended sessions are evicted
  * again by `tick`.
- * TODO(memory): measure actual bytes instead of counting frames for admission control.
  */
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
@@ -171,15 +188,20 @@ export class SessionStore {
 
   stats(now = Date.now()) {
     let framesInMemory = 0;
+    let bytesInMemory = 0;
     for (const session of this.sessions.values()) {
       framesInMemory += session.frames.length;
+      bytesInMemory += session.byteCount;
     }
     return {
       activeSessions: this.activeSessionCount(now),
       maxActiveSessions: this.options.limits.maxActiveSessions,
       maxStreamsPerSession: this.options.limits.maxStreamsPerSession,
+      maxFramesPerSession: this.options.limits.maxFramesPerSession,
+      maxBytesPerSession: this.options.limits.maxBytesPerSession,
       sessionsInMemory: this.sessions.size,
       framesInMemory,
+      bytesInMemory,
     };
   }
 
@@ -326,11 +348,14 @@ export class SessionStore {
 
   private hydrate(record: SessionRecord, frames: StoredFrame[]): Session {
     const latestSequence = new Map<string, number>();
-    for (const { frame } of frames) {
+    let byteCount = 0;
+    for (const stored of frames) {
+      const { frame } = stored;
       const latest = latestSequence.get(frame.stream) ?? 0;
       if (frame.sequence > latest) {
         latestSequence.set(frame.stream, frame.sequence);
       }
+      byteCount += storedFrameBytes(stored);
     }
     // Replay history through fresh rules so improved rules apply to old sessions too.
     const engine = new RuleEngine();
@@ -339,6 +364,7 @@ export class SessionStore {
       ...record,
       latestSequence,
       frames,
+      byteCount,
       listeners: new Set(),
       writeQueue: new SerialQueue(),
       engine,
@@ -590,7 +616,7 @@ export class SessionStore {
     const receivedAt = Date.now();
     session.lastAccessAt = receivedAt;
     return session.writeQueue.run(async () => {
-      const { nextSequence, ...result } = this.admit(session, frames, receivedAt);
+      const { nextSequence, byteCount, ...result } = this.admit(session, frames, receivedAt);
       if (result.accepted.length === 0) {
         return result;
       }
@@ -598,6 +624,7 @@ export class SessionStore {
       await this.storage.appendFrames(session.sessionId, result.accepted);
 
       session.latestSequence = nextSequence;
+      session.byteCount = byteCount;
       session.frames.push(...result.accepted);
       this.emit(session, { type: "frames", frames: result.accepted });
       this.emitEvents(session, session.engine.onFrames(result.accepted));
@@ -610,12 +637,13 @@ export class SessionStore {
     session: Session,
     frames: Frame[],
     receivedAt: number,
-  ): IngestResult & { nextSequence: Map<string, number> } {
+  ): IngestResult & { nextSequence: Map<string, number>; byteCount: number } {
     const accepted: StoredFrame[] = [];
     const rejectedStreams: string[] = [];
     const nextSequence = new Map(session.latestSequence);
     let duplicates = 0;
     let nextIndex = session.frames.length + 1;
+    let byteCount = session.byteCount;
     for (const frame of frames) {
       const latest = nextSequence.get(frame.stream) ?? 0;
       if (frame.sequence <= latest) {
@@ -635,8 +663,13 @@ export class SessionStore {
       if (nextIndex > this.options.limits.maxFramesPerSession) {
         throw new TooManyFramesError(this.options.limits.maxFramesPerSession);
       }
-      accepted.push({ index: nextIndex++, receivedAt, frame });
+      const stored: StoredFrame = { index: nextIndex++, receivedAt, frame };
+      byteCount += storedFrameBytes(stored);
+      if (byteCount > this.options.limits.maxBytesPerSession) {
+        throw new TooManyBytesError(this.options.limits.maxBytesPerSession);
+      }
+      accepted.push(stored);
     }
-    return { accepted, duplicates, rejectedStreams, nextSequence };
+    return { accepted, duplicates, rejectedStreams, nextSequence, byteCount };
   }
 }

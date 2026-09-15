@@ -7,17 +7,20 @@ import {
   makeSystemFrame,
 } from "@afk/shared/testing";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS, type StoredFrame } from "@afk/shared";
+import { DEFAULT_LIMITS } from "../env.ts";
 import { log } from "../log/logger.ts";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
 import {
   AlreadyContinuedError,
   DEFAULT_STORE_OPTIONS,
   SessionStore,
+  TooManyBytesError,
   TooManyFramesError,
   UNKNOWN_ID_CACHE_MAX_ENTRIES,
   UNKNOWN_ID_TTL_MS,
   sessionEndMs,
   sessionStatus,
+  storedFrameBytes,
   type SessionEvent,
 } from "./sessions.ts";
 
@@ -577,7 +580,7 @@ describe("SessionStore", () => {
 
     it("throws TooManyFramesError once a session holds its maximum number of frames, and the client's retry is rejected too", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 20, maxStreamsPerSession: 10, maxFramesPerSession: 3 },
+        limits: { ...DEFAULT_LIMITS, maxFramesPerSession: 3 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1), makeSystemFrame(2)]);
@@ -586,9 +589,65 @@ describe("SessionStore", () => {
       expect(session.frames).toHaveLength(3);
     });
 
+    it("throws TooManyBytesError once a session holds its maximum stored bytes, leaving the batch unstored", async () => {
+      const storage = new MemorySessionStorage();
+      const twoFrames = makeStoredFrames([makeSystemFrame(0), makeSystemFrame(1)]);
+      const twoFramesBytes = twoFrames.reduce((sum, f) => sum + storedFrameBytes(f), 0);
+      const store = new SessionStore(storage, {
+        limits: { ...DEFAULT_LIMITS, maxBytesPerSession: twoFramesBytes },
+      });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1)]);
+
+      await expect(store.ingest(session, [makeSystemFrame(2)])).rejects.toThrow(TooManyBytesError);
+
+      expect(session.frames).toHaveLength(2);
+      expect(session.byteCount).toBe(twoFramesBytes);
+      await expect(storage.readFrames(session.sessionId)).resolves.toHaveLength(2);
+    });
+
+    it("rejects a batch whose size alone would cross the byte cap, whatever the frame count", async () => {
+      const store = new SessionStore(new MemorySessionStorage(), {
+        limits: { ...DEFAULT_LIMITS, maxBytesPerSession: 1 },
+      });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      await expect(store.ingest(session, [makeSystemFrame(0)])).rejects.toThrow(
+        "session has reached the limit of 1 bytes",
+      );
+      expect(session.frames).toHaveLength(0);
+    });
+
+    it("counts the bytes of a session loaded from storage, so the byte cap holds across a restart", async () => {
+      const storage = new MemorySessionStorage();
+      const frames = makeStoredFrames([makeSystemFrame(0), makeSystemFrame(1)]);
+      const framesBytes = frames.reduce((sum, f) => sum + storedFrameBytes(f), 0);
+      const record: SessionRecord = {
+        sessionId: "existingSession",
+        ingestToken: "existingToken",
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        startedAt: Date.now(),
+        endedAt: null,
+        maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+        previousSessionId: null,
+        nextSessionId: null,
+      };
+      await storage.putSession(record);
+      await storage.appendFrames(record.sessionId, frames);
+      const store = new SessionStore(storage, {
+        limits: { ...DEFAULT_LIMITS, maxBytesPerSession: framesBytes },
+      });
+
+      const loaded = await store.get(record.sessionId);
+
+      expect(loaded?.byteCount).toBe(framesBytes);
+      await expect(store.ingest(loaded!, [makeSystemFrame(2)])).rejects.toThrow(TooManyBytesError);
+    });
+
     it("skips the frames of a stream the session has no room for, stores the rest of the batch, and names the stream", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 20, maxStreamsPerSession: 1, maxFramesPerSession: 15_000 },
+        limits: { ...DEFAULT_LIMITS, maxStreamsPerSession: 1 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
@@ -859,7 +918,7 @@ describe("SessionStore", () => {
 
     it("summarizes the stream count and the session's stream limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 20, maxStreamsPerSession: 5, maxFramesPerSession: 15_000 },
+        limits: { ...DEFAULT_LIMITS, maxStreamsPerSession: 5 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
@@ -881,7 +940,7 @@ describe("SessionStore", () => {
 
     it("hasCapacity is false once active sessions reach the configured limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 1, maxStreamsPerSession: 10, maxFramesPerSession: 15_000 },
+        limits: { ...DEFAULT_LIMITS, maxActiveSessions: 1 },
       });
 
       await store.create({ host: makeHost(), clientVersion: "0.1.0" });
@@ -891,7 +950,7 @@ describe("SessionStore", () => {
 
     it("hasCapacity is true while active sessions are under the limit", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 2, maxStreamsPerSession: 10, maxFramesPerSession: 15_000 },
+        limits: { ...DEFAULT_LIMITS, maxActiveSessions: 2 },
       });
 
       await store.create({ host: makeHost(), clientVersion: "0.1.0" });
@@ -899,9 +958,9 @@ describe("SessionStore", () => {
       expect(store.hasCapacity()).toBe(true);
     });
 
-    it("reports session and frame totals", async () => {
+    it("reports session, frame, and byte totals next to the caps", async () => {
       const store = new SessionStore(new MemorySessionStorage(), {
-        limits: { maxActiveSessions: 5, maxStreamsPerSession: 10, maxFramesPerSession: 15_000 },
+        limits: { ...DEFAULT_LIMITS, maxActiveSessions: 5 },
       });
       const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
@@ -911,8 +970,11 @@ describe("SessionStore", () => {
         activeSessions: 1,
         maxActiveSessions: 5,
         maxStreamsPerSession: 10,
+        maxFramesPerSession: 15_000,
+        maxBytesPerSession: 8_388_608,
         sessionsInMemory: 1,
         framesInMemory: 2,
+        bytesInMemory: session.frames.reduce((sum, f) => sum + storedFrameBytes(f), 0),
       });
     });
   });

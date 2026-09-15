@@ -89,11 +89,7 @@ const CONCURRENT_TEST_TIMEOUT_MS = 40_000;
 /** The streams `afk start` opens on its own: system, processes, agents. */
 const FIXED_STREAMS = 3;
 
-const SINGLE_SESSION_LIMITS: AdmissionLimits = {
-  maxActiveSessions: 1,
-  maxStreamsPerSession: DEFAULT_LIMITS.maxStreamsPerSession,
-  maxFramesPerSession: DEFAULT_LIMITS.maxFramesPerSession,
-};
+const SINGLE_SESSION_LIMITS: AdmissionLimits = { ...DEFAULT_LIMITS, maxActiveSessions: 1 };
 /** Room for the owner's streams and exactly one run. */
 const ONE_RUN_LIMITS: AdmissionLimits = {
   ...DEFAULT_LIMITS,

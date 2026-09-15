@@ -187,13 +187,18 @@ session, so session-wide indexes are distinct and the stream cap holds. Status c
 | 200                         | accepted (possibly with `rejectedStreams`)               | delete the batch                                            |
 | 400 / 401 / 413             | the server will never accept this batch                  | park it in `rejected/`, keep going                          |
 | 404                         | the session was deleted (see "Delete")                   | stop the session for good: drop the queue, never chain      |
-| 410                         | session ended or past its maximum duration               | stop the session (`afk start` chains to a successor)        |
+| 410                         | session ended, past its maximum duration, or full        | stop the session (`afk start` chains to a successor)        |
 | 422                         | every frame's stream would exceed `maxStreamsPerSession` | `afk run`: drop the queue, run without telemetry; else park |
 | 426                         | the server no longer talks to this client version        | stop the session, print the update hint                     |
 | anything else / no response | transient                                                | keep the batch, back off, retry                             |
 
 413 means the body is over the ingest cap (1 MiB; `details.limit`), which a
-well-behaved client never reaches (see the arithmetic in `routes/frames.ts`). 422 means
+well-behaved client never reaches (see the arithmetic in `routes/frames.ts`). A 410 is
+also what a session that has hit a size cap answers: `AFK_MAX_FRAMES_PER_SESSION`
+(15 000 stored frames) or `AFK_MAX_BYTES_PER_SESSION` (8 MiB of stored NDJSON, the
+measure `bytesInMemory` in `GET /api/stats` reports), with the message naming which and
+`details.limit` the cap; the batch is not stored, and the client handles it exactly as
+an ended session. 422 means
 the batch was well formed (unlike the 400 row above) but every frame in it belongs to a
 stream past the session's cap, so nothing of it was kept; the error body's `details`
 names the first such `stream` and the `limit`. That is what a joining `afk run` gets on
@@ -730,24 +735,30 @@ no session id.
   "activeSessions": 3,
   "maxActiveSessions": 20,
   "maxStreamsPerSession": 10,
+  "maxFramesPerSession": 15000,
+  "maxBytesPerSession": 8388608,
   "sessionsInMemory": 5,
   "framesInMemory": 48213,
+  "bytesInMemory": 17203200,
   "uptimeSeconds": 401222,
   "serverVersion": "0.1.0",
   "webCommit": "abc1234"
 }
 ```
 
-| field                  | meaning                                                            |
-| ---------------------- | ------------------------------------------------------------------ |
-| `activeSessions`       | sessions currently accepting frames                                |
-| `maxActiveSessions`    | the admission cap (see ARCHITECTURE.md)                            |
-| `maxStreamsPerSession` | per-session stream cap                                             |
-| `sessionsInMemory`     | sessions held in the in-memory cache, active or recently viewed    |
-| `framesInMemory`       | frames summed across sessions in memory (a count, not a byte size) |
-| `uptimeSeconds`        | since the process started                                          |
-| `serverVersion`        | `packages/server`'s package.json version                           |
-| `webCommit`            | short git commit of the served dashboard build; null without one   |
+| field                  | meaning                                                                             |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| `activeSessions`       | sessions currently accepting frames                                                 |
+| `maxActiveSessions`    | the admission cap (see ARCHITECTURE.md)                                             |
+| `maxStreamsPerSession` | per-session stream cap                                                              |
+| `maxFramesPerSession`  | per-session cap on stored frames; a batch past it is 410                            |
+| `maxBytesPerSession`   | per-session cap on stored NDJSON bytes; a batch past it is 410                      |
+| `sessionsInMemory`     | sessions held in the in-memory cache, active or recently viewed                     |
+| `framesInMemory`       | frames summed across sessions in memory (a count, not a byte size)                  |
+| `bytesInMemory`        | stored NDJSON bytes summed across sessions in memory, the measure the byte cap uses |
+| `uptimeSeconds`        | since the process started                                                           |
+| `serverVersion`        | `packages/server`'s package.json version                                            |
+| `webCommit`            | short git commit of the served dashboard build; null without one                    |
 
 ## GET /versionz
 

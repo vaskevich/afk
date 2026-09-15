@@ -67,12 +67,23 @@ export interface AdmissionLimits {
    * with the system, processes, and a couple of run streams, at roughly 20 MB in memory.
    */
   maxFramesPerSession: number;
+  /**
+   * Hard ceiling on stored bytes per session, measured as the NDJSON the frames are
+   * persisted as. The frame cap was sized for 350-byte system frames, but a `processes`
+   * frame with ten long commands is ~6 KB and a `run` frame with a full tail ~8.5 KB,
+   * so 15 000 of those would be over 100 MB; this bounds a session whatever it sends.
+   * 8 MiB is an hour of every collector at 1 Hz with headroom.
+   */
+  maxBytesPerSession: number;
 }
+
+const MIB = 1024 * 1024;
 
 export const DEFAULT_LIMITS: AdmissionLimits = {
   maxActiveSessions: 20,
   maxStreamsPerSession: 10,
   maxFramesPerSession: 15_000,
+  maxBytesPerSession: 8 * MIB,
 };
 
 /** Everything route modules need. Passed in explicitly so tests can build an app with a fresh store. */

@@ -203,10 +203,20 @@ thresholds are in [PROTOCOL.md](PROTOCOL.md). Adding a rule is described in
 
 #### Admission control
 
-The server bounds two things: how many sessions it holds in memory at once
-(`maxActiveSessions`), and how many streams one session may accumulate
-(`maxStreamsPerSession`). Both live in `AdmissionLimits` (`env.ts`), default 20 and
-10, overridable via `AFK_MAX_ACTIVE_SESSIONS` / `AFK_MAX_STREAMS_PER_SESSION`.
+The server bounds four things: how many sessions it holds in memory at once
+(`maxActiveSessions`), how many streams one session may accumulate
+(`maxStreamsPerSession`), how many frames it may store (`maxFramesPerSession`), and
+how many bytes those frames take as stored NDJSON (`maxBytesPerSession`). All four
+live in `AdmissionLimits` (`env.ts`), default 20, 10, 15 000, and 8 MiB, overridable
+via `AFK_MAX_ACTIVE_SESSIONS` / `AFK_MAX_STREAMS_PER_SESSION` /
+`AFK_MAX_FRAMES_PER_SESSION` / `AFK_MAX_BYTES_PER_SESSION`. The byte cap exists
+because the frame cap was sized for 350-byte system frames and a `processes` or `run`
+frame can be twenty times that; `SessionStore.ingest` counts each accepted frame's
+stored line (`storedFrameBytes`), the count is rebuilt on load so it survives a
+restart, and a batch past either cap is refused whole with 410 (`TooManyFramesError`
+/ `TooManyBytesError`), which the client treats exactly as an ended session. The
+image runs node with `--max-old-space-size=384` so an overrun of this arithmetic is a
+heap trace in the log rather than a silent OOM kill of the container.
 
 The 20 × 10 default is sized for the smallest Lightsail container node (0.25 vCPU,
 512 MB): active sessions keep every frame in memory for replay and SSE, and a one-hour
@@ -230,13 +240,12 @@ through a cap with one slot left.
 
 Ended sessions with no active SSE listeners are evicted from the in-memory cache after
 `AFK_EVICT_ENDED_AFTER_SECONDS` (10 minutes) of no access, in the same `tick()` pass that runs
-the time-based rules — this keeps memory bounded without a separate sweep. What is
-_not_ done yet: `framesInMemory` in `GET /api/stats` is a frame **count**, not an
-actual measurement of bytes held, so it is only a proxy for the memory the admission
-limits are meant to bound.
+the time-based rules — this keeps memory bounded without a separate sweep.
+`bytesInMemory` in `GET /api/stats` is the stored-NDJSON measure the byte cap uses,
+not a measurement of the JS heap, which holds the parsed objects at a multiple of it.
 
 `GET /api/stats` (`routes/stats.ts`) exposes `ServiceStats` — active/max sessions,
-max streams per session, sessions and frames currently in memory, uptime, and the
+the per-session caps, sessions, frames, and bytes currently in memory, uptime, and the
 server version — unauthenticated and cheap, for the landing page and for operators
 checking headroom.
 

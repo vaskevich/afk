@@ -3,7 +3,7 @@ import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import type { AdmissionLimits } from "../env.ts";
 import { DEFAULT_LIMITS } from "../env.ts";
 import { createApp } from "../app.ts";
-import { SessionStore } from "../store/sessions.ts";
+import { SessionStore, storedFrameBytes } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 import { log } from "../log/logger.ts";
 import { MAX_INGEST_BODY_BYTES } from "./frames.ts";
@@ -141,9 +141,8 @@ describe("POST /api/sessions/:id/frames", () => {
 
   it("returns 422 naming the stream when every frame of a batch belongs to a stream beyond maxStreamsPerSession", async () => {
     const { app, sessionId, ingestToken } = await startSession({
-      maxActiveSessions: 20,
+      ...DEFAULT_LIMITS,
       maxStreamsPerSession: 1,
-      maxFramesPerSession: 15_000,
     });
     await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
 
@@ -183,6 +182,27 @@ describe("POST /api/sessions/:id/frames", () => {
       "system",
       "system",
     ]);
+  });
+
+  it("returns 410 with the byte limit once a session holds its maximum stored bytes, like the frame cap", async () => {
+    const oneFrameBytes = storedFrameBytes({
+      index: 1,
+      receivedAt: Date.now(),
+      frame: makeSystemFrame(0),
+    });
+    const { app, sessionId, ingestToken } = await startSession({
+      ...DEFAULT_LIMITS,
+      maxBytesPerSession: oneFrameBytes,
+    });
+    expect((await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)])).status).toBe(200);
+
+    const res = await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    expect(res.status).toBe(410);
+    expect(await res.json()).toEqual({
+      error: `session has reached the limit of ${oneFrameBytes} bytes`,
+      details: { limit: oneFrameBytes },
+    });
   });
 
   it("returns 410 when posting to a session that has ended", async () => {

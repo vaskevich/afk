@@ -5,7 +5,7 @@ import { errorResponse } from "../http/errors.ts";
 import { limitBody } from "../middleware/body-limit.ts";
 import { clientVersion } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
-import { TooManyFramesError, type IngestResult } from "../store/sessions.ts";
+import { TooManyBytesError, TooManyFramesError, type IngestResult } from "../store/sessions.ts";
 import { parseFrames } from "../utils/ndjson.ts";
 import { describeFrame } from "../log/describe.ts";
 import { log } from "../log/logger.ts";
@@ -69,8 +69,9 @@ export function frameRoutes(deps: AppDeps) {
       try {
         result = await store.ingest(session, parsed.frames);
       } catch (err) {
-        if (err instanceof TooManyFramesError) {
-          // 410: the session is full and will accept nothing more, so the client stops.
+        if (err instanceof TooManyFramesError || err instanceof TooManyBytesError) {
+          // 410: the session is full (by count or by size) and will accept nothing
+          // more, so the client stops or chains, exactly as for an ended session.
           return errorResponse(c, 410, err.message, { limit: err.limit });
         }
         throw err;
