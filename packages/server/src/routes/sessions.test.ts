@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_MAX_SESSION_DURATION_SECONDS,
   MIN_CLIENT_VERSION,
@@ -11,6 +11,7 @@ import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 import { sweepExpiredSessions } from "../store/sweeper.ts";
+import { log } from "../log/logger.ts";
 import { DEMO_SESSION_DELETE_MESSAGE, MAX_CREATE_BODY_BYTES } from "./sessions.ts";
 import {
   CLIENT_VERSION_HEADER,
@@ -100,6 +101,29 @@ describe("POST /api/sessions", () => {
     const afterEnding = await createTestSession(app);
 
     expect(afterEnding.res.status).toBe(201);
+  });
+
+  // A 503 is the server's own limit, not the client's mistake, so it is the one refusal
+  // an operator should see as a warning rather than at info with the 4xx.
+  it("logs a refusal at capacity at warn, with the status and the client that was turned away", async () => {
+    const app = buildApp({
+      maxActiveSessions: 1,
+      maxStreamsPerSession: 10,
+      maxFramesPerSession: 15_000,
+    });
+    await createTestSession(app);
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+    await createTestSession(app);
+
+    expect(warn).toHaveBeenCalledWith("request failed", {
+      method: "POST",
+      path: "/api/sessions",
+      status: 503,
+      session: undefined,
+      client: "bash/0.1.0",
+      error: expect.stringContaining("at capacity"),
+    });
   });
 
   it("returns 413 with an error body for a request larger than the create limit", async () => {

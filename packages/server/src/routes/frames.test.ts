@@ -6,6 +6,7 @@ import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 import { log } from "../log/logger.ts";
+import { INTERNAL_ERROR_MESSAGE } from "../http/errors.ts";
 import { MAX_INGEST_BODY_BYTES } from "./frames.ts";
 import {
   createTestSession,
@@ -249,5 +250,104 @@ describe("POST /api/sessions/:id/frames", () => {
     });
 
     expect(res.status).toBe(413);
+  });
+});
+
+/**
+ * The operator's view of a beta user in trouble. These assert on log lines rather than
+ * on the response (docs/TESTING.md rule 2) because the line is the feature: before it,
+ * every 4xx was a `debug` "request" line without the message, so at the default level
+ * nothing showed.
+ */
+describe("what an operator watching info sees when ingest fails", () => {
+  /** Spies on the logger after the session has been created, so its own lines are not counted. */
+  function watchLog() {
+    return {
+      info: vi.spyOn(log, "info").mockImplementation(() => {}),
+      warn: vi.spyOn(log, "warn").mockImplementation(() => {}),
+      error: vi.spyOn(log, "error").mockImplementation(() => {}),
+    };
+  }
+
+  it("logs a bad frame line at info with the status, the session, the client, and the message", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    const { info } = watchLog();
+
+    await postFrameBody(app, sessionId, ingestToken, "not json");
+
+    expect(info).toHaveBeenCalledWith("request rejected", {
+      method: "POST",
+      path: `/api/sessions/${sessionId}/frames`,
+      status: 400,
+      session: sessionId,
+      client: "bash/0.1.0",
+      error: expect.stringContaining("line 1"),
+    });
+  });
+
+  it("logs a 426 at info naming the client version, so an old client is told apart from a broken one", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    const { info } = watchLog();
+
+    await postFrameBody(app, sessionId, ingestToken, JSON.stringify(makeSystemFrame(0)), {
+      "x-afk-client": "bash/0.0.1",
+    });
+
+    expect(info).toHaveBeenCalledWith(
+      "request rejected",
+      expect.objectContaining({ status: 426, session: sessionId, client: "bash/0.0.1" }),
+    );
+  });
+
+  it("logs a 410 at info with the session, so a client that will not stop is visible", async () => {
+    const { app, sessionId, ingestToken } = await startSession();
+    await endTestSession(app, sessionId, ingestToken);
+    const { info } = watchLog();
+
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+
+    expect(info).toHaveBeenCalledWith(
+      "request rejected",
+      expect.objectContaining({
+        status: 410,
+        session: sessionId,
+        client: "bash/0.1.0",
+        error: "session ended",
+      }),
+    );
+  });
+
+  it("answers a thrown error as a JSON ErrorResponse and logs its stack at error", async () => {
+    const store = new SessionStore(new MemorySessionStorage());
+    const app = createApp(makeAppConfig(), store);
+    const { sessionId, ingestToken } = await createTestSession(app);
+    const { error } = watchLog();
+    vi.spyOn(store, "ingest").mockRejectedValue(new Error("storage is on fire"));
+
+    const res = await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ error: INTERNAL_ERROR_MESSAGE });
+    expect(error).toHaveBeenCalledWith("unhandled error", {
+      method: "POST",
+      path: `/api/sessions/${sessionId}/frames`,
+      session: sessionId,
+      client: "bash/0.1.0",
+      error: "storage is on fire",
+      stack: expect.stringContaining("storage is on fire"),
+    });
+  });
+
+  it("keeps the stack out of the response body", async () => {
+    const store = new SessionStore(new MemorySessionStorage());
+    const app = createApp(makeAppConfig(), store);
+    const { sessionId, ingestToken } = await createTestSession(app);
+    watchLog();
+    vi.spyOn(store, "ingest").mockRejectedValue(new Error("storage is on fire"));
+
+    const res = await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+
+    expect(await res.text()).not.toContain("frames.ts");
   });
 });
