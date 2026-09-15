@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import type { AdmissionLimits } from "../env.ts";
 import { DEFAULT_LIMITS } from "../env.ts";
@@ -7,7 +7,7 @@ import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 import { log } from "../log/logger.ts";
 import { INTERNAL_ERROR_MESSAGE } from "../http/errors.ts";
-import { MAX_INGEST_BODY_BYTES } from "./frames.ts";
+import { INGEST_SUMMARY_INTERVAL_MS, MAX_INGEST_BODY_BYTES } from "./frames.ts";
 import {
   createTestSession,
   endTestSession,
@@ -54,10 +54,11 @@ describe("POST /api/sessions/:id/frames", () => {
     expect(await res.json()).toEqual({ accepted: 2, duplicates: 0, latestSequence: { system: 2 } });
   });
 
-  it("logs one info line per batch naming the session, its streams, and the counts, never one per frame", async () => {
+  it("logs one debug line per batch naming the session, its streams, and the counts, and nothing at info", async () => {
     const { app, sessionId, ingestToken } = await startSession();
     await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
     const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    const debug = vi.spyOn(log, "debug").mockImplementation(() => {});
 
     await postFrames(app, sessionId, ingestToken, [
       makeSystemFrame(0),
@@ -66,13 +67,13 @@ describe("POST /api/sessions/:id/frames", () => {
       makeRunFrame(0),
     ]);
 
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(info).toHaveBeenCalledWith("accepted batch", {
+    expect(debug).toHaveBeenCalledWith("accepted batch", {
       session: sessionId,
       streams: "system,run:abcd1234",
       accepted: 3,
       duplicates: 1,
     });
+    expect(info).not.toHaveBeenCalled();
   });
 
   // Regression: the per-frame debug line carried `command=<the command line>`, so a
@@ -250,6 +251,86 @@ describe("POST /api/sessions/:id/frames", () => {
     });
 
     expect(res.status).toBe(413);
+  });
+});
+
+/**
+ * The operator's view of a healthy session. `accepted batch` used to be an `info` line
+ * once a second per session; at ten concurrent users that is tens of thousands of lines
+ * an hour, so the live session is summarized instead.
+ */
+describe("what an operator watching info sees while a session ingests", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("says nothing at info for the batches inside one INGEST_SUMMARY_INTERVAL_MS", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS - 1);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("logs one summary of the frames, duplicates, streams, and running total once the interval has passed", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0), makeRunFrame(0)]);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1), makeSystemFrame(2)]);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith("session ingesting", {
+      session: sessionId,
+      streams: "system,run:abcd1234",
+      frames: 4,
+      duplicates: 1,
+      total: 4,
+      seconds: INGEST_SUMMARY_INTERVAL_MS / 1000,
+    });
+  });
+
+  it("counts the next window from the summary it just logged, not from the session's first batch", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(2)]);
+
+    expect(info).toHaveBeenCalledTimes(2);
+    expect(info).toHaveBeenLastCalledWith(
+      "session ingesting",
+      expect.objectContaining({ frames: 1, total: 3, seconds: INGEST_SUMMARY_INTERVAL_MS / 1000 }),
+    );
+  });
+
+  it("summarizes each session on its own window", async () => {
+    vi.useFakeTimers();
+    const { app, sessionId, ingestToken } = await startSession();
+    const other = await createTestSession(app);
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
+    vi.advanceTimersByTime(INGEST_SUMMARY_INTERVAL_MS);
+    await postFrames(app, other.sessionId, other.ingestToken, [makeSystemFrame(0)]);
+
+    await postFrames(app, sessionId, ingestToken, [makeSystemFrame(1)]);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(
+      "session ingesting",
+      expect.objectContaining({ session: sessionId }),
+    );
   });
 });
 

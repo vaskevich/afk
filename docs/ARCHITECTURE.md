@@ -169,6 +169,12 @@ lifecycle, and every request the server refused, and nothing that repeats per se
 - **Lifecycle**, one line each: `session created` (with the dashboard URL and the host),
   the session's end (by the client, by a chain, by deletion, by the sweeper), its load
   from storage, and the anomaly events the rules engine opens and closes.
+- **Ingest**: one `session ingesting` line per session at most every
+  `INGEST_SUMMARY_INTERVAL_MS` (`routes/frames.ts`), with the frames, duplicates, and
+  streams since the last one and the session's running total, so a live session visibly
+  ticks over. The batches themselves are `debug`: at the 1 Hz send interval an `info`
+  line each was tens of thousands of lines an hour at the session cap, which buried
+  everything above.
 - **Refusals**: every response of 400 or more is one `request rejected` line at `info`
   (`request failed` at `warn` from 500), with `method`, `path`, `status`, the `error`
   message the client was given, the `session` when the route has one, and `client`, the
