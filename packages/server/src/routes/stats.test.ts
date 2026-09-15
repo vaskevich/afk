@@ -21,6 +21,8 @@ describe("GET /api/stats", () => {
       maxStreamsPerSession: 10,
       maxFramesPerSession: 15_000,
       maxBytesPerSession: 8_388_608,
+      maxSseConnectionsPerSession: 20,
+      maxSseConnections: 200,
     };
     const app = buildApp(limits);
     await createTestSession(app);
@@ -35,9 +37,12 @@ describe("GET /api/stats", () => {
       maxStreamsPerSession: 10,
       maxFramesPerSession: 15_000,
       maxBytesPerSession: 8_388_608,
+      maxSseConnectionsPerSession: 20,
+      maxSseConnections: 200,
       sessionsInMemory: 1,
       framesInMemory: 0,
       bytesInMemory: 0,
+      sseConnections: 0,
     });
     expect(Number.isInteger(body.uptimeSeconds)).toBe(true);
   });

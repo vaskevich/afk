@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ServiceStats } from "@afk/shared";
 import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
 import type { AdmissionLimits, AppConfig } from "../env.ts";
 import { DEFAULT_LIMITS } from "../env.ts";
@@ -16,6 +17,8 @@ import {
 
 /** How long a live stream test waits for the next message before giving up. */
 const STREAM_READ_TIMEOUT_MS = 2_000;
+
+type App = ReturnType<typeof createApp>;
 
 /**
  * Reads an open SSE response message by message. `next` resolves with the next parsed
@@ -222,6 +225,71 @@ describe("GET /api/sessions/:id/stream", () => {
     const res = await app.request("/api/sessions/does-not-exist/stream");
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/sessions/:id/stream connection caps", () => {
+  /** The `sseConnections` count the stats endpoint reports right now. */
+  async function openConnections(app: App): Promise<number> {
+    return ServiceStats.parse(await (await app.request("/api/stats")).json()).sseConnections;
+  }
+
+  it("answers 503 with Retry-After for the connection past maxSseConnectionsPerSession, and admits again once one closes", async () => {
+    const { app, sessionId } = await startSession({
+      ...DEFAULT_LIMITS,
+      maxSseConnectionsPerSession: 2,
+    });
+    const first = await app.request(`/api/sessions/${sessionId}/stream`);
+    const second = await app.request(`/api/sessions/${sessionId}/stream`);
+    expect([first.status, second.status]).toEqual([200, 200]);
+
+    const third = await app.request(`/api/sessions/${sessionId}/stream`);
+
+    expect(third.status).toBe(503);
+    expect(third.headers.get("Retry-After")).toBe("10");
+    expect(await third.json()).toEqual({
+      error: "this session already has 2 open streams; try again later",
+    });
+    expect(await openConnections(app)).toBe(2);
+
+    await first.body!.cancel();
+    await vi.waitFor(async () => expect(await openConnections(app)).toBe(1));
+    const afterClosing = await app.request(`/api/sessions/${sessionId}/stream`);
+
+    expect(afterClosing.status).toBe(200);
+    await Promise.all([second.body!.cancel(), afterClosing.body!.cancel()]);
+  });
+
+  it("answers 503 across sessions once maxSseConnections is reached for the whole server", async () => {
+    const { app, sessionId: first } = await startSession({
+      ...DEFAULT_LIMITS,
+      maxSseConnections: 1,
+    });
+    const { sessionId: second } = await createTestSession(app);
+    const open = await app.request(`/api/sessions/${first}/stream`);
+    expect(open.status).toBe(200);
+
+    const refused = await app.request(`/api/sessions/${second}/stream`);
+
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({
+      error: "the server already has 1 open streams; try again later",
+    });
+    await open.body!.cancel();
+  });
+
+  it("releases the connection when the stream ends on its own after replaying an ended session", async () => {
+    const { app, sessionId, ingestToken } = await startSession({
+      ...DEFAULT_LIMITS,
+      maxSseConnectionsPerSession: 1,
+    });
+    await endSession(app, sessionId, ingestToken);
+
+    const replayed = await app.request(`/api/sessions/${sessionId}/stream`);
+    await replayed.text();
+
+    await vi.waitFor(async () => expect(await openConnections(app)).toBe(0));
+    expect((await app.request(`/api/sessions/${sessionId}/stream`)).status).toBe(200);
   });
 });
 

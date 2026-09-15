@@ -619,6 +619,15 @@ and the dashboard treats any message, ping included, as proof the server is reac
 (see the dashboard section of [ARCHITECTURE.md](ARCHITECTURE.md)). On an already-ended session the server replays
 everything and sends `end` immediately, which is exactly the completed-trace view.
 
+Open connections are capped, since each one replays every frame and holds a listener
+for as long as the socket lives: `AFK_MAX_SSE_CONNECTIONS_PER_SESSION` (20) per
+session and `AFK_MAX_SSE_CONNECTIONS` (200) for the whole server. Past either the
+route answers `503` with `Retry-After: 10` and an `ErrorResponse` saying which cap,
+before anything is written; a browser's `EventSource` retries on its own. The counts
+are released when the stream ends for any reason (the replay of an ended session
+completing, `end`, the viewer going away) and reported as `sseConnections` by
+`GET /api/stats`.
+
 `StreamEndEvent` is the `SessionSummary` plus `reason`, a `StreamEndReason`: `ended`
 when the session is over (the summary says how: `endedAt`, and `nextSessionId` when it
 chained) and `deleted` when it was deleted while the stream was open (see "Delete"
@@ -737,28 +746,34 @@ no session id.
   "maxStreamsPerSession": 10,
   "maxFramesPerSession": 15000,
   "maxBytesPerSession": 8388608,
+  "maxSseConnectionsPerSession": 20,
+  "maxSseConnections": 200,
   "sessionsInMemory": 5,
   "framesInMemory": 48213,
   "bytesInMemory": 17203200,
+  "sseConnections": 4,
   "uptimeSeconds": 401222,
   "serverVersion": "0.1.0",
   "webCommit": "abc1234"
 }
 ```
 
-| field                  | meaning                                                                             |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| `activeSessions`       | sessions currently accepting frames                                                 |
-| `maxActiveSessions`    | the admission cap (see ARCHITECTURE.md)                                             |
-| `maxStreamsPerSession` | per-session stream cap                                                              |
-| `maxFramesPerSession`  | per-session cap on stored frames; a batch past it is 410                            |
-| `maxBytesPerSession`   | per-session cap on stored NDJSON bytes; a batch past it is 410                      |
-| `sessionsInMemory`     | sessions held in the in-memory cache, active or recently viewed                     |
-| `framesInMemory`       | frames summed across sessions in memory (a count, not a byte size)                  |
-| `bytesInMemory`        | stored NDJSON bytes summed across sessions in memory, the measure the byte cap uses |
-| `uptimeSeconds`        | since the process started                                                           |
-| `serverVersion`        | `packages/server`'s package.json version                                            |
-| `webCommit`            | short git commit of the served dashboard build; null without one                    |
+| field                         | meaning                                                                             |
+| ----------------------------- | ----------------------------------------------------------------------------------- |
+| `activeSessions`              | sessions currently accepting frames                                                 |
+| `maxActiveSessions`           | the admission cap (see ARCHITECTURE.md)                                             |
+| `maxStreamsPerSession`        | per-session stream cap                                                              |
+| `maxFramesPerSession`         | per-session cap on stored frames; a batch past it is 410                            |
+| `maxBytesPerSession`          | per-session cap on stored NDJSON bytes; a batch past it is 410                      |
+| `maxSseConnectionsPerSession` | open SSE stream connections one session may have; the next is 503                   |
+| `maxSseConnections`           | open SSE stream connections the whole server may have; the next is 503              |
+| `sessionsInMemory`            | sessions held in the in-memory cache, active or recently viewed                     |
+| `framesInMemory`              | frames summed across sessions in memory (a count, not a byte size)                  |
+| `bytesInMemory`               | stored NDJSON bytes summed across sessions in memory, the measure the byte cap uses |
+| `sseConnections`              | SSE stream connections open right now, across every session                         |
+| `uptimeSeconds`               | since the process started                                                           |
+| `serverVersion`               | `packages/server`'s package.json version                                            |
+| `webCommit`                   | short git commit of the served dashboard build; null without one                    |
 
 ## GET /versionz
 

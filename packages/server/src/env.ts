@@ -75,6 +75,16 @@ export interface AdmissionLimits {
    * 8 MiB is an hour of every collector at 1 Hz with headroom.
    */
   maxBytesPerSession: number;
+  /**
+   * Open SSE connections (`GET /api/sessions/:id/stream`) one session may have, and
+   * the whole process may have. Each replays every frame and holds a listener for as
+   * long as the socket lives, so without a bound whoever holds one large session's link
+   * could open hundreds and spend the node's CPU and egress. Beyond either the route
+   * answers 503 with `Retry-After`. 20 viewers of one session is far more than a share
+   * link sees; 200 is ten per active session at the session cap.
+   */
+  maxSseConnectionsPerSession: number;
+  maxSseConnections: number;
 }
 
 const MIB = 1024 * 1024;
@@ -84,6 +94,8 @@ export const DEFAULT_LIMITS: AdmissionLimits = {
   maxStreamsPerSession: 10,
   maxFramesPerSession: 15_000,
   maxBytesPerSession: 8 * MIB,
+  maxSseConnectionsPerSession: 20,
+  maxSseConnections: 200,
 };
 
 /** Everything route modules need. Passed in explicitly so tests can build an app with a fresh store. */

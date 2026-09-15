@@ -218,6 +218,16 @@ restart, and a batch past either cap is refused whole with 410 (`TooManyFramesEr
 image runs node with `--max-old-space-size=384` so an overrun of this arithmetic is a
 heap trace in the log rather than a silent OOM kill of the container.
 
+The read side is bounded too: `GET /api/sessions/:id/stream` replays every frame per
+connection and holds a listener for as long as the socket lives, so
+`maxSseConnectionsPerSession` (20, `AFK_MAX_SSE_CONNECTIONS_PER_SESSION`) and
+`maxSseConnections` (200, `AFK_MAX_SSE_CONNECTIONS`) cap open connections per session
+and per process. The stream route asks `store.openSseConnection` before its first
+write (no await between the check and the count, so it is exact) and answers 503 with
+`Retry-After` past either; `closeSseConnection` runs in the stream's `finally`, so a
+replay that completes, an `end`, and a viewer that goes away all release the slot.
+`sseConnections` in `GET /api/stats` is the live total.
+
 The 20 × 10 default is sized for the smallest Lightsail container node (0.25 vCPU,
 512 MB): active sessions keep every frame in memory for replay and SSE, and a one-hour
 stream at 1 Hz is roughly 5 MB of JS objects, so 20 sessions × 10 streams worst case

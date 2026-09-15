@@ -36,6 +36,8 @@ export interface Session extends SessionRecord {
   frames: StoredFrame[];
   /** Bytes of `frames` as stored NDJSON (`storedFrameBytes`); what `maxBytesPerSession` bounds. */
   byteCount: number;
+  /** Open SSE connections serving this session (`openSseConnection` / `closeSseConnection`). */
+  sseConnections: number;
   listeners: Set<SessionListener>;
   /** Serializes storage appends so frames land on disk in index order. */
   writeQueue: SerialQueue;
@@ -87,6 +89,12 @@ interface UnknownIdEntry {
   expiresAt: number;
   deleted: boolean;
 }
+
+/**
+ * What `openSseConnection` decides: admitted, or refused because the session or the
+ * whole process is at its cap (`maxSseConnectionsPerSession` / `maxSseConnections`).
+ */
+export type SseAdmission = "admitted" | "session-full" | "server-full";
 
 /** What `delete` reports back: the record that was removed and how many frames went with it. */
 export interface DeleteResult {
@@ -162,6 +170,8 @@ export class SessionStore {
   /** Ids storage did not know (or that were deleted), each with when to forget it. Insertion order is age. */
   private readonly unknownIds = new Map<string, UnknownIdEntry>();
   private readonly options: SessionStoreOptions;
+  /** Open SSE connections across every session; the sum of `Session.sseConnections`. */
+  private sseConnections = 0;
 
   constructor(
     private readonly storage: SessionStorage,
@@ -199,10 +209,37 @@ export class SessionStore {
       maxStreamsPerSession: this.options.limits.maxStreamsPerSession,
       maxFramesPerSession: this.options.limits.maxFramesPerSession,
       maxBytesPerSession: this.options.limits.maxBytesPerSession,
+      maxSseConnectionsPerSession: this.options.limits.maxSseConnectionsPerSession,
+      maxSseConnections: this.options.limits.maxSseConnections,
       sessionsInMemory: this.sessions.size,
       framesInMemory,
       bytesInMemory,
+      sseConnections: this.sseConnections,
     };
+  }
+
+  /**
+   * Counts one more SSE connection against `session` and the process, unless either is
+   * at its cap, in which case nothing is counted and the answer says which. The stream
+   * route calls this before it starts writing and `closeSseConnection` when it stops,
+   * so the counts are exact at the moment of the check; there is no await in between.
+   */
+  openSseConnection(session: Session): SseAdmission {
+    if (session.sseConnections >= this.options.limits.maxSseConnectionsPerSession) {
+      return "session-full";
+    }
+    if (this.sseConnections >= this.options.limits.maxSseConnections) {
+      return "server-full";
+    }
+    session.sseConnections++;
+    this.sseConnections++;
+    return "admitted";
+  }
+
+  /** Releases a connection `openSseConnection` admitted, once the stream has ended for any reason. */
+  closeSseConnection(session: Session): void {
+    session.sseConnections--;
+    this.sseConnections--;
   }
 
   /**
@@ -365,6 +402,7 @@ export class SessionStore {
       latestSequence,
       frames,
       byteCount,
+      sseConnections: 0,
       listeners: new Set(),
       writeQueue: new SerialQueue(),
       engine,

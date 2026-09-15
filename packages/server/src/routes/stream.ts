@@ -10,9 +10,16 @@ import type {
   StreamEndReason,
 } from "@afk/shared";
 import type { AppDeps, AppEnv } from "../env.ts";
-import { sessionNotFound } from "../http/errors.ts";
+import { errorResponse, sessionNotFound } from "../http/errors.ts";
 import type { Session, SessionEvent } from "../store/sessions.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
+
+/**
+ * What a viewer refused for lack of SSE capacity is told to wait before retrying. The
+ * dashboard's EventSource reconnects on its own; a short wait is enough for a
+ * connection that was closing to have been released.
+ */
+const SSE_CAPACITY_RETRY_AFTER_SECONDS = 10;
 
 /** Parses the resume cursor: `Last-Event-ID` header wins, then `?after=`, else from the start. */
 function resumeIndex(lastEventId: string | undefined, afterQuery: string | undefined): number {
@@ -50,7 +57,26 @@ export function streamRoutes(deps: AppDeps) {
         return sessionNotFound(c, store.wasDeleted(sessionId));
       }
       const after = resumeIndex(c.req.header("last-event-id"), c.req.query("after"));
-      return streamSSE(c, (stream) => serveSession(stream, session, after));
+      // Counted before the first write and released in serveSession's finally, so the
+      // caps hold whether the stream ends by replay, by the session ending, or by the
+      // viewer going away.
+      const admission = store.openSseConnection(session);
+      if (admission !== "admitted") {
+        c.header("Retry-After", String(SSE_CAPACITY_RETRY_AFTER_SECONDS));
+        const { limits } = config;
+        const reason =
+          admission === "session-full"
+            ? `this session already has ${limits.maxSseConnectionsPerSession} open streams`
+            : `the server already has ${limits.maxSseConnections} open streams`;
+        return errorResponse(c, 503, `${reason}; try again later`);
+      }
+      return streamSSE(c, async (stream) => {
+        try {
+          await serveSession(stream, session, after);
+        } finally {
+          store.closeSseConnection(session);
+        }
+      });
     });
 
   async function serveSession(stream: SSEStreamingApi, session: Session, after: number) {

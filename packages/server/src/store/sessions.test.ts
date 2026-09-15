@@ -972,10 +972,45 @@ describe("SessionStore", () => {
         maxStreamsPerSession: 10,
         maxFramesPerSession: 15_000,
         maxBytesPerSession: 8_388_608,
+        maxSseConnectionsPerSession: 20,
+        maxSseConnections: 200,
         sessionsInMemory: 1,
         framesInMemory: 2,
         bytesInMemory: session.frames.reduce((sum, f) => sum + storedFrameBytes(f), 0),
+        sseConnections: 0,
       });
+    });
+  });
+
+  describe("openSseConnection and closeSseConnection", () => {
+    it("admits connections up to the per-session cap, refuses the next as session-full, and admits again after a close", async () => {
+      const store = new SessionStore(new MemorySessionStorage(), {
+        limits: { ...DEFAULT_LIMITS, maxSseConnectionsPerSession: 2 },
+      });
+      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+
+      expect(store.openSseConnection(session)).toBe("admitted");
+      expect(store.openSseConnection(session)).toBe("admitted");
+      expect(store.openSseConnection(session)).toBe("session-full");
+      expect(store.stats().sseConnections).toBe(2);
+
+      store.closeSseConnection(session);
+
+      expect(store.openSseConnection(session)).toBe("admitted");
+    });
+
+    it("refuses a connection as server-full once the process-wide cap is reached across sessions", async () => {
+      const store = new SessionStore(new MemorySessionStorage(), {
+        limits: { ...DEFAULT_LIMITS, maxSseConnections: 2 },
+      });
+      const a = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const b = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      expect(store.openSseConnection(a)).toBe("admitted");
+      expect(store.openSseConnection(b)).toBe("admitted");
+
+      expect(store.openSseConnection(b)).toBe("server-full");
+
+      expect(store.stats().sseConnections).toBe(2);
     });
   });
 

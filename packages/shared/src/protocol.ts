@@ -398,11 +398,16 @@ export const ServiceStats = z.object({
   /** Per-session caps on stored frames and on their size as stored NDJSON; a batch past either is 410. */
   maxFramesPerSession: z.number().int().positive(),
   maxBytesPerSession: z.number().int().positive(),
+  /** Caps on open SSE stream connections, per session and for the whole server; past either is 503. */
+  maxSseConnectionsPerSession: z.number().int().positive(),
+  maxSseConnections: z.number().int().positive(),
   /** Sessions currently held in memory, active or recently viewed. */
   sessionsInMemory: z.number().int().nonnegative(),
   framesInMemory: z.number().int().nonnegative(),
   /** Stored NDJSON bytes summed across the sessions in memory, the same measure the byte cap uses. */
   bytesInMemory: z.number().int().nonnegative(),
+  /** SSE stream connections open right now, across every session. */
+  sseConnections: z.number().int().nonnegative(),
   uptimeSeconds: z.number().int().nonnegative(),
   /** packages/server's package.json version. */
   serverVersion: z.string(),
