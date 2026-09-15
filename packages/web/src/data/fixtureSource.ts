@@ -21,7 +21,9 @@ import type { SessionSource } from "./source.ts";
  * demoed without a server. The shape is deliberately "interesting": a quiet machine,
  * then a three minute cpu burn during which memory pressure goes to Warn and swap
  * starts creeping up. Earlier there is a short burst of pressure flaps (to exercise
- * marker clustering) and later a 90 s stretch with no frames at all (a stale client).
+ * marker clustering) and later a stretch with no frames at all (a stale client): the
+ * samples 11:00 through 12:29 are skipped, so the last frame before it and the first
+ * after it are 91 s apart.
  * A second stream, `processes`, samples the busiest processes every 5 s and shows a
  * `cpu-burn` node process dominating during the burn. A third, `run:…`, is a short
  * `afk run` of a fake migration that crashes with exit code 3; its final frame carries
@@ -50,7 +52,11 @@ const PRESSURE_FLAPS: ReadonlyArray<readonly [number, number]> = [
   [196, 200],
   [214, 220],
 ];
-/** No frames at all for this stretch, as if the laptop went to sleep. */
+/**
+ * No frames at all for the samples in [STALE_START, STALE_END), as if the laptop went
+ * to sleep. STALE_END itself is sampled, so the gap between the last frame before the
+ * stretch (STALE_START - 1) and the first after it (STALE_END) is 91 s, not 90.
+ */
 const STALE_START = 11 * 60;
 const STALE_END = STALE_START + 90;
 const STREAM = "system";
