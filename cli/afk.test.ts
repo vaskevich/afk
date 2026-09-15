@@ -2373,6 +2373,35 @@ describe("chain_session", () => {
     expect(await queueFiles(oldDir)).toEqual(["0000000007-system.ndjson"]);
   });
 
+  it("goes ahead when a run frame is queued the moment after the flush drained the queue", async () => {
+    const afkHome = await makeTempDir();
+    const server = await chainServer("oldSession", "newSession");
+    const oldDir = await makeOldSession(afkHome, server.url);
+
+    const { stdout, stderr } = await runBash(
+      [
+        "sleep 30 & SENDER_PID=$!",
+        // The run sampler of an owning `afk run` writes into this queue while the
+        // system sampler chains, so a frame can land between the flush and the check
+        // that the flush emptied the queue. Wrapping flush_queue puts one exactly there.
+        'eval "flushed_queue() $(declare -f flush_queue | tail -n +2)"',
+        'flush_queue() { flushed_queue; printf "RUN\\n" > "$SESSION_DIR/queue/0000000003-run:ab12cd34.ndjson"; }',
+        'chain_session > "$AFK_HOME/chain.out"; printf "RC=%d\\n" "$?"',
+        'printf "SESSION_ID=%s\\n" "$SESSION_ID"',
+        'kill "$SENDER_PID"; wait "$SENDER_PID" 2>/dev/null',
+      ].join("\n"),
+      sessionEnv(afkHome, server.url),
+    );
+
+    expect(parseKeyValueLines(stdout), stderr).toEqual({ RC: "0", SESSION_ID: "newSession" });
+    expect(stderr).not.toContain("could not send");
+    // The frame followed the run into the successor, as run frames do.
+    expect(await queueFiles(oldDir)).toEqual([]);
+    expect(await queueFiles(join(afkHome, "sessions", "newSession"))).toEqual([
+      "0000000003-run:ab12cd34.ndjson",
+    ]);
+  });
+
   it("goes ahead when the old session already answers 410, since nothing more can reach it", async () => {
     const afkHome = await makeTempDir();
     const server = await chainServer("oldSession", "newSession", 410);

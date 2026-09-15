@@ -1321,18 +1321,22 @@ chain_before_cap_seconds() {
 # session's sender running again, when the flush did not get through or the server
 # would not create the successor; the caller retries.
 chain_session() {
-  local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_cap=$MAX_DURATION_SECONDS rc f
+  local old_id=$SESSION_ID old_token=$INGEST_TOKEN old_dir=$SESSION_DIR old_cap=$MAX_DURATION_SECONDS flushed rc f
   stop_background_job "$SENDER_PID"
-  flush_queue
+  flush_queue; flushed=$?
   # A session deleted under us (the flush got a 404) has no successor: the sampler
   # loop stops on the marker, and a create naming it would only be refused.
   if session_is_deleted; then
     return 1
   fi
-  # A 410 means the old session is already over on the server (it hit the cap, or its
-  # frame limit, or was ended after a long silence); nothing queued for it can be sent
-  # any more, and the server still links a successor to an ended session.
-  if [ "$(queue_count)" -gt 0 ] && [ "$HTTP_STATUS" != 410 ]; then
+  # Whether the flush got through, not whether the queue is empty now: the run sampler
+  # of an owning `afk run` writes into this queue too, and a frame of its own that
+  # landed the moment the last batch went out is no reason to put the chain off (it
+  # moves to the successor below with any other run frame). A 410 means the old
+  # session is already over on the server (it hit the cap, or its frame limit, or was
+  # ended after a long silence); nothing queued for it can be sent any more, and the
+  # server still links a successor to an ended session.
+  if [ "$flushed" != 0 ] && [ "$HTTP_STATUS" != 410 ]; then
     log "could not send the last ${old_cap}s session's queue yet; will try again"
     sender_loop &
     SENDER_PID=$!
@@ -1797,6 +1801,10 @@ adopt_interrupted_frames() {
   done
 }
 
+# Returns 0 once the queue is empty and 1 when a send failed and left frames behind,
+# which is not the same question as whether the queue is empty afterwards: a sampler
+# writing into the same queue (the run sampler of an owning `afk run`) can queue a
+# frame the moment the last batch went out. The caller that cares is chain_session.
 flush_queue() {
   local rc
   adopt_interrupted_frames
@@ -1805,8 +1813,9 @@ flush_queue() {
     if [ "$rc" = 4 ]; then
       session_deleted
     fi
-    [ "$rc" = 0 ] || break
+    [ "$rc" = 0 ] || return 1
   done
+  return 0
 }
 
 # ---------------------------------------------------------------------------
