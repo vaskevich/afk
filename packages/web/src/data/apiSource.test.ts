@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { apiSource } from "./apiSource.ts";
+import { SessionGoneError } from "./source.ts";
 
 const SESSION_ID = "D3FzMqK8qOLVva9LoHF9uc";
 
@@ -42,12 +43,29 @@ describe("apiSource.load on a session that is gone", () => {
   it("says the session was deleted when the 404 carries that reason", async () => {
     answer(404, { error: "session deleted", details: { reason: "deleted" } });
 
-    await expect(apiSource.load(SESSION_ID)).rejects.toThrow(`Session "${SESSION_ID}" was deleted`);
+    const rejection = apiSource.load(SESSION_ID);
+
+    await expect(rejection).rejects.toThrow(`Session "${SESSION_ID}" was deleted`);
+    await expect(rejection).rejects.toBeInstanceOf(SessionGoneError);
+    await expect(rejection).rejects.toMatchObject({ sessionId: SESSION_ID, reason: "deleted" });
   });
 
   it("says the session was not found for a plain 404", async () => {
     answer(404, { error: "unknown session" });
 
-    await expect(apiSource.load(SESSION_ID)).rejects.toThrow(`Session "${SESSION_ID}" not found`);
+    const rejection = apiSource.load(SESSION_ID);
+
+    await expect(rejection).rejects.toThrow(`Session "${SESSION_ID}" not found`);
+    await expect(rejection).rejects.toBeInstanceOf(SessionGoneError);
+    await expect(rejection).rejects.toMatchObject({ sessionId: SESSION_ID, reason: "not-found" });
+  });
+
+  it("rejects with a plain error naming the status for any other failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("gateway", { status: 502 }));
+
+    const rejection = apiSource.load(SESSION_ID);
+
+    await expect(rejection).rejects.toThrow("Server returned 502");
+    await expect(rejection).rejects.not.toBeInstanceOf(SessionGoneError);
   });
 });

@@ -30,6 +30,30 @@ export interface SubscribeHandlers {
 
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
 
+/** Why a session has nothing to load: never existed (or swept) vs. deleted by its owner. */
+export type SessionGoneReason = "not-found" | "deleted";
+
+const GONE_MESSAGES: Record<SessionGoneReason, (sessionId: string) => string> = {
+  "not-found": (sessionId) => `Session "${sessionId}" not found`,
+  deleted: (sessionId) => `Session "${sessionId}" was deleted`,
+};
+
+/**
+ * `load` rejects with this when the server has no such session, so the page can say
+ * which of the two it was and name the id; any other failure is a plain Error.
+ */
+export class SessionGoneError extends Error {
+  readonly sessionId: string;
+  readonly reason: SessionGoneReason;
+
+  constructor(sessionId: string, reason: SessionGoneReason) {
+    super(GONE_MESSAGES[reason](sessionId));
+    this.name = "SessionGoneError";
+    this.sessionId = sessionId;
+    this.reason = reason;
+  }
+}
+
 /**
  * Where a session's data comes from. The session view only talks to this interface,
  * so the fixture used by `/s/demo` and the real API are interchangeable.

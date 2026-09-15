@@ -8,7 +8,7 @@ import {
   StreamEndEvent,
   StreamEventName,
 } from "@afk/shared";
-import type { SessionSource } from "./source.ts";
+import { SessionGoneError, type SessionSource } from "./source.ts";
 
 /** How long to buffer incoming frames before handing them to React, to avoid a render per frame during replay. */
 const FLUSH_INTERVAL_MS = 100;
@@ -40,11 +40,7 @@ export const apiSource: SessionSource = {
   async load(sessionId) {
     const res = await fetch(`${sessionPath(sessionId)}/frames`);
     if (res.status === 404) {
-      throw new Error(
-        (await saysDeleted(res))
-          ? `Session "${sessionId}" was deleted`
-          : `Session "${sessionId}" not found`,
-      );
+      throw new SessionGoneError(sessionId, (await saysDeleted(res)) ? "deleted" : "not-found");
     }
     if (!res.ok) {
       throw new Error(`Server returned ${res.status}`);

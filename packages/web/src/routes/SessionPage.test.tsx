@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { apiSource } from "../data/apiSource.ts";
+import { SessionGoneError } from "../data/source.ts";
 import { renderOnSessionRoute } from "../test-helpers.tsx";
 import { SessionPage } from "./SessionPage.tsx";
 
@@ -9,31 +10,71 @@ afterEach(() => {
   cleanup();
 });
 
+/** The page while it has nothing to draw yet; a loaded session draws on canvas, which jsdom has none of. */
+describe("SessionPage while the session loads", () => {
+  it("shows a centred status block saying it is loading, with no way out yet", async () => {
+    vi.spyOn(apiSource, "load").mockReturnValue(new Promise(() => {}));
+
+    await renderOnSessionRoute(<SessionPage />, "/s/pending");
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toBe("Loading session…");
+    expect(within(status).getByRole("img", { name: "afk" })).toBeTruthy();
+    expect(within(status).queryByRole("link")).toBeNull();
+  });
+});
+
 /**
- * The page's error path only; a loaded session draws on canvas, which jsdom has none
- * of. What matters here is that a link to a session that no longer exists (a chain
- * neighbour's `previousSessionId` after a delete, a stale bookmark) renders a message
- * rather than nothing.
+ * What matters here is that a link to a session that no longer exists (a chain
+ * neighbour's `previousSessionId` after a delete, a stale bookmark) says so, names the
+ * id, and offers the landing page, rather than rendering nothing.
  */
 describe("SessionPage for a session that is gone", () => {
   it("says the session was deleted when the server remembers deleting it", async () => {
-    vi.spyOn(apiSource, "load").mockRejectedValue(new Error('Session "earlier" was deleted'));
+    vi.spyOn(apiSource, "load").mockRejectedValue(new SessionGoneError("earlier", "deleted"));
 
     await renderOnSessionRoute(<SessionPage />, "/s/earlier");
 
-    expect((await screen.findByText(/Could not load session/)).textContent).toBe(
-      'Could not load session: Session "earlier" was deleted',
-    );
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toBe("Session earlier was deleted.← Back to afk");
+    expect(within(status).getByText("earlier").tagName).toBe("CODE");
+    expect(within(status).getByRole("link", { name: "← Back to afk" })).toMatchObject({
+      pathname: "/",
+    });
   });
 
   it("says the session was not found for an id the server does not know", async () => {
-    vi.spyOn(apiSource, "load").mockRejectedValue(new Error('Session "gone" not found'));
+    vi.spyOn(apiSource, "load").mockRejectedValue(new SessionGoneError("gone", "not-found"));
 
     await renderOnSessionRoute(<SessionPage />, "/s/gone");
 
-    expect((await screen.findByText(/Could not load session/)).textContent).toBe(
-      'Could not load session: Session "gone" not found',
-    );
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toBe("Session gone not found.← Back to afk");
+    expect(within(status).getByText("gone").tagName).toBe("CODE");
+    expect(within(status).getByRole("link", { name: "← Back to afk" })).toMatchObject({
+      pathname: "/",
+    });
+  });
+
+  // The id comes from the URL; a hand-typed one lands in the message as text, nothing more.
+  it("shows a hand-typed id as text, not markup", async () => {
+    const typed = "<b>bold</b>";
+    vi.spyOn(apiSource, "load").mockRejectedValue(new SessionGoneError(typed, "not-found"));
+
+    await renderOnSessionRoute(<SessionPage />, `/s/${encodeURIComponent(typed)}`);
+
+    const status = await screen.findByRole("status");
+    expect(within(status).getByText(typed).tagName).toBe("CODE");
+    expect(status.querySelector("b")).toBeNull();
+  });
+
+  it("repeats the error's own words for any other failure", async () => {
+    vi.spyOn(apiSource, "load").mockRejectedValue(new Error("Server returned 502"));
+
+    await renderOnSessionRoute(<SessionPage />, "/s/unreachable");
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toBe("Could not load session: Server returned 502.← Back to afk");
   });
 });
 

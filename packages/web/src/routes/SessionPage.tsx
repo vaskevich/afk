@@ -1,10 +1,12 @@
 import type { AnomalyEvent } from "@afk/shared";
-import { getRouteApi, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
+import { useMemo, useState, type ReactNode } from "react";
+import { AfkMark } from "../components/AfkMark.tsx";
 import { DetailsPanel } from "../components/DetailsPanel.tsx";
 import { NearbyEvents } from "../components/NearbyEvents.tsx";
 import { SessionHeader } from "../components/SessionHeader.tsx";
 import { StatusBanner } from "../components/StatusBanner.tsx";
+import { SessionGoneError, type SessionGoneReason } from "../data/source.ts";
 import { useSession } from "../data/useSession.ts";
 import { useNow } from "../useNow.ts";
 import { buildModel } from "../timeline/model.ts";
@@ -17,6 +19,45 @@ const route = getRouteApi("/s/$sessionId");
 const NEARBY_RADIUS_PX = 24;
 /** ...but never less than this much time, so a fully zoomed-out view still finds things. */
 const NEARBY_RADIUS_MIN_MS = 5_000;
+/** The mark above a status message, smaller than on the landing page. */
+const STATUS_MARK_SIZE_PX = 48;
+/** What the status screen says was gone, by the source's reason. */
+const GONE_VERBS: Record<SessionGoneReason, string> = {
+  "not-found": "not found",
+  deleted: "was deleted",
+};
+
+/**
+ * The page while it has no session to draw: the mark, one line in the body font, and
+ * (for a failure) a way back to the landing page, centred a little way down the screen.
+ */
+function SessionStatus({ wayOut = false, children }: { wayOut?: boolean; children: ReactNode }) {
+  return (
+    <main className="page">
+      <div className="session-status" role="status">
+        <AfkMark size={STATUS_MARK_SIZE_PX} />
+        <p className="session-status-message">{children}</p>
+        {wayOut && (
+          <p className="session-status-hint">
+            <Link to="/">← Back to afk</Link>
+          </p>
+        )}
+      </div>
+    </main>
+  );
+}
+
+/** "Session <id> not found." when the server said so; otherwise the error's own words. */
+function LoadFailure({ error }: { error: unknown }) {
+  if (error instanceof SessionGoneError) {
+    return (
+      <>
+        Session <code>{error.sessionId}</code> {GONE_VERBS[error.reason]}.
+      </>
+    );
+  }
+  return <>Could not load session: {error instanceof Error ? error.message : "unknown"}.</>;
+}
 
 export function SessionPage() {
   const { sessionId } = route.useParams();
@@ -34,13 +75,18 @@ export function SessionPage() {
   const model = useMemo(() => (query.data ? buildModel(query.data, now) : null), [query.data, now]);
 
   if (query.isPending) {
-    return <div className="centered">Loading session…</div>;
+    return (
+      <SessionStatus>
+        <span className="session-status-spinner" aria-hidden="true" />
+        Loading session…
+      </SessionStatus>
+    );
   }
   if (query.isError || !model || !query.data) {
     return (
-      <div className="centered">
-        Could not load session: {query.error instanceof Error ? query.error.message : "unknown"}
-      </div>
+      <SessionStatus wayOut>
+        <LoadFailure error={query.error} />
+      </SessionStatus>
     );
   }
 
