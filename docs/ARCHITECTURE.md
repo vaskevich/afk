@@ -210,9 +210,16 @@ streams) use a fraction of that.
 `POST /api/sessions` checks `store.hasCapacity()` before creating a session; at
 capacity it returns 503 with `Retry-After`, and `create_session_or_wait` in the client
 polls until there is room. `store.ingest` checks the per-session stream cap as it
-processes a batch and throws `TooManyStreamsError` for the frame that would add an
-eleventh stream, which the frames route turns into 422 — the batch itself is
-well-formed, just over the limit, so a different status than a generic bad request.
+processes a batch and skips the frames of a stream that would be the eleventh, naming
+it in the response's `rejectedStreams` while the rest of the batch lands; the frames
+route answers 422 only when every frame in the batch was such a frame (a joining
+`afk run`'s first batch) — the batch itself is well-formed, just over the limit, so a
+different status than a generic bad request. Admission is decided inside the
+session's serial write queue, together with the write: the senders of one session run
+concurrently (an `afk start` and each joined `afk run` have one each), and deciding
+against the in-memory state outside the queue handed overlapping batches the same
+session-wide index (which the dashboard drops as already seen) and let two new streams
+through a cap with one slot left.
 
 Ended sessions with no active SSE listeners are evicted from the in-memory cache after
 `AFK_EVICT_ENDED_AFTER_SECONDS` (10 minutes) of no access, in the same `tick()` pass that runs
@@ -645,6 +652,14 @@ Newest first. Add an entry whenever a direction changes; keep the reasoning shor
   `makeEvent`, …) over literals, real implementations (`MemorySessionStorage`,
   `app.request()`) over mocks. See [TESTING.md](TESTING.md). The bash client is tested
   by sourcing it with `AFK_SOURCED=1` and calling functions directly from Vitest.
+- **2026-09-14** Ingest admits one batch at a time per session, inside the session's
+  serial write queue, and a stream past the per-session cap is skipped and named in
+  the response (`rejectedStreams`) rather than failing the batch; 422 is kept for a
+  batch made only of such frames. The senders of one session run concurrently (an
+  `afk start` plus each joined `afk run`), and admitting against the in-memory state
+  before the write was awaited handed overlapping batches the same session-wide index,
+  which the dashboard drops as already seen, and let two runs through a cap with one
+  slot left. Found while checking whether concurrent `afk run`s can drop frames.
 - **2026-09-14** Admission control caps active sessions (20) and streams per session
   (10), sized for the smallest Lightsail container node (0.25 vCPU, 512 MB): a
   one-hour stream at 1 Hz is roughly 5 MB of JS objects, so the worst case stays under

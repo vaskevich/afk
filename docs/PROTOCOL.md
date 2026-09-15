@@ -163,26 +163,49 @@ frame as one file in this shape, so a batch is just the oldest files concatenate
 
 Frames whose `sequence` is at or below the server's latest for that stream are
 counted as duplicates and ignored. That makes retries idempotent: a batch that was
-received but whose acknowledgement was lost is resent and skipped. Status codes:
+received but whose acknowledgement was lost is resent and skipped. Frames of a stream
+the session has no room for (`maxStreamsPerSession`, see admission control in
+[ARCHITECTURE.md](ARCHITECTURE.md)) are skipped too, and the streams concerned are
+listed in `rejectedStreams` (absent when there are none), so a batch that mixes them
+with known streams still lands the known streams' frames:
 
-| code                        | meaning                                              | client behaviour                                       |
-| --------------------------- | ---------------------------------------------------- | ------------------------------------------------------ |
-| 200                         | accepted                                             | delete the batch                                       |
-| 400 / 401 / 413             | the server will never accept this batch              | park it in `rejected/`, keep going                     |
-| 404                         | the session was deleted (see "Delete")               | stop the session for good: drop the queue, never chain |
-| 410                         | session ended or past its maximum duration           | stop the session (`afk start` chains to a successor)   |
-| 422                         | a frame's stream would exceed `maxStreamsPerSession` | park it in `rejected/`, keep going                     |
-| 426                         | the server no longer talks to this client version    | stop the session, print the update hint                |
-| anything else / no response | transient                                            | keep the batch, back off, retry                        |
+```json
+{
+  "accepted": 12,
+  "duplicates": 0,
+  "latestSequence": { "system": 42 },
+  "rejectedStreams": ["run:9f1c2b3a"]
+}
+```
+
+Batches from the senders of one session (an `afk start` and every `afk run` joined to
+it each have their own) arrive concurrently; the server admits them one at a time per
+session, so session-wide indexes are distinct and the stream cap holds. Status codes:
+
+| code                        | meaning                                                  | client behaviour                                            |
+| --------------------------- | -------------------------------------------------------- | ----------------------------------------------------------- |
+| 200                         | accepted (possibly with `rejectedStreams`)               | delete the batch                                            |
+| 400 / 401 / 413             | the server will never accept this batch                  | park it in `rejected/`, keep going                          |
+| 404                         | the session was deleted (see "Delete")                   | stop the session for good: drop the queue, never chain      |
+| 410                         | session ended or past its maximum duration               | stop the session (`afk start` chains to a successor)        |
+| 422                         | every frame's stream would exceed `maxStreamsPerSession` | `afk run`: drop the queue, run without telemetry; else park |
+| 426                         | the server no longer talks to this client version        | stop the session, print the update hint                     |
+| anything else / no response | transient                                                | keep the batch, back off, retry                             |
 
 413 means the body is over the ingest cap (1 MiB; `details.limit`), which a
 well-behaved client never reaches (see the arithmetic in `routes/frames.ts`). 422 means
-the batch was well formed (unlike the 400 row above) but would add a stream past the
-session's cap; the error body's `details` names the offending `stream` and the `limit`.
-The client cannot fix either by retrying, so the batch is parked the same way as a
-permanent rejection. 426 is the version check described under "Session lifecycle": a
-client that was fine when it created the session but has since been retired keeps its
-queue on disk and stops, like a 410, so nothing sampled is lost.
+the batch was well formed (unlike the 400 row above) but every frame in it belongs to a
+stream past the session's cap, so nothing of it was kept; the error body's `details`
+names the first such `stream` and the `limit`. That is what a joining `afk run` gets on
+its first batch when the session filled up between its check of `streamCount` and its
+first send (several runs started in the same second): the client cannot fix it by
+retrying, so it drops the run's queue, prints one line saying the session has no room
+for another run, and lets the command run without telemetry (see "Concurrent runs" in
+[CLIENT.md](CLIENT.md)). An owner's batch cannot be all-rejected unless the cap is below
+its own three streams; that batch is parked in `rejected/` like a permanent rejection.
+426 is the version check described under "Session lifecycle": a client that was fine
+when it created the session but has since been retired keeps its queue on disk and
+stops, like a 410, so nothing sampled is lost.
 
 404 is the deletion signal. The server never forgets a session it created while its
 client is still sending for any other reason (storage is durable across restarts, and

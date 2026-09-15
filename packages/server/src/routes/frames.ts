@@ -5,7 +5,7 @@ import { errorResponse } from "../http/errors.ts";
 import { limitBody } from "../middleware/body-limit.ts";
 import { clientVersion } from "../middleware/client-version.ts";
 import { ingestAuth } from "../middleware/ingest-auth.ts";
-import { TooManyFramesError, TooManyStreamsError, type IngestResult } from "../store/sessions.ts";
+import { TooManyFramesError, type IngestResult } from "../store/sessions.ts";
 import { parseFrames } from "../utils/ndjson.ts";
 import { describeFrame } from "../log/describe.ts";
 import { log } from "../log/logger.ts";
@@ -23,6 +23,7 @@ function logBatch(sessionId: string, result: IngestResult): void {
     streams: [...streams].join(","),
     accepted: result.accepted.length,
     duplicates: result.duplicates,
+    ...(result.rejectedStreams.length > 0 ? { rejected: result.rejectedStreams.join(",") } : {}),
   });
   if (!log.enabled("debug")) {
     return;
@@ -68,21 +69,33 @@ export function frameRoutes(deps: AppDeps) {
       try {
         result = await store.ingest(session, parsed.frames);
       } catch (err) {
-        if (err instanceof TooManyStreamsError) {
-          // 422 rather than 4xx-generic so the client knows the batch itself was well formed.
-          return errorResponse(c, 422, err.message, { stream: err.stream, limit: err.limit });
-        }
         if (err instanceof TooManyFramesError) {
           // 410: the session is full and will accept nothing more, so the client stops.
           return errorResponse(c, 410, err.message, { limit: err.limit });
         }
         throw err;
       }
+      const { rejectedStreams } = result;
+      if (rejectedStreams.length > 0 && result.accepted.length === 0 && result.duplicates === 0) {
+        // Every frame belongs to a stream the session has no room for (an `afk run`'s
+        // first batch, whose stream is new): 422 rather than 4xx-generic so the client
+        // knows the batch was well formed, and nothing of it was kept. A batch that also
+        // carried known streams is a 200 below, with the rejected ones named.
+        const stream = rejectedStreams[0]!;
+        const limit = deps.config.limits.maxStreamsPerSession;
+        return errorResponse(
+          c,
+          422,
+          `stream "${stream}" would exceed the limit of ${limit} streams per session`,
+          { stream, limit },
+        );
+      }
       logBatch(session.sessionId, result);
       const body: IngestResponse = {
         accepted: result.accepted.length,
         duplicates: result.duplicates,
         latestSequence: Object.fromEntries(session.latestSequence),
+        ...(rejectedStreams.length > 0 ? { rejectedStreams } : {}),
       };
       return c.json(body);
     },
