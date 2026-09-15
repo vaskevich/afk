@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen } from "@testing-library/react";
 import { makeEvent } from "@afk/shared/testing";
 import { renderOnSessionRoute } from "../test-helpers.tsx";
@@ -88,7 +88,19 @@ describe("StatusBanner for a deleted session", () => {
  */
 describe("StatusBanner while contact with the server is lost", () => {
   /** Real clock: the banner only reads the time, so 42 s ago stays 42 s ago through a render. */
-  const LOST_AT = Date.now() - 42_000;
+  // A fixed clock: the age is rendered from Date.now(), and a real clock ticking
+  // between this line and the render turned "42s ago" into "43s ago" under load.
+  const NOW = new Date("2026-09-15T00:00:00Z").getTime();
+  const LOST_AT = NOW - 42_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("says there is no fresh data, naming the server and how long ago, in place of the verdict", async () => {
     const open = makeEvent({ kind: "client.stale", severity: "warning", endedAt: null });
