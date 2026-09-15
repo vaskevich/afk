@@ -24,6 +24,13 @@ export const MIN_PROTOCOL_VERSION = 1;
  */
 export const MIN_CLIENT_VERSION = "0.1.0";
 
+/**
+ * The header every client request carries, `<name>/<semver>` (e.g. `bash/0.1.0`). Lives
+ * here rather than next to the middleware that parses it because both that middleware
+ * and the server's error logging name it, and the logging sits below the middleware.
+ */
+export const CLIENT_HEADER = "X-Afk-Client";
+
 /** Server-owned session policy. Returned on session create so clients never hardcode it. */
 export const DEFAULT_MAX_SESSION_DURATION_SECONDS = 60 * 60;
 
