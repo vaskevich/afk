@@ -88,10 +88,21 @@ async function startServer(intercept: Intercept = () => undefined): Promise<Test
   };
 }
 
-/** Runs the documented one-liner with the install directory and HOME pointed at `dir`. */
-async function runInstaller(url: string, dir: string): Promise<{ stdout: string; stderr: string }> {
+interface InstallerOptions {
+  /** AFK_INSTALL_DIR; the HOME directory itself when omitted. */
+  installDir?: string;
+  /** The caller's PATH; the test process's own (which has no temp directory on it) when omitted. */
+  path?: string;
+}
+
+/** Runs the documented one-liner with HOME pointed at `home` and the install directory at `installDir`. */
+async function runInstaller(
+  url: string,
+  home: string,
+  { installDir = home, path = process.env.PATH }: InstallerOptions = {},
+): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync("/bin/sh", ["-c", `curl -fsSL "${url}/install" | sh`], {
-    env: { ...process.env, AFK_INSTALL_DIR: dir, HOME: dir },
+    env: { ...process.env, AFK_INSTALL_DIR: installDir, HOME: home, PATH: path },
   });
 }
 
@@ -136,12 +147,32 @@ describe.skipIf(process.platform !== "darwin")("curl <origin>/install | sh", () 
     );
   });
 
-  it("prints the PATH line for a directory that is not on PATH, and the next commands", async () => {
-    const { stdout } = await runInstaller(server.url, installDir);
+  // Regression: the closing "Next: afk start" assumed `afk` resolved, right after the
+  // installer had said the directory was not on PATH (it is not, on a stock Mac).
+  it("spells the next commands with the full path, and the one-shot PATH line, when the directory is not on PATH", async () => {
+    const { stdout } = await runInstaller(server.url, installDir, {
+      installDir: join(installDir, ".local/bin"),
+      path: "/usr/bin:/bin",
+    });
 
-    expect(stdout).toContain(`export PATH="${installDir}:$PATH"`);
-    expect(stdout).toContain("afk start");
-    expect(stdout).toContain("afk run -- <command>");
+    expect(stdout).toContain("~/.local/bin is not on your PATH.");
+    expect(stdout).toContain('  export PATH="$HOME/.local/bin:$PATH"\n');
+    expect(stdout).toContain("  fish_add_path ~/.local/bin\n");
+    expect(stdout).toContain("\n  ~/.local/bin/afk start ");
+    expect(stdout).toContain("\n  ~/.local/bin/afk run -- <command> ");
+    expect(stdout).toContain('\n  export PATH="$HOME/.local/bin:$PATH"; afk start\n');
+    expect(stdout).not.toContain("\n  afk start");
+  });
+
+  it("keeps the short next commands, with no PATH hint, when the directory is on PATH", async () => {
+    const { stdout } = await runInstaller(server.url, installDir, {
+      path: `${installDir}:/usr/bin:/bin`,
+    });
+
+    expect(stdout).toContain("\n  afk start ");
+    expect(stdout).toContain("\n  afk run -- <command> ");
+    expect(stdout).not.toContain("not on your PATH");
+    expect(stdout).not.toContain("export PATH=");
   });
 
   it("refuses a download that does not match the served checksum and installs nothing", async () => {

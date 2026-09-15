@@ -7,12 +7,15 @@ from and get a shareable dashboard URL that shows whether everything is still fi
 
 ```bash
 curl -fsSL https://afk.osv.im/install | sh
-afk start                    # prints a dashboard URL for your phone
-afk run -- <command>         # wraps one command and reports how it went
+export PATH="$HOME/.local/bin:$PATH"   # this terminal only; the installer says how to make it stick
+afk start                              # prints a dashboard URL for your phone
+afk run -- <command>                   # wraps one command and reports how it went
 ```
 
 macOS only for now. The installer puts one bash script in `~/.local/bin/afk`
-(`AFK_INSTALL_DIR` overrides) and tells you if that directory is not on your `PATH`.
+(`AFK_INSTALL_DIR` overrides). That directory is not on a stock Mac's `PATH`, so the
+installer ends with the line to add to `~/.zshrc` or `~/.bash_profile` (in fish,
+`fish_add_path ~/.local/bin`) and, until then, the full path to run.
 Read it first if you like: it is short, and so is [the client](cli/afk). A self-hosted
 server serves the same installer at its own `/install`, and a client installed from it
 defaults to that server; set `AFK_SERVER` to point an existing client elsewhere.

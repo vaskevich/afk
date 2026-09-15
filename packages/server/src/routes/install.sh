@@ -71,18 +71,37 @@ mv "$tmpdir/afk.installed" "$AFK_BIN"
 
 echo "installed $("$AFK_BIN" version) to $AFK_BIN (server $AFK_ORIGIN)"
 
-# Say how to get the directory on PATH when it is not, for the two shells macOS ships.
-case ":$PATH:" in
-  *":$AFK_INSTALL_DIR:"*) ;;
-  *)
-    echo
-    echo "$AFK_INSTALL_DIR is not on your PATH. Add this line to ~/.zshrc (zsh, the macOS"
-    echo "default) or ~/.bash_profile (bash), then open a new terminal:"
-    echo "  export PATH=\"$AFK_INSTALL_DIR:\$PATH\""
-    ;;
+# The directory as a user would type it: `~/.local/bin` in a command line, `$HOME/...`
+# inside a PATH assignment (where `~` does not expand). Both stay absolute outside $HOME.
+case "$AFK_INSTALL_DIR" in
+  "$HOME") dir_tilde='~'; dir_home="\$HOME" ;;
+  "$HOME"/*) dir_tilde="~${AFK_INSTALL_DIR#"$HOME"}"; dir_home="\$HOME${AFK_INSTALL_DIR#"$HOME"}" ;;
+  *) dir_tilde="$AFK_INSTALL_DIR"; dir_home="$AFK_INSTALL_DIR" ;;
 esac
 
-echo
-echo "Next:"
-echo "  afk start               watch this machine from your phone"
-echo "  afk run -- <command>    run a command and see whether it finished"
+# When the directory is not on PATH, `afk` does not resolve in the caller's shell, so
+# the next steps are spelled with the full path, plus the one line that makes the
+# short form work in this terminal (zsh and bash, the two shells macOS ships; fish's
+# fish_add_path is both the one-shot and the permanent form).
+case ":$PATH:" in
+  *":$AFK_INSTALL_DIR:"*)
+    echo
+    echo "Next:"
+    echo "  afk start               watch this machine from your phone"
+    echo "  afk run -- <command>    run a command and see whether it finished"
+    ;;
+  *)
+    echo
+    echo "$dir_tilde is not on your PATH. Add this line to ~/.zshrc (zsh, the macOS"
+    echo "default) or ~/.bash_profile (bash), then open a new terminal:"
+    echo "  export PATH=\"$dir_home:\$PATH\""
+    echo "In fish, run this once instead:"
+    echo "  fish_add_path $dir_tilde"
+    echo
+    echo "Next:"
+    echo "  $dir_tilde/afk start               watch this machine from your phone"
+    echo "  $dir_tilde/afk run -- <command>    run a command and see whether it finished"
+    echo "or, in this terminal only (zsh or bash):"
+    echo "  export PATH=\"$dir_home:\$PATH\"; afk start"
+    ;;
+esac
