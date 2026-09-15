@@ -36,7 +36,7 @@ remembers it and the `404`'s message is `session deleted` with `details`
 `unknown session`.
 
 Every client request (create, ingest, end, qr) carries `X-Afk-Client: <name>/<semver>`,
-`bash/0.4.0` today. The server refuses clients below its minimum version, and requests
+`bash/0.5.0` today. The server refuses clients below its minimum version, and requests
 on those four endpoints with a missing or malformed header, with `426 Upgrade
 Required`; the body is an `ErrorResponse` whose `details` is `UpgradeRequiredDetails`
 (`minimumClientVersion`, `minimumProtocolVersion`, `yourVersion`). Read endpoints are
@@ -73,7 +73,7 @@ rather than hardcoding it:
   "ingestToken": "…",
   "dashboardUrl": "https://afk.osv.im/s/D3FzMqK8qOLVva9LoHF9uc",
   "maxDurationSeconds": 3600,
-  "latestClientVersion": "0.4.0"
+  "latestClientVersion": "0.5.0"
 }
 ```
 
@@ -120,7 +120,7 @@ the same proof of ownership every other write to a session needs:
 POST /api/sessions
 Authorization: Bearer <previous session's ingestToken>
 
-{ "protocolVersion": 1, "clientVersion": "0.4.0", "host": { … },
+{ "protocolVersion": 1, "clientVersion": "0.5.0", "host": { … },
   "previousSessionId": "D3FzMqK8qOLVva9LoHF9uc" }
 ```
 
@@ -786,7 +786,7 @@ the same body under the API prefix the dashboard's dev proxy forwards.
 {
   "server": { "version": "0.1.0", "commit": "abc1234", "builtAt": "2026-09-15T10:00:00Z" },
   "web": { "version": "0.1.0", "commit": "abc1234" },
-  "client": { "version": "0.4.0" },
+  "client": { "version": "0.5.0" },
   "protocolVersion": 1
 }
 ```

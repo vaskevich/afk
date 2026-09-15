@@ -156,7 +156,7 @@ export LC_ALL=C
 
 # Client version (semver, bumped on every release) and the protocol version it speaks
 # (bumped only for an incompatible wire change). See docs/VERSIONING.md.
-AFK_VERSION="0.4.0"
+AFK_VERSION="0.5.0"
 AFK_PROTOCOL_VERSION=1
 # The installer (`curl -fsSL <origin>/install | sh`) rewrites the next line so a copy
 # installed from a self-hosted server defaults to that server; the marker comment is
