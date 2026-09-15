@@ -41,6 +41,15 @@ so the numbers below are the numbers the code uses.
 | `AFK_S3_SLAB_FLUSH_SECONDS` | `60`                   | How long accepted frames may sit in memory before they are written to the bucket as one slab object. | Only read when `AFK_STORAGE=s3`. Also the durability window: a hard crash (not a graceful shutdown, which flushes) loses up to this much of each live session. Lower it to shrink the window at the cost of more objects per hour (a cold load of a live session fetches them all); see "Storage" in [ARCHITECTURE.md](ARCHITECTURE.md). |
 | `AFK_S3_SLAB_MAX_FRAMES`    | `100`                  | How many buffered frames force a slab write before the interval is up.                               | Only read when `AFK_STORAGE=s3`. At the client's ~1 frame a second the interval fires first; this bounds the slab for a client that sends more.                                                                                                                                                                                          |
 
+One data directory or bucket is written by one server at a time. The exception is a
+rollout, where two containers hold the same live sessions for a few seconds: that is
+safe — slab keys carry a per-process writer id, indexes come from the data, and a late
+slab is merged rather than overwritten (see the 2026-09-15 entry in
+[ARCHITECTURE.md](ARCHITECTURE.md)'s decision log) — but it is an overlap, not a way to
+run two servers side by side. Keep `scale = 1` on the container service
+(`infra/main.tf`); a second steady-state writer would hand out duplicate indexes for
+as long as it ran.
+
 ## Sessions and limits
 
 | Variable                              | Default   | Meaning                                                                                                                                                 | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |

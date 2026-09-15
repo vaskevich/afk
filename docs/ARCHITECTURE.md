@@ -137,7 +137,13 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   sequence bookkeeping, SSE listeners. It writes through to `store/storage.ts`, the
   `SessionStorage` interface, and lazily loads sessions it does not have in memory.
   Frames are persisted **before** in-memory state advances, so a failed write is
-  retried by the client rather than being counted as a duplicate.
+  retried by the client rather than being counted as a duplicate. The session-wide
+  index an accepted frame gets is one past the highest index the session holds
+  (`Session.nextIndex`, set on load from the frames themselves), never a count of its
+  frames, and `framesAfter` finds a viewer's resume point by binary search over those
+  indexes rather than by array position — so a stored line that would not parse, or a
+  frame merged in from another writer, cannot shift later frames onto indexes that are
+  already taken.
 - `store/disk-storage.ts` is the local implementation; `store/s3-storage.ts` is the
   S3-compatible one used against Lightsail object storage in production.
   `store/create-storage.ts` builds whichever `AFK_STORAGE=disk|s3` asks for.
@@ -471,7 +477,7 @@ sessions active at the moment (see the decision log).
 The bucket layout (`store/s3-storage.ts`) reaches the same shape in two steps, since
 object stores cannot append. While a session is live, `appendFrames` buffers accepted
 frames in memory and writes them as one **slab** object,
-`sessions/<id>/frames/<first index, zero padded>.ndjson`, every
+`sessions/<id>/frames/<first index, zero padded>-<writerId>.ndjson`, every
 `AFK_S3_SLAB_FLUSH_SECONDS` (60) or `AFK_S3_SLAB_MAX_FRAMES` (100), whichever comes
 first (`flushed slab session= frames= trigger= ms=` at info); a graceful shutdown, a
 read of the session from the same process, and the session's end also flush it. A slab
@@ -479,7 +485,10 @@ that fails to write is kept and retried, and the failure surfaces on the session
 next `appendFrames` so the client spools and retries rather than the buffer growing.
 When the session ends (`SessionStore.end`, in the background after the end is
 recorded) or the sweeper finds it over, `compactSession` writes every frame as the one
-`sessions/<id>/frames.ndjson` object and deletes the slabs
+`sessions/<id>/frames.ndjson` object and deletes the slabs. What it writes is the
+union of what the bucket holds and the frames the caller passed, never the caller's
+memory alone: the slabs are about to be deleted, so a slab only they hold — the last
+one of another writer — has to be read before they go
 (`compacted session= frames= objects= ms=` at info, a warning on failure). `readFrames`
 prefers the compacted object and falls back to listing the `frames/` parts and fetching
 them `READ_CONCURRENCY` (16) at a time, so a session in either layout, one written
@@ -487,6 +496,22 @@ before slabs existed (one object per ingested batch, same key scheme), or one ca
 between the two steps of a compaction all read the same. A cold load is therefore one
 GET for an ended session and at most a minute's worth of objects per hour for a live
 one (see the 2026-09-14 entries in the decision log).
+
+`writerId` is a short random id the storage instance takes at startup, so two server
+processes that hold the same session at once — the seconds of a deploy when Lightsail
+runs both containers — write their slabs under different keys instead of one
+`PutObject` silently replacing the other's frames. The parts a read finds are put back
+into one order by `orderFrames` (`store/frame-order.ts`): index first, arrival
+(`receivedAt`) second, one frame per (stream, sequence) keeping the copy that reached
+the server first. Slabs written before the suffix existed (`<first index>.ndjson`) read
+exactly the same way, since the order comes from the frames, not from the key.
+
+A slab can also land _after_ the session was read: during a deploy the new container
+loads the session before the old one's SIGTERM flush. So the first `ingest` after a
+load reads storage once more (`Session.mergeStorageBeforeIngest`) and merges anything
+new into the session — inside the write queue, before the batch is admitted, so the
+indexes it hands out are past everything that exists. One extra read per session per
+process, and only for a session that is still receiving frames.
 
 The slab interval is a durability window: a hard crash of the container (not a deploy
 or a restart, which flush on SIGTERM) loses up to that much of each live session, and
@@ -531,6 +556,44 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** Two servers may hold one session; the bucket layout and the index
+  arithmetic now say so. Measured against `afk.osv.im`: one client session spanning
+  three container swaps sent 1,472 frames and 106 of them are not in the bucket — 15,
+  32 and 28 consecutive `system` sequences around each swap (16 to 33 seconds of data
+  each), with matching losses on `agents` and `processes` — while the client had been
+  answered 2xx for every one, had deleted them from its spool, and logged no rejection
+  or retry. The stored indexes came out 1..1366, contiguous, no duplicates: the loss
+  was invisible in everything except the per-stream `sequence` gaps. Cause, in three
+  parts that compounded: Lightsail runs both containers for a few seconds, so the new
+  one loaded the session from the bucket before the old one's SIGTERM flush landed;
+  `SessionStore.admit` took the next index from `frames.length + 1` over that short
+  load and reissued a range the old container was still using; and the slab key was
+  `frames/<first index>.ndjson`, so the second `PutObject` of that range replaced the
+  first one's object outright. `SessionStore.end` then compacted from the surviving
+  process's memory, deleting any late slab that had landed. The fix is four changes,
+  none of which needs a lock or a leader: slab keys carry a per-process `writerId`
+  (`frames/<first index>-<writerId>.ndjson`) so two writers never share a key; the
+  next index is `max(index) + 1` over what the session holds (`Session.nextIndex`, set
+  on load from the frames, not their count) and `framesAfter` resumes by binary search
+  over indexes rather than by array position, so a skipped or merged frame cannot
+  shift later ones; the first ingest after a load re-reads the prefix once and merges
+  in whatever appeared since (the old container's final flush); and `compactSession`
+  compacts the union of the bucket and the caller's memory instead of trusting memory
+  alone. Reads settle the rest: `orderFrames` sorts by index then arrival and keeps
+  one frame per (stream, sequence), so overlapping slabs read as their union and a
+  frame stored twice appears once. Reproduced locally the way the incident was
+  measured — a fake bucket, two real servers whose lifetimes overlap, a switchable
+  proxy swinging a real `cli/afk` from one to the other, and the old server's flush
+  landing after the new one's load: 10 lost sequences (8 of them consecutive `system`
+  frames) before the fix, 0 after, with every frame the client sent present in the
+  compacted object. What the fix accepts: during the overlap the two writers can give
+  the same index to different frames (11 such indexes in the local run), since an
+  index is handed to the client's dashboard the moment a frame is accepted and cannot
+  be renumbered afterwards. Nothing is lost — both frames are stored, read back, and
+  ordered — but an SSE reconnect with `Last-Event-ID` inside that window can miss the
+  twin of a frame it already has. `AFK_S3_SLAB_FLUSH_SECONDS=10` in `infra/deploy.sh`
+  stays as it is: it shortens the overlap, which is now a correctness-neutral
+  narrowing rather than the mitigation it was.
 - **2026-09-15** The ingest token is stored as its sha256, not in clear. `session.json`
   in the bucket and on disk used to hold the write credential itself, so anyone who
   could read the store (the bucket key, which lives in the deployment spec, GitHub

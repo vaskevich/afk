@@ -8,7 +8,9 @@ import {
 import { StoredFrame } from "@afk/shared";
 import { log } from "../log/logger.ts";
 import { mapWithConcurrency } from "../utils/concurrency.ts";
+import { randomId } from "../utils/ids.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
+import { mergeFrames, orderFrames } from "./frame-order.ts";
 import {
   parseSessionRecord,
   parseStoredFrameLine,
@@ -21,8 +23,14 @@ const SESSION_KEY = "session.json";
 const COMPACTED_FRAMES_KEY = "frames.ndjson";
 /** Where the slabs (and the one-object-per-batch parts of older sessions) live. */
 const FRAME_PARTS_PREFIX = "frames/";
-/** Slab keys are the index of their first frame, zero padded to this many digits. */
+/** Slab keys start with the index of their first frame, zero padded to this many digits. */
 const FRAME_INDEX_WIDTH = 10;
+/**
+ * Characters of the per-process id that follows the index in a slab key. Six base62
+ * characters is ~36 bits: two containers of one deploy will not collide, and the key
+ * stays short enough to read in a listing.
+ */
+export const WRITER_ID_LENGTH = 6;
 const NDJSON_CONTENT_TYPE = "application/x-ndjson";
 
 /** Session ids are server-generated base62, but never trust a path segment blindly. */
@@ -87,6 +95,11 @@ export interface S3StorageOptions {
   /** Overrides for tests; production runs on the defaults above. */
   requestTimeoutMs?: number;
   connectionTimeoutMs?: number;
+  /**
+   * This process's slab-key suffix. Random per instance; a test that wants two
+   * writers whose keys it can recognise passes its own.
+   */
+  writerId?: string;
 }
 
 /** What caused a slab write, for the log line. */
@@ -111,11 +124,18 @@ interface CompactionResult {
  * S3-compatible storage (Lightsail object storage, real S3, MinIO). Layout under the
  * bucket:
  *   sessions/<sessionId>/session.json           SessionRecord
- *   sessions/<sessionId>/frames/<index>.ndjson  a slab: StoredFrame lines in index
+ *   sessions/<sessionId>/frames/<index>-<writerId>.ndjson
+ *                                               a slab: StoredFrame lines in index
  *                                                order, named after the index of the
  *                                                first frame, zero padded to 10 digits
  *                                                so lexicographic (S3's own) key order
- *                                                is index order
+ *                                                is index order, plus the id of the
+ *                                                process that wrote it so two servers
+ *                                                writing the same session (the seconds
+ *                                                of a deploy when both containers run)
+ *                                                cannot overwrite each other. Slabs
+ *                                                written before the suffix existed are
+ *                                                `<index>.ndjson` and read the same.
  *   sessions/<sessionId>/frames.ndjson          every frame of the session as one
  *                                                object, once it has been compacted
  *
@@ -132,6 +152,9 @@ interface CompactionResult {
  * back to listing and fetching the parts, so a session in either layout, or caught
  * between the two steps of a compaction, reads the same. Sessions written before slabs
  * existed (one object per ingested batch) use the same key scheme and read as parts.
+ * Parts are put back into one order by `orderFrames` (index, then arrival, one frame
+ * per stream and sequence), so slabs from two writers with overlapping indexes read as
+ * the union of what they hold rather than as whichever landed last.
  */
 export class S3SessionStorage implements SessionStorage {
   private readonly client: S3Client;
@@ -139,6 +162,12 @@ export class S3SessionStorage implements SessionStorage {
   private readonly slabFlushIntervalMs: number;
   private readonly slabMaxFrames: number;
   private readonly buffers = new Map<string, SlabBuffer>();
+  /**
+   * This process's slab-key suffix, fixed for the life of the instance. Two servers
+   * that write the same session at once (a deploy's overlap) name their slabs
+   * differently, so neither `PutObject` can overwrite the other's frames.
+   */
+  private readonly writerId: string;
   /**
    * One queue per session with a buffer or a compaction, so at most one slab write is
    * in flight per session and a compaction never overlaps a write of the same session.
@@ -149,6 +178,7 @@ export class S3SessionStorage implements SessionStorage {
     this.bucket = options.bucket;
     this.slabFlushIntervalMs = options.slabFlushIntervalMs ?? DEFAULT_SLAB_FLUSH_INTERVAL_MS;
     this.slabMaxFrames = options.slabMaxFrames ?? DEFAULT_SLAB_MAX_FRAMES;
+    this.writerId = options.writerId ?? randomId(WRITER_ID_LENGTH);
     this.client = new S3Client({
       region: options.region,
       endpoint: options.endpoint,
@@ -187,9 +217,15 @@ export class S3SessionStorage implements SessionStorage {
     return `${this.prefix(sessionId)}${COMPACTED_FRAMES_KEY}`;
   }
 
+  /**
+   * Where this process writes the slab starting at `firstIndex`. The index comes
+   * first so lexicographic key order is index order; the writer id makes the key this
+   * process's own, so a second server writing the same session at the same index range
+   * (the overlap of a deploy) writes beside it rather than over it.
+   */
   private slabKey(sessionId: string, firstIndex: number): string {
     const name = String(firstIndex).padStart(FRAME_INDEX_WIDTH, "0");
-    return `${this.partsPrefix(sessionId)}${name}.ndjson`;
+    return `${this.partsPrefix(sessionId)}${name}-${this.writerId}.ndjson`;
   }
 
   async putSession(record: SessionRecord) {
@@ -271,9 +307,11 @@ export class S3SessionStorage implements SessionStorage {
 
   /**
    * Writes the session's frames as `frames.ndjson`, then deletes its parts. Whatever
-   * is still buffered is written first. Without `frames` (the sweeper's path) they are
-   * read back from the bucket, which prefers a compacted object a previous attempt
-   * left behind. Serialized with the session's slab writes so nothing is in flight
+   * is still buffered is written first. What it writes is the union of everything in
+   * the bucket and the `frames` the caller holds (the store passes the session's own
+   * at end; the sweeper passes none): the parts are about to be deleted, so anything
+   * only they hold — another writer's slab this process never saw — has to be read
+   * before they go. Serialized with the session's slab writes so nothing is in flight
    * while the parts are listed.
    */
   async compactSession(sessionId: string, frames?: readonly StoredFrame[]) {
@@ -434,7 +472,22 @@ export class S3SessionStorage implements SessionStorage {
     if (parts.length === 0) {
       return null; // already compacted, or nothing was ever written
     }
-    const all = frames ?? (await this.readStoredFrames(sessionId));
+    // The union of everything the bucket holds and whatever the caller has in memory.
+    // Compacting from memory alone deleted the parts of any other writer of the
+    // session (the container a deploy was replacing), and with them frames the client
+    // had been told were accepted; a compacted object an earlier failed attempt left
+    // behind counts too, since the parts beside it may be newer than it is.
+    const [storedParts, compacted] = await Promise.all([
+      this.readParts(sessionId, parts),
+      this.getObjectTextIfPresent(this.compactedKey(sessionId)),
+    ]);
+    // The caller's own copies first, so a frame both sides hold is written exactly as
+    // this server holds it rather than as it came back through the parser.
+    const all = mergeFrames(
+      frames ?? [],
+      storedParts,
+      compacted === null ? [] : parseFrames(sessionId, [compacted]),
+    );
     await this.putFrames(this.compactedKey(sessionId), all);
     await this.deleteKeys(parts);
     return { frames: all.length, objects: parts.length };
@@ -446,19 +499,26 @@ export class S3SessionStorage implements SessionStorage {
     if (compacted !== null) {
       return parseFrames(sessionId, [compacted]);
     }
-    const keys = await this.listAllKeys(this.partsPrefix(sessionId));
-    keys.sort(); // zero-padded, so lexicographic order is index order
+    return this.readParts(sessionId, await this.listAllKeys(this.partsPrefix(sessionId)));
+  }
+
+  /** The frames of the given part objects, in one order. */
+  private async readParts(sessionId: string, keys: readonly string[]): Promise<StoredFrame[]> {
+    const sorted = [...keys].sort(); // zero-padded, so lexicographic order is index order
 
     // Fetch in parallel, parse in key order: the objects are small and there can be
     // thousands, so the round trips are the cost, and the result must be in index order.
-    const texts = await mapWithConcurrency(keys, READ_CONCURRENCY, (key) =>
+    const texts = await mapWithConcurrency(sorted, READ_CONCURRENCY, (key) =>
       this.getObjectTextIfPresent(key),
     );
     // A null is an object deleted between list and get; treat it like a gap, not an error.
-    return parseFrames(
+    const frames = parseFrames(
       sessionId,
       texts.filter((text): text is string => text !== null),
     );
+    // Key order is only index order within one writer: two writers' slabs can overlap,
+    // and the same frame can be in both. `orderFrames` settles both.
+    return orderFrames(frames);
   }
 
   private async putFrames(key: string, frames: readonly StoredFrame[]): Promise<void> {

@@ -27,6 +27,19 @@ const SESSION_ID = "session1";
 const PARTS_PREFIX = `sessions/${SESSION_ID}/frames/`;
 const COMPACTED_KEY = `sessions/${SESSION_ID}/frames.ndjson`;
 
+/** The writer id `makeStorage` gives a storage unless the test asks for another. */
+const WRITER_ID = "wrtrAA";
+
+/** Where the writer's slab starting at `index` lands. */
+function slabKey(index: number, sessionId = SESSION_ID, writerId = WRITER_ID): string {
+  return `sessions/${sessionId}/frames/${String(index).padStart(10, "0")}-${writerId}.ndjson`;
+}
+
+/** A slab key from before keys carried a writer id, which must still read. */
+function legacySlabKey(index: number, sessionId = SESSION_ID): string {
+  return `sessions/${sessionId}/frames/${String(index).padStart(10, "0")}.ndjson`;
+}
+
 function commandName(command: unknown): string {
   return (command as { constructor: { name: string } }).constructor.name;
 }
@@ -123,10 +136,15 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
-/** Storage over the fake bucket; slab bounds default to the production values. */
+/**
+ * Storage over the fake bucket; slab bounds default to the production values and the
+ * writer id to `WRITER_ID`, so slab keys are predictable. A second storage over the
+ * same objects (another server writing the same session) passes its own `writerId`.
+ */
 function makeStorage(
   objects: Map<string, string>,
-  options: FakeS3Options & Pick<S3StorageOptions, "slabMaxFrames" | "slabFlushIntervalMs"> = {},
+  options: FakeS3Options &
+    Pick<S3StorageOptions, "slabMaxFrames" | "slabFlushIntervalMs" | "writerId"> = {},
 ): S3SessionStorage {
   installFakeS3(objects, options);
   return new S3SessionStorage({
@@ -136,6 +154,7 @@ function makeStorage(
     secretAccessKey: "secret",
     slabMaxFrames: options.slabMaxFrames,
     slabFlushIntervalMs: options.slabFlushIntervalMs,
+    writerId: options.writerId ?? WRITER_ID,
   });
 }
 
@@ -219,9 +238,7 @@ describe("S3SessionStorage", () => {
       expect(objects.size).toBe(0);
       await storage.appendFrames(SESSION_ID, stored.slice(2));
 
-      expect([...objects.entries()]).toEqual([
-        [`${PARTS_PREFIX}0000000005.ndjson`, ndjson(stored)],
-      ]);
+      expect([...objects.entries()]).toEqual([[slabKey(5), ndjson(stored)]]);
     });
 
     it("writes a slab when the flush interval passes with fewer frames than the maximum", async () => {
@@ -236,9 +253,7 @@ describe("S3SessionStorage", () => {
       expect(objects.size).toBe(0);
       await vi.advanceTimersByTimeAsync(1);
 
-      expect([...objects.entries()]).toEqual([
-        [`${PARTS_PREFIX}0000000001.ndjson`, ndjson(stored)],
-      ]);
+      expect([...objects.entries()]).toEqual([[slabKey(1), ndjson(stored)]]);
     });
 
     it("writes a slab per session as each session's own interval passes", async () => {
@@ -250,13 +265,10 @@ describe("S3SessionStorage", () => {
       await vi.advanceTimersByTimeAsync(500);
       await storage.appendFrames("sessionB", frames(1));
       await vi.advanceTimersByTimeAsync(500);
-      expect([...objects.keys()]).toEqual(["sessions/sessionA/frames/0000000001.ndjson"]);
+      expect([...objects.keys()]).toEqual([slabKey(1, "sessionA")]);
       await vi.advanceTimersByTimeAsync(500);
 
-      expect([...objects.keys()].sort()).toEqual([
-        "sessions/sessionA/frames/0000000001.ndjson",
-        "sessions/sessionB/frames/0000000001.ndjson",
-      ]);
+      expect([...objects.keys()].sort()).toEqual([slabKey(1, "sessionA"), slabKey(1, "sessionB")]);
     });
 
     it("uses the production bounds when none are given", () => {
@@ -273,11 +285,8 @@ describe("S3SessionStorage", () => {
 
       await storage.flush();
 
-      expect([...objects.keys()].sort()).toEqual([
-        "sessions/sessionA/frames/0000000001.ndjson",
-        "sessions/sessionB/frames/0000000001.ndjson",
-      ]);
-      expect(objects.get("sessions/sessionA/frames/0000000001.ndjson")).toBe(ndjson(frames(2)));
+      expect([...objects.keys()].sort()).toEqual([slabKey(1, "sessionA"), slabKey(1, "sessionB")]);
+      expect(objects.get(slabKey(1, "sessionA"))).toBe(ndjson(frames(2)));
     });
 
     it("flush tries every session and then rejects if any of them failed", async () => {
@@ -303,7 +312,7 @@ describe("S3SessionStorage", () => {
       await storage.appendFrames(SESSION_ID, stored.slice(2));
 
       await expect(storage.readFrames(SESSION_ID)).resolves.toEqual(stored);
-      expect(objects.get(`${PARTS_PREFIX}0000000001.ndjson`)).toBe(ndjson(stored));
+      expect(objects.get(slabKey(1))).toBe(ndjson(stored));
     });
 
     it("keeps a slab that failed to write and retries it on the next append, which reports the failure", async () => {
@@ -324,7 +333,7 @@ describe("S3SessionStorage", () => {
       failing.clear();
       await storage.appendFrames(SESSION_ID, stored.slice(2));
 
-      expect(objects.get(`${PARTS_PREFIX}0000000001.ndjson`)).toBe(ndjson(stored.slice(0, 2)));
+      expect(objects.get(slabKey(1))).toBe(ndjson(stored.slice(0, 2)));
       await expect(storage.readFrames(SESSION_ID)).resolves.toEqual(stored);
     });
 
@@ -341,7 +350,7 @@ describe("S3SessionStorage", () => {
       failing.clear();
       await vi.advanceTimersByTimeAsync(1_000);
 
-      expect(objects.get(`${PARTS_PREFIX}0000000001.ndjson`)).toBe(ndjson(frames(1)));
+      expect(objects.get(slabKey(1))).toBe(ndjson(frames(1)));
     });
 
     it("appends that arrive during a slab write go into the next slab", async () => {
@@ -368,8 +377,8 @@ describe("S3SessionStorage", () => {
       await first;
       await storage.flush();
 
-      expect(objects.get(`${PARTS_PREFIX}0000000001.ndjson`)).toBe(ndjson(stored.slice(0, 2)));
-      expect(objects.get(`${PARTS_PREFIX}0000000003.ndjson`)).toBe(ndjson(stored.slice(2)));
+      expect(objects.get(slabKey(1))).toBe(ndjson(stored.slice(0, 2)));
+      expect(objects.get(slabKey(3))).toBe(ndjson(stored.slice(2)));
     });
 
     it("drops a deleted session's buffer so no slab is written for it later", async () => {
@@ -415,7 +424,7 @@ describe("S3SessionStorage", () => {
       await storage.appendFrames(SESSION_ID, stored.slice(9));
 
       await expect(storage.readFrames(SESSION_ID)).resolves.toEqual(stored);
-      expect(partKeys(objects).at(-1)).toBe(`${PARTS_PREFIX}0000000010.ndjson`);
+      expect(partKeys(objects).at(-1)).toBe(slabKey(10));
     });
 
     it("fetches READ_CONCURRENCY parts at a time rather than one after another", async () => {
@@ -449,7 +458,7 @@ describe("S3SessionStorage", () => {
       const storage = makeStorage(objects, {
         slabMaxFrames: 1,
         beforeGet: async (key) => {
-          if (key.endsWith("/0000000001.ndjson")) {
+          if (key.includes("/0000000001-")) {
             await yieldToOthers();
             await yieldToOthers();
           }
@@ -468,7 +477,7 @@ describe("S3SessionStorage", () => {
       const storage = makeStorage(objects, {
         slabMaxFrames: 1,
         beforeGet: async (key) => {
-          if (key.endsWith("/0000000002.ndjson")) {
+          if (key.includes("/0000000002-")) {
             objects.delete(key);
           }
         },
@@ -487,7 +496,7 @@ describe("S3SessionStorage", () => {
       const stored = frames(3);
       objects.set(COMPACTED_KEY, ndjson(stored));
       // A stale part that disagrees, to prove which one is read.
-      objects.set(`${PARTS_PREFIX}0000000001.ndjson`, ndjson([stored[0]!]));
+      objects.set(slabKey(1), ndjson([stored[0]!]));
 
       await expect(storage.readFrames(SESSION_ID)).resolves.toEqual(stored);
     });
@@ -496,6 +505,60 @@ describe("S3SessionStorage", () => {
       const storage = makeStorage(new Map());
 
       await expect(storage.readFrames(SESSION_ID)).resolves.toEqual([]);
+    });
+
+    it("keeps both writers' frames when two processes write the same index range", async () => {
+      // The seconds of a deploy when both containers hold the session: each numbers
+      // its frames from the same index, so the keys would collide without the suffix.
+      const objects = new Map<string, string>();
+      const old = makeStorage(objects, { writerId: "oldAAA", slabMaxFrames: 2 });
+      const fresh = makeStorage(objects, { writerId: "newBBB", slabMaxFrames: 2 });
+      const oldFrames = frames(2).map((frame) => ({ ...frame, index: frame.index + 2 }));
+      const freshFrames = makeStoredFrames([
+        makeSystemFrame(10, { sequence: 3 }),
+        makeSystemFrame(11, { sequence: 4 }),
+      ]).map((frame) => ({ ...frame, index: frame.index + 2 }));
+
+      await fresh.appendFrames(SESSION_ID, freshFrames);
+      await old.appendFrames(SESSION_ID, oldFrames);
+
+      expect(partKeys(objects)).toEqual([
+        slabKey(3, SESSION_ID, "newBBB"),
+        slabKey(3, SESSION_ID, "oldAAA"),
+      ]);
+      // Every frame both wrote, in index order, the earlier arrival first where the
+      // two writers used the same index.
+      await expect(fresh.readFrames(SESSION_ID)).resolves.toEqual([
+        oldFrames[0],
+        freshFrames[0],
+        oldFrames[1],
+        freshFrames[1],
+      ]);
+    });
+
+    it("reads slabs written before keys carried a writer id alongside new ones", async () => {
+      const objects = new Map<string, string>();
+      const storage = makeStorage(objects, { slabMaxFrames: 2 });
+      const stored = frames(4);
+      objects.set(legacySlabKey(1), ndjson(stored.slice(0, 2)));
+
+      await storage.appendFrames(SESSION_ID, stored.slice(2));
+
+      expect(partKeys(objects)).toEqual([legacySlabKey(1), slabKey(3)]);
+      await expect(storage.readFrames(SESSION_ID)).resolves.toEqual(stored);
+    });
+
+    it("keeps one copy of a frame two writers both stored, the one received first", async () => {
+      const objects = new Map<string, string>();
+      const storage = makeStorage(objects);
+      const [first] = frames(1);
+      // The same (stream, sequence) as the other container saw it: a different index,
+      // a later arrival.
+      const again = { ...first!, index: 7, receivedAt: first!.receivedAt + 1_000 };
+      objects.set(legacySlabKey(1), ndjson([first!]));
+      objects.set(slabKey(7, SESSION_ID, "otherW"), ndjson([again]));
+
+      await expect(storage.readFrames(SESSION_ID)).resolves.toEqual([first]);
     });
   });
 
@@ -534,6 +597,33 @@ describe("S3SessionStorage", () => {
 
       expect([...objects.keys()]).toEqual([COMPACTED_KEY]);
       expect(parseNdjson(objects.get(COMPACTED_KEY))).toEqual(stored);
+    });
+
+    it("keeps a slab the caller's memory does not have, instead of deleting it with the parts", async () => {
+      // The other container of a deploy wrote these and went away; this process ends
+      // the session holding only what it saw itself.
+      const objects = new Map<string, string>();
+      const storage = makeStorage(objects);
+      const stored = frames(4);
+      objects.set(slabKey(3, SESSION_ID, "otherW"), ndjson(stored.slice(2)));
+
+      await expect(storage.compactSession(SESSION_ID, stored.slice(0, 2))).resolves.toBe(true);
+
+      expect(parseNdjson(objects.get(COMPACTED_KEY))).toEqual(stored);
+      expect(partKeys(objects)).toEqual([]);
+    });
+
+    it("keeps a part that arrived after an earlier attempt had written the compacted object", async () => {
+      const objects = new Map<string, string>();
+      const storage = makeStorage(objects);
+      const stored = frames(3);
+      objects.set(COMPACTED_KEY, ndjson(stored.slice(0, 2)));
+      objects.set(slabKey(3, SESSION_ID, "otherW"), ndjson(stored.slice(2)));
+
+      await expect(storage.compactSession(SESSION_ID)).resolves.toBe(true);
+
+      expect(parseNdjson(objects.get(COMPACTED_KEY))).toEqual(stored);
+      expect(partKeys(objects)).toEqual([]);
     });
 
     it("does nothing for a session that is already compact, or has no frames", async () => {

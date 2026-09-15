@@ -14,6 +14,7 @@ import { RuleEngine } from "../rules/engine.ts";
 import { randomId, randomToken } from "../utils/ids.ts";
 import { hashIngestToken } from "../utils/ingest-token.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
+import { mergeFrames } from "./frame-order.ts";
 import type { SessionRecord, SessionStorage } from "./storage.ts";
 
 export type { StoredFrame };
@@ -35,6 +36,14 @@ export interface Session extends SessionRecord {
   latestSequence: Map<string, number>;
   /** Every frame so far, in index order. */
   frames: StoredFrame[];
+  /**
+   * The session-wide index the next accepted frame gets: one past the highest index
+   * the session holds, never `frames.length + 1`. The two differ whenever the frames
+   * are not exactly 1..n — a line `parseStoredFrameLine` could not read, or another
+   * writer's frames merged in — and counting would then hand out an index that is
+   * already taken.
+   */
+  nextIndex: number;
   /** Bytes of `frames` as stored NDJSON (`storedFrameBytes`); what `maxBytesPerSession` bounds. */
   byteCount: number;
   /** Open SSE connections serving this session (`openSseConnection` / `closeSseConnection`). */
@@ -46,6 +55,13 @@ export interface Session extends SessionRecord {
   engine: RuleEngine;
   /** Last read or write, server clock; idle ended sessions are evicted from memory. */
   lastAccessAt: number;
+  /**
+   * Set on a session loaded from storage, cleared by the first `ingest` after that
+   * load, which re-reads storage first: the writer this process is taking over from
+   * (the container a deploy is replacing) may land its last slab after the load. A
+   * session created here has nothing to catch up on.
+   */
+  mergeStorageBeforeIngest: boolean;
 }
 
 /** Policy the store applies to every session. `index.ts` fills this from config.ts. */
@@ -157,6 +173,26 @@ export class TooManyBytesError extends Error {
  */
 export function storedFrameBytes(stored: StoredFrame): number {
   return Buffer.byteLength(JSON.stringify(stored)) + 1;
+}
+
+/**
+ * The position of the first frame whose index is past `index`, by binary search over
+ * frames held in index order (`frames.length` when there is none). Position and index
+ * are not the same number: indexes can have holes (a stored line that would not parse)
+ * or repeat (two writers numbering from the same point during a deploy).
+ */
+function firstIndexAfter(frames: readonly StoredFrame[], index: number): number {
+  let low = 0;
+  let high = frames.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (frames[middle]!.index > index) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return low;
 }
 
 /** Thrown by `create` when the session to chain from already has a successor. */
@@ -385,6 +421,9 @@ export class SessionStore {
     const frames = await this.storage.readFrames(sessionId);
     const storageMs = Math.round(performance.now() - started);
     const session = this.hydrate(record, frames);
+    // Another process may have been writing this session as it was read (a deploy's
+    // overlap); the first ingest checks storage once more before it numbers anything.
+    session.mergeStorageBeforeIngest = true;
     this.sessions.set(sessionId, session);
     log.info("session loaded from storage", {
       session: sessionId,
@@ -396,34 +435,79 @@ export class SessionStore {
   }
 
   private hydrate(record: SessionRecord, frames: StoredFrame[]): Session {
+    const session: Session = {
+      ...record,
+      latestSequence: new Map(),
+      frames: [],
+      nextIndex: 1,
+      byteCount: 0,
+      sseConnections: 0,
+      listeners: new Set(),
+      writeQueue: new SerialQueue(),
+      engine: new RuleEngine(),
+      lastAccessAt: Date.now(),
+      mergeStorageBeforeIngest: false,
+    };
+    this.adoptFrames(session, frames);
+    return session;
+  }
+
+  /**
+   * Makes `frames` the session's history: the per-stream sequence bookkeeping, the
+   * byte count, the next index, and a fresh rule engine replayed over them. Used when
+   * a session is hydrated and again when a late slab is merged in, so both go through
+   * one derivation. Replaying history through fresh rules is also what makes an
+   * improved rule apply to old sessions.
+   */
+  private adoptFrames(session: Session, frames: StoredFrame[]): void {
     const latestSequence = new Map<string, number>();
     let byteCount = 0;
+    let highestIndex = 0;
     for (const stored of frames) {
       const { frame } = stored;
       const latest = latestSequence.get(frame.stream) ?? 0;
       if (frame.sequence > latest) {
         latestSequence.set(frame.stream, frame.sequence);
       }
+      if (stored.index > highestIndex) {
+        highestIndex = stored.index;
+      }
       byteCount += storedFrameBytes(stored);
     }
-    // Replay history through fresh rules so improved rules apply to old sessions too.
     const engine = new RuleEngine();
     engine.onFrames(frames);
-    const session: Session = {
-      ...record,
-      latestSequence,
-      frames,
-      byteCount,
-      sseConnections: 0,
-      listeners: new Set(),
-      writeQueue: new SerialQueue(),
-      engine,
-      lastAccessAt: Date.now(),
-    };
+    session.frames = frames;
+    session.latestSequence = latestSequence;
+    session.byteCount = byteCount;
+    session.nextIndex = highestIndex + 1;
+    session.engine = engine;
     if (this.status(session) !== "active") {
       engine.closeAll(sessionEndMs(session));
     }
-    return session;
+  }
+
+  /**
+   * Re-reads the session from storage and merges in whatever appeared since it was
+   * loaded — the last slab of the process this one is taking the session over from,
+   * which a deploy's overlap lands after the load. Runs once per session per process,
+   * inside the write queue and before the batch that triggered it is admitted, so the
+   * indexes handed out are past everything that exists rather than on top of it.
+   * Nothing is emitted to live subscribers: the merged frames are older than anything
+   * a viewer following this process has, and a viewer's next load reads them in order.
+   */
+  private async mergeFramesFromStorage(session: Session): Promise<void> {
+    const stored = await this.storage.readFrames(session.sessionId);
+    const merged = mergeFrames(session.frames, stored);
+    const added = merged.length - session.frames.length;
+    if (added === 0) {
+      return;
+    }
+    this.adoptFrames(session, merged);
+    log.info("merged frames another process wrote", {
+      session: session.sessionId,
+      added,
+      frames: merged.length,
+    });
   }
 
   private record(session: Session): SessionRecord {
@@ -535,9 +619,17 @@ export class SessionStore {
     return { sessionId: session.sessionId, frames };
   }
 
-  /** Frames after the given session-wide index (0 = everything). */
+  /**
+   * Frames after the given session-wide index (0 = everything). Resolved by index, not
+   * by array position: the two agree only while the frames are exactly 1..n, and a
+   * dashboard resuming from `index` after a frame was skipped or merged in would
+   * otherwise be handed the wrong slice (silently missing or repeating frames).
+   */
   framesAfter(session: Session, index: number): StoredFrame[] {
-    return index <= 0 ? session.frames.slice() : session.frames.slice(index);
+    if (index <= 0) {
+      return session.frames.slice();
+    }
+    return session.frames.slice(firstIndexAfter(session.frames, index));
   }
 
   /** Subscribe to live changes. Returns an unsubscribe function. */
@@ -666,7 +758,15 @@ export class SessionStore {
     const receivedAt = Date.now();
     session.lastAccessAt = receivedAt;
     return session.writeQueue.run(async () => {
-      const { nextSequence, byteCount, ...result } = this.admit(session, frames, receivedAt);
+      if (session.mergeStorageBeforeIngest) {
+        session.mergeStorageBeforeIngest = false;
+        await this.mergeFramesFromStorage(session);
+      }
+      const { nextSequence, nextIndex, byteCount, ...result } = this.admit(
+        session,
+        frames,
+        receivedAt,
+      );
       if (result.accepted.length === 0) {
         return result;
       }
@@ -674,6 +774,7 @@ export class SessionStore {
       await this.storage.appendFrames(session.sessionId, result.accepted);
 
       session.latestSequence = nextSequence;
+      session.nextIndex = nextIndex;
       session.byteCount = byteCount;
       session.frames.push(...result.accepted);
       this.emit(session, { type: "frames", frames: result.accepted });
@@ -687,12 +788,19 @@ export class SessionStore {
     session: Session,
     frames: Frame[],
     receivedAt: number,
-  ): IngestResult & { nextSequence: Map<string, number>; byteCount: number } {
+  ): IngestResult & {
+    nextSequence: Map<string, number>;
+    nextIndex: number;
+    byteCount: number;
+  } {
     const accepted: StoredFrame[] = [];
     const rejectedStreams: string[] = [];
     const nextSequence = new Map(session.latestSequence);
     let duplicates = 0;
-    let nextIndex = session.frames.length + 1;
+    // One past the highest index the session holds, not a count of its frames: a frame
+    // that could not be read back, or one merged in from another writer, must not shift
+    // the numbering onto indexes that are already in use.
+    let nextIndex = session.nextIndex;
     let byteCount = session.byteCount;
     for (const frame of frames) {
       const latest = nextSequence.get(frame.stream) ?? 0;
@@ -720,6 +828,6 @@ export class SessionStore {
       }
       accepted.push(stored);
     }
-    return { accepted, duplicates, rejectedStreams, nextSequence, byteCount };
+    return { accepted, duplicates, rejectedStreams, nextSequence, nextIndex, byteCount };
   }
 }
