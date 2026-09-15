@@ -112,7 +112,9 @@ code {
   padding: 0 4px;
 }
 
-button {
+/* A link dressed as a button (the GitHub mark in the landing header) shares the treatment. */
+button,
+a.icon-button {
   font: inherit;
   color: var(--fg);
   background: var(--bg-elevated);
@@ -120,11 +122,14 @@ button {
   border-radius: var(--radius);
   padding: 4px 10px;
   cursor: pointer;
+  text-decoration: none;
 }
-button:hover {
+button:hover,
+a.icon-button:hover {
   border-color: var(--accent);
 }
-button:focus-visible {
+button:focus-visible,
+a.icon-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -164,18 +169,25 @@ button:focus-visible {
 .header-actions .share {
   margin-left: 0;
 }
-/* Share, the theme toggle, and Delete share one height whether they hold a word or
-   only a glyph. Only the controls themselves match, not the panels under them. */
-.header-actions > * > button {
+/* Share, the theme toggle, Delete, and the GitHub link share one height whether they
+   hold a word or only a glyph. Only the controls themselves match, not the panels
+   under them. */
+.header-actions > * > button,
+.header-actions > .icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   height: var(--control-height);
 }
 /* Square, so a glyph sits centred at the same size as a word next to it. */
-.header-actions > * > .icon-button {
+.header-actions .icon-button {
   width: var(--control-height);
   padding: 0;
+}
+/* The mark at the size of the theme glyph next to it. */
+.github-link svg {
+  width: 16px;
+  height: 16px;
 }
 
 .theme-menu {

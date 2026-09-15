@@ -4,6 +4,7 @@ import { Link, getRouteApi } from "@tanstack/react-router";
 import { ThemeToggle } from "../components/ThemeToggle.tsx";
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { AfkMark } from "../components/AfkMark.tsx";
+import { GitHubLink } from "../components/GitHubLink.tsx";
 import { formatDuration } from "../format.ts";
 
 /** How often the landing page refreshes the service numbers. */
@@ -171,7 +172,10 @@ export function LandingPage() {
           {/* TODO(copy): draft, the owner will refine */}
           <p className="tagline">Walk away from your laptop. Know if something breaks.</p>
         </div>
-        <ThemeToggle />
+        <div className="header-actions">
+          <GitHubLink />
+          <ThemeToggle />
+        </div>
       </header>
 
       {deleted !== undefined && (

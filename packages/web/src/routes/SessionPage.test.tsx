@@ -83,6 +83,13 @@ describe("SessionPage for the demo session", () => {
     ).toBe("BUTTON");
   });
 
+  it("has no GitHub link; that belongs to the landing page", async () => {
+    await renderOnSessionRoute(<SessionPage />, "/s/demo");
+    await screen.findByLabelText("agents timeline for agents");
+
+    expect(screen.queryByRole("link", { name: "afk on GitHub" })).toBeNull();
+  });
+
   it("lists the all-idle event near the cursor at the end, with both tools idle in the details", async () => {
     await renderOnSessionRoute(<SessionPage />, "/s/demo");
     await screen.findByLabelText("agents timeline for agents");

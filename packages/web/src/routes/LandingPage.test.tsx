@@ -24,6 +24,19 @@ describe("LandingPage header", () => {
     expect(name.tagName).toBe("ABBR");
     expect(name.textContent).toBe("afk");
   });
+
+  it("links to the repository on GitHub in a new tab", async () => {
+    withoutStats();
+
+    await renderOnSessionRoute(null, "/", <LandingPage />);
+
+    const link = await screen.findByRole("link", { name: "afk on GitHub" });
+    expect(link).toMatchObject({
+      href: "https://github.com/vaskevich/afk",
+      target: "_blank",
+      rel: "noopener noreferrer",
+    });
+  });
 });
 
 describe("LandingPage after a delete", () => {
