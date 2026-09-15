@@ -90,6 +90,11 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   `afk delete demo` reports that refusal as it does any other (`<server> refused to
 delete session demo (HTTP 403): the demo session cannot be deleted`).
 - Today: macOS only. Wanted: Linux.
+- Sleep is not handled and cannot be: a sleeping Mac runs no sampler, and the server
+  ends a session silent for ten minutes, so the client chains to a successor on wake
+  and prints its URL to a terminal nobody is reading. `afk start` says so in its first
+  lines instead, and `caffeinate -s ./cli/afk start` is the way to hold the machine
+  awake for the session's length.
 
 ## Concurrent runs
 

@@ -204,6 +204,10 @@ export function LandingPage() {
           <dd>
             Prints a dashboard URL for your phone: cpu, load, memory pressure, and the busiest
             processes, live, with anything that looks wrong flagged.
+            <small className="hint">
+              Keep the Mac awake: sleep pauses everything, and a session that goes quiet for ten
+              minutes ends.
+            </small>
           </dd>
         </div>
         <div>

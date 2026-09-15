@@ -2018,6 +2018,9 @@ cmd_start() {
   create_session_or_wait
   check_client_update prompt
   log "session $SESSION_ID started (max ${MAX_DURATION_SECONDS}s). Ctrl-C to end."
+  # Sleep stops the sampler, and the server ends a session that goes quiet for ten
+  # minutes, so a closed lid looks like a crashed machine to whoever is watching.
+  log "keep this Mac awake (lid open and plugged in, or run under caffeinate -s): sleep pauses everything and the session ends after 10 minutes of silence"
   print_dashboard_url
 
   sender_loop &

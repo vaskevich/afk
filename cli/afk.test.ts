@@ -3605,6 +3605,20 @@ describe("afk start printing the dashboard URL", () => {
 
   const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
 
+  // A closed lid stops the sampler, the server ends the session after ten minutes of
+  // silence, and the successor's URL is printed into a terminal nobody is watching, so
+  // `afk start` says so up front rather than leaving the viewer to guess.
+  it.skipIf(process.platform !== "darwin")("tells the user to keep the Mac awake", async () => {
+    const afkHome = await makeTempDir();
+    const server = await startQrServer(afkHome, { status: 200, body: QR_TEXT });
+
+    await stdoutOfStart(afkHome, server.url, "--no-qr");
+
+    const err = await readFile(join(afkHome, "err.txt"), "utf8");
+    expect(err).toContain("keep this Mac awake");
+    expect(err).toContain("caffeinate -s");
+  });
+
   it.skipIf(process.platform !== "darwin")(
     "prints the URL once, under the QR code, when the server renders one",
     async () => {

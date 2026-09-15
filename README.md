@@ -20,6 +20,17 @@ Read it first if you like: it is short, and so is [the client](cli/afk). A self-
 server serves the same installer at its own `/install`, and a client installed from it
 defaults to that server; set `AFK_SERVER` to point an existing client elsewhere.
 
+## Good to know
+
+- Keep the Mac awake while a session runs: sleep pauses the client, and the server ends
+  a session that goes quiet for ten minutes. Lid open and plugged in, or
+  `caffeinate -s ./cli/afk start`.
+- A session lasts an hour, then continues in a fresh one with a new link. The old
+  dashboard stays readable and links to its successor.
+- Sessions are kept 7 days after they end, then deleted. Anyone with the link can read
+  or delete one; there are no accounts.
+- macOS only, and alpha: afk.osv.im is one person's server, run best effort.
+
 ## What leaves your machine
 
 Everything below and nothing else: no file contents, no environment variables, no

@@ -107,6 +107,12 @@ describe("LandingPage after a delete", () => {
     expect(document.body.textContent).not.toContain("script(1)");
   });
 
+  it("tells the reader to keep the Mac awake", async () => {
+    await renderOnSessionRoute(null, "/", <LandingPage />);
+
+    expect(screen.getByText(/Keep the Mac awake/)).toBeTruthy();
+  });
+
   it("shows no notice on an ordinary visit", async () => {
     withoutStats();
 
