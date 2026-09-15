@@ -599,6 +599,33 @@ describe("S3SessionStorage", () => {
       expect(parseNdjson(objects.get(COMPACTED_KEY))).toEqual(stored);
     });
 
+    it("keeps a slab the caller's memory does not have, instead of deleting it with the parts", async () => {
+      // The other container of a deploy wrote these and went away; this process ends
+      // the session holding only what it saw itself.
+      const objects = new Map<string, string>();
+      const storage = makeStorage(objects);
+      const stored = frames(4);
+      objects.set(slabKey(3, SESSION_ID, "otherW"), ndjson(stored.slice(2)));
+
+      await expect(storage.compactSession(SESSION_ID, stored.slice(0, 2))).resolves.toBe(true);
+
+      expect(parseNdjson(objects.get(COMPACTED_KEY))).toEqual(stored);
+      expect(partKeys(objects)).toEqual([]);
+    });
+
+    it("keeps a part that arrived after an earlier attempt had written the compacted object", async () => {
+      const objects = new Map<string, string>();
+      const storage = makeStorage(objects);
+      const stored = frames(3);
+      objects.set(COMPACTED_KEY, ndjson(stored.slice(0, 2)));
+      objects.set(slabKey(3, SESSION_ID, "otherW"), ndjson(stored.slice(2)));
+
+      await expect(storage.compactSession(SESSION_ID)).resolves.toBe(true);
+
+      expect(parseNdjson(objects.get(COMPACTED_KEY))).toEqual(stored);
+      expect(partKeys(objects)).toEqual([]);
+    });
+
     it("does nothing for a session that is already compact, or has no frames", async () => {
       const objects = new Map<string, string>();
       const storage = makeStorage(objects, { slabMaxFrames: 1 });

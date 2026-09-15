@@ -102,9 +102,11 @@ export interface SessionStorage {
    */
   flush?(): Promise<void>;
   /**
-   * Rewrites an ended or expired session into whatever shape reads back cheapest, given
-   * the session's frames when the caller already holds them (the store does at end) so
-   * they need not be read back first. Resolves to whether anything was rewritten; a
+   * Rewrites an ended or expired session into whatever shape reads back cheapest. The
+   * caller passes the frames it holds when it has them (the store does at end); they
+   * are merged with what storage holds rather than replacing it, since another process
+   * may have written frames this one never saw. Resolves to whether anything was
+   * rewritten; a
    * session that is already compact, or has no frames, is a no-op. Runs in the
    * background at end and from the sweeper: it must be safe to call more than once,
    * concurrently with reads, and to fail part way (reads must still be correct).

@@ -453,12 +453,17 @@ that fails to write is kept and retried, and the failure surfaces on the session
 next `appendFrames` so the client spools and retries rather than the buffer growing.
 When the session ends (`SessionStore.end`, in the background after the end is
 recorded) or the sweeper finds it over, `compactSession` writes every frame as the one
-`sessions/<id>/frames.ndjson` object and deletes the slabs
+`sessions/<id>/frames.ndjson` object and deletes the slabs. What it writes is the
+union of what the bucket holds and the frames the caller passed, never the caller's
+memory alone: the slabs are about to be deleted, so a slab only they hold — the last
+one of another writer — has to be read before they go
 (`compacted session= frames= objects= ms=` at info, a warning on failure). `readFrames`
 prefers the compacted object and falls back to listing the `frames/` parts and fetching
 them `READ_CONCURRENCY` (16) at a time, so a session in either layout, one written
 before slabs existed (one object per ingested batch, same key scheme), or one caught
-between the two steps of a compaction all read the same.
+between the two steps of a compaction all read the same. A cold load is therefore one
+GET for an ended session and at most a minute's worth of objects per hour for a live
+one (see the 2026-09-14 entries in the decision log).
 
 `writerId` is a short random id the storage instance takes at startup, so two server
 processes that hold the same session at once — the seconds of a deploy when Lightsail
@@ -474,9 +479,7 @@ loads the session before the old one's SIGTERM flush. So the first `ingest` afte
 load reads storage once more (`Session.mergeStorageBeforeIngest`) and merges anything
 new into the session — inside the write queue, before the batch is admitted, so the
 indexes it hands out are past everything that exists. One extra read per session per
-process, and only for a session that is still receiving frames. A cold load is therefore one
-GET for an ended session and at most a minute's worth of objects per hour for a live
-one (see the 2026-09-14 entries in the decision log).
+process, and only for a session that is still receiving frames.
 
 The slab interval is a durability window: a hard crash of the container (not a deploy
 or a restart, which flush on SIGTERM) loses up to that much of each live session, and

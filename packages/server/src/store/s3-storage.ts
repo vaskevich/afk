@@ -10,7 +10,7 @@ import { log } from "../log/logger.ts";
 import { mapWithConcurrency } from "../utils/concurrency.ts";
 import { randomId } from "../utils/ids.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
-import { orderFrames } from "./frame-order.ts";
+import { mergeFrames, orderFrames } from "./frame-order.ts";
 import {
   parseSessionRecord,
   parseStoredFrameLine,
@@ -307,9 +307,11 @@ export class S3SessionStorage implements SessionStorage {
 
   /**
    * Writes the session's frames as `frames.ndjson`, then deletes its parts. Whatever
-   * is still buffered is written first. Without `frames` (the sweeper's path) they are
-   * read back from the bucket, which prefers a compacted object a previous attempt
-   * left behind. Serialized with the session's slab writes so nothing is in flight
+   * is still buffered is written first. What it writes is the union of everything in
+   * the bucket and the `frames` the caller holds (the store passes the session's own
+   * at end; the sweeper passes none): the parts are about to be deleted, so anything
+   * only they hold — another writer's slab this process never saw — has to be read
+   * before they go. Serialized with the session's slab writes so nothing is in flight
    * while the parts are listed.
    */
   async compactSession(sessionId: string, frames?: readonly StoredFrame[]) {
@@ -470,7 +472,22 @@ export class S3SessionStorage implements SessionStorage {
     if (parts.length === 0) {
       return null; // already compacted, or nothing was ever written
     }
-    const all = frames ?? (await this.readStoredFrames(sessionId));
+    // The union of everything the bucket holds and whatever the caller has in memory.
+    // Compacting from memory alone deleted the parts of any other writer of the
+    // session (the container a deploy was replacing), and with them frames the client
+    // had been told were accepted; a compacted object an earlier failed attempt left
+    // behind counts too, since the parts beside it may be newer than it is.
+    const [storedParts, compacted] = await Promise.all([
+      this.readParts(sessionId, parts),
+      this.getObjectTextIfPresent(this.compactedKey(sessionId)),
+    ]);
+    // The caller's own copies first, so a frame both sides hold is written exactly as
+    // this server holds it rather than as it came back through the parser.
+    const all = mergeFrames(
+      frames ?? [],
+      storedParts,
+      compacted === null ? [] : parseFrames(sessionId, [compacted]),
+    );
     await this.putFrames(this.compactedKey(sessionId), all);
     await this.deleteKeys(parts);
     return { frames: all.length, objects: parts.length };
@@ -482,12 +499,16 @@ export class S3SessionStorage implements SessionStorage {
     if (compacted !== null) {
       return parseFrames(sessionId, [compacted]);
     }
-    const keys = await this.listAllKeys(this.partsPrefix(sessionId));
-    keys.sort(); // zero-padded, so lexicographic order is index order
+    return this.readParts(sessionId, await this.listAllKeys(this.partsPrefix(sessionId)));
+  }
+
+  /** The frames of the given part objects, in one order. */
+  private async readParts(sessionId: string, keys: readonly string[]): Promise<StoredFrame[]> {
+    const sorted = [...keys].sort(); // zero-padded, so lexicographic order is index order
 
     // Fetch in parallel, parse in key order: the objects are small and there can be
     // thousands, so the round trips are the cost, and the result must be in index order.
-    const texts = await mapWithConcurrency(keys, READ_CONCURRENCY, (key) =>
+    const texts = await mapWithConcurrency(sorted, READ_CONCURRENCY, (key) =>
       this.getObjectTextIfPresent(key),
     );
     // A null is an object deleted between list and get; treat it like a gap, not an error.
