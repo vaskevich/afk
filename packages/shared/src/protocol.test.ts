@@ -585,9 +585,9 @@ describe("UpgradeRequiredDetails", () => {
 });
 
 describe("StreamEventName", () => {
-  it("has exactly the four names documented in docs/PROTOCOL.md", () => {
+  it("has exactly the five names documented in docs/PROTOCOL.md", () => {
     expect(Object.values(StreamEventName).sort()).toEqual(
-      ["session", "event", "frame", "end"].sort(),
+      ["session", "event", "frame", "ping", "end"].sort(),
     );
   });
 });

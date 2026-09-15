@@ -17,6 +17,7 @@ describe("StatusBanner continuation", () => {
         events={[]}
         nextSessionId="later"
         deleted={false}
+        contactLostSince={null}
         onSelectEvent={() => {}}
       />,
     );
@@ -34,6 +35,7 @@ describe("StatusBanner continuation", () => {
         events={[makeEvent({ endedAt: makeEvent().startedAt + 5_000 })]}
         nextSessionId="later"
         deleted={false}
+        contactLostSince={null}
         onSelectEvent={() => {}}
       />,
     );
@@ -49,6 +51,7 @@ describe("StatusBanner continuation", () => {
         events={[]}
         nextSessionId={null}
         deleted={false}
+        contactLostSince={null}
         onSelectEvent={() => {}}
       />,
     );
@@ -66,6 +69,7 @@ describe("StatusBanner for a deleted session", () => {
         events={[makeEvent()]}
         nextSessionId="later"
         deleted={true}
+        contactLostSince={null}
         onSelectEvent={() => {}}
       />,
     );
@@ -74,5 +78,69 @@ describe("StatusBanner for a deleted session", () => {
     expect(banner.textContent).toContain("This session was deleted");
     expect(banner.textContent).not.toContain("anomaly");
     expect(screen.queryByRole("link", { name: "open the next one" })).toBeNull();
+  });
+});
+
+/**
+ * Lost contact means this browser cannot reach the server, which is not the same as
+ * `client.stale` (the server cannot hear the machine): the first replaces the verdict
+ * with a neutral line, the second is an anomaly like any other.
+ */
+describe("StatusBanner while contact with the server is lost", () => {
+  /** Real clock: the banner only reads the time, so 42 s ago stays 42 s ago through a render. */
+  const LOST_AT = Date.now() - 42_000;
+
+  it("says there is no fresh data, naming the server and how long ago, in place of the verdict", async () => {
+    const open = makeEvent({ kind: "client.stale", severity: "warning", endedAt: null });
+
+    await renderOnSessionRoute(
+      <StatusBanner
+        status="active"
+        events={[open]}
+        nextSessionId={null}
+        deleted={false}
+        contactLostSince={LOST_AT}
+        onSelectEvent={() => {}}
+      />,
+    );
+
+    const banner = await screen.findByRole("status");
+    expect(banner.className).toBe("banner banner-neutral");
+    expect(banner.textContent).toBe(
+      `No fresh datalost contact with ${window.location.host} 42s ago, reconnecting…`,
+    );
+    expect(banner.textContent).not.toContain("anomaly");
+  });
+
+  it("keeps the verdict for a session that has ended, which has nothing to be late", async () => {
+    await renderOnSessionRoute(
+      <StatusBanner
+        status="ended"
+        events={[]}
+        nextSessionId={null}
+        deleted={false}
+        contactLostSince={LOST_AT}
+        onSelectEvent={() => {}}
+      />,
+    );
+
+    const banner = await screen.findByRole("status");
+    expect(banner.textContent).toContain("All normal");
+  });
+
+  it("still says the session was deleted, which outranks everything", async () => {
+    await renderOnSessionRoute(
+      <StatusBanner
+        status="active"
+        events={[]}
+        nextSessionId={null}
+        deleted={true}
+        contactLostSince={LOST_AT}
+        onSelectEvent={() => {}}
+      />,
+    );
+
+    const banner = await screen.findByRole("status");
+    expect(banner.textContent).toContain("This session was deleted");
   });
 });

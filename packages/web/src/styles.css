@@ -617,6 +617,11 @@ a.icon-button:focus-visible {
 .pill-connection-reconnecting {
   color: var(--warn);
 }
+/* The browser has not heard from the server for too long: neither live nor an alarm. */
+.pill-connection-lost {
+  color: var(--fg-muted);
+  border-style: dashed;
+}
 
 /* ---- share panel ----------------------------------------------------- */
 
@@ -788,6 +793,11 @@ a.icon-button:focus-visible {
 }
 .dot-critical {
   background: var(--critical);
+}
+/* No verdict to colour: the lost-contact banner's dot is an outline. */
+.dot-hollow {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
 }
 
 .banner small {

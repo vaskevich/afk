@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeRunFrame, makeSystemFrame } from "@afk/shared/testing";
-import type { AdmissionLimits } from "../env.ts";
+import type { AdmissionLimits, AppConfig } from "../env.ts";
 import { DEFAULT_LIMITS } from "../env.ts";
 import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
@@ -53,9 +53,12 @@ function openStream(res: Response) {
 }
 
 /** Builds a fresh app and creates one active session in it. */
-async function startSession(limits: AdmissionLimits = DEFAULT_LIMITS) {
+async function startSession(
+  limits: AdmissionLimits = DEFAULT_LIMITS,
+  config: Partial<AppConfig> = {},
+) {
   const app = createApp(
-    makeAppConfig({ limits }),
+    makeAppConfig({ limits, ...config }),
     new SessionStore(new MemorySessionStorage(), { limits }),
   );
   const { sessionId, ingestToken } = await createTestSession(app);
@@ -69,7 +72,7 @@ interface ParsedSSE {
   data: unknown;
 }
 
-/** Parses an SSE body into its messages, dropping bare keepalive comments. */
+/** Parses an SSE body into its messages; a message with an empty data line (a ping) has null data. */
 function parseSSE(text: string): ParsedSSE[] {
   return text
     .split("\n\n")
@@ -79,8 +82,9 @@ function parseSSE(text: string): ParsedSSE[] {
       const lines = chunk.split("\n");
       const event = lines.find((l) => l.startsWith("event: "))!.slice("event: ".length);
       const id = lines.find((l) => l.startsWith("id: "))?.slice("id: ".length);
-      const dataLine = lines.find((l) => l.startsWith("data: "))!.slice("data: ".length);
-      return { event, id, data: JSON.parse(dataLine) };
+      // A ping's data line is `data: ` and the chunk is trimmed, so the space is optional.
+      const dataLine = lines.find((l) => l.startsWith("data:"))!.replace(/^data: ?/, "");
+      return { event, id, data: dataLine === "" ? null : JSON.parse(dataLine) };
     });
 }
 
@@ -194,6 +198,22 @@ describe("GET /api/sessions/:id/stream", () => {
       data: { sessionId, status: "ended", reason: "deleted" },
     });
     expect(await stream.next()).toBeUndefined();
+  });
+
+  // Not a comment line: EventSource never delivers those to JavaScript, and the
+  // dashboard's freshness watchdog needs to hear something on a quiet stream.
+  it("sends a ping event every keepalive interval on an open stream with nothing else to say", async () => {
+    const { app, sessionId } = await startSession(DEFAULT_LIMITS, { sseKeepaliveMs: 20 });
+    const res = await app.request(`/api/sessions/${sessionId}/stream`);
+    const stream = openStream(res);
+    expect(await stream.next()).toMatchObject({ event: "session" });
+
+    const first = await stream.next();
+    const second = await stream.next();
+
+    expect(first).toEqual({ event: "ping", id: undefined, data: null });
+    expect(second).toEqual({ event: "ping", id: undefined, data: null });
+    await deleteTestSession(app, sessionId);
   });
 
   it("returns 404 for an unknown session id", async () => {

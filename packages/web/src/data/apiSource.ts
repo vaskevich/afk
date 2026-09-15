@@ -102,6 +102,7 @@ export const apiSource: SessionSource = {
       }
       handlers.onEvent(parsed.data);
     });
+    source.addEventListener(StreamEventName.Ping, () => handlers.onPing());
     source.addEventListener(StreamEventName.End, (e: MessageEvent<string>) => {
       flush();
       const { reason, ...summary } = StreamEndEvent.parse(JSON.parse(e.data));

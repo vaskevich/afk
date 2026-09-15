@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
@@ -11,6 +11,7 @@ import {
   makeStoredFrames,
   makeSystemFrame,
 } from "@afk/shared/testing";
+import { CONTACT_LOST_AFTER_MS } from "./freshness.ts";
 import { useSession } from "./useSession.ts";
 import { apiSource } from "./apiSource.ts";
 import { fixtureSource } from "./fixtureSource.ts";
@@ -172,5 +173,153 @@ describe("useSession", () => {
 
     await waitFor(() => expect(result.current.query.data?.events).toHaveLength(1));
     expect(result.current.query.data?.events[0]).toEqual(closed);
+  });
+});
+
+/**
+ * The freshness watchdog: while a session is active, the page is only trusted for as
+ * long as the server keeps saying something (a frame, a ping, anything). Time is fake
+ * here because the hook owns the silence timer and the once-a-second clock.
+ */
+describe("useSession freshness watchdog", () => {
+  /** A stand-in server: the handlers of every stream opened so far, newest last. */
+  let streams: SubscribeHandlers[];
+  let unsubscribe: Mock<() => void>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0_MS);
+    streams = [];
+    unsubscribe = vi.fn();
+    vi.spyOn(apiSource, "load").mockResolvedValue({
+      session: makeSessionSummary({ sessionId: "watched", status: "active", endedAt: null }),
+      frames: makeStoredFrames([makeSystemFrame(0)]),
+      events: [],
+    });
+    vi.spyOn(apiSource, "subscribe").mockImplementation((_sessionId, _afterIndex, handlers) => {
+      streams.push(handlers);
+      handlers.onConnection("connecting");
+      return unsubscribe;
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Lets `ms` of fake time pass, flushing whatever React and react-query schedule in it. */
+  async function elapse(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  /** Loads the session and opens its stream, which the server answers at once. */
+  async function follow() {
+    const rendered = renderHook(() => useSession("watched"), { wrapper: Wrapper });
+    await elapse(0);
+    act(() => {
+      streams.at(-1)!.onConnection("live");
+    });
+    return rendered;
+  }
+
+  it("vouches for the page while frames, pings, or anything else keep arriving", async () => {
+    const { result } = await follow();
+
+    await elapse(CONTACT_LOST_AFTER_MS - 1_000);
+    act(() => {
+      streams.at(-1)!.onPing();
+    });
+    await elapse(CONTACT_LOST_AFTER_MS - 1_000);
+    act(() => {
+      streams
+        .at(-1)!
+        .onFrames([{ index: 2, receivedAt: T0_MS + 58_000, frame: makeSystemFrame(58) }]);
+    });
+    await elapse(CONTACT_LOST_AFTER_MS - 1_000);
+
+    expect(result.current.contactLostSince).toBeNull();
+    expect(result.current.query.data?.frames).toHaveLength(2);
+  });
+
+  it("reports lost contact once nothing has arrived for twice the keepalive interval, naming when it last heard", async () => {
+    const { result } = await follow();
+
+    await elapse(CONTACT_LOST_AFTER_MS - 1_000);
+    expect(result.current.contactLostSince).toBeNull();
+    await elapse(1_000);
+
+    expect(result.current.contactLostSince).toBe(T0_MS);
+  });
+
+  it("recovers as soon as the server is heard again", async () => {
+    const { result } = await follow();
+    await elapse(CONTACT_LOST_AFTER_MS);
+    expect(result.current.contactLostSince).toBe(T0_MS);
+
+    act(() => {
+      streams.at(-1)!.onPing();
+    });
+
+    expect(result.current.contactLostSince).toBeNull();
+  });
+
+  it("reopens a silent stream from the last frame on the page, since a half-open socket never errors", async () => {
+    await follow();
+    act(() => {
+      streams
+        .at(-1)!
+        .onFrames([{ index: 2, receivedAt: T0_MS + 1_000, frame: makeSystemFrame(1) }]);
+    });
+
+    await elapse(CONTACT_LOST_AFTER_MS);
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(apiSource.subscribe).toHaveBeenCalledTimes(2);
+    expect(apiSource.subscribe).toHaveBeenLastCalledWith("watched", 2, expect.anything());
+  });
+
+  it("reports lost contact the moment the transport says it is reconnecting", async () => {
+    const { result } = await follow();
+    await elapse(5_000);
+
+    act(() => {
+      streams.at(-1)!.onConnection("reconnecting");
+    });
+
+    expect(result.current.contactLostSince).toBe(T0_MS);
+    expect(result.current.connection).toBe("reconnecting");
+  });
+
+  it("never reports lost contact for a session that has ended, however long ago it was heard", async () => {
+    const { result } = await follow();
+    act(() => {
+      streams
+        .at(-1)!
+        .onSession(
+          makeSessionSummary({ sessionId: "watched", status: "ended", endedAt: T0_MS + 1_000 }),
+        );
+      streams.at(-1)!.onConnection("closed");
+      streams.at(-1)!.onEnd("ended");
+    });
+
+    await elapse(10 * CONTACT_LOST_AFTER_MS);
+
+    expect(result.current.contactLostSince).toBeNull();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("never reports lost contact once the session was deleted under the viewer, whatever the summary says", async () => {
+    const { result } = await follow();
+    act(() => {
+      streams.at(-1)!.onConnection("closed");
+      streams.at(-1)!.onEnd("deleted");
+    });
+
+    await elapse(10 * CONTACT_LOST_AFTER_MS);
+
+    expect(result.current.contactLostSince).toBeNull();
+    expect(apiSource.subscribe).toHaveBeenCalledTimes(1);
   });
 });

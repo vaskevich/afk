@@ -578,13 +578,17 @@ event: session   data: SessionSummary   on connect, and whenever status changes
 event: event     data: AnomalyEvent     every existing event as a snapshot after
                                          `session`, then one per open/update/close
 event: frame     data: StoredFrame      id: <index>, replayed then live
-: keepalive                             every 15 s
+event: ping      data: (empty)          every 15 s (`AFK_SSE_KEEPALIVE_SECONDS`) while
+                                         nothing else is being sent
 event: end       data: StreamEndEvent   once the session is over or deleted; stream closes
 ```
 
 Resume with the `Last-Event-ID` header (browsers send it automatically on reconnect)
-or `?after=<index>`; the header wins. `event: event` frames carry no SSE id, so they
-never disturb frame resumption. On an already-ended session the server replays
+or `?after=<index>`; the header wins. `event: event` and `event: ping` carry no SSE id,
+so they never disturb frame resumption. `ping` is the keepalive: a named event rather
+than an SSE comment line because `EventSource` never delivers comments to JavaScript,
+and the dashboard treats any message, ping included, as proof the server is reachable
+(see the dashboard section of [ARCHITECTURE.md](ARCHITECTURE.md)). On an already-ended session the server replays
 everything and sends `end` immediately, which is exactly the completed-trace view.
 
 `StreamEndEvent` is the `SessionSummary` plus `reason`, a `StreamEndReason`: `ended`

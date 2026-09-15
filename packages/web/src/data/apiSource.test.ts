@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { apiSource } from "./apiSource.ts";
-import { SessionGoneError } from "./source.ts";
+import { SessionGoneError, type SubscribeHandlers } from "./source.ts";
 
 const SESSION_ID = "D3FzMqK8qOLVva9LoHF9uc";
 
@@ -67,5 +67,58 @@ describe("apiSource.load on a session that is gone", () => {
 
     await expect(rejection).rejects.toThrow("Server returned 502");
     await expect(rejection).rejects.not.toBeInstanceOf(SessionGoneError);
+  });
+});
+
+/** Stands in for the browser's EventSource: the stream is the true edge of `subscribe`. */
+class FakeEventSource extends EventTarget {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+  static opened: FakeEventSource[] = [];
+  readyState = FakeEventSource.CONNECTING;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+
+  constructor(readonly url: string) {
+    super();
+    FakeEventSource.opened.push(this);
+  }
+
+  close() {
+    this.readyState = FakeEventSource.CLOSED;
+  }
+}
+
+function handlerSpies(): SubscribeHandlers {
+  return {
+    onFrames: vi.fn(),
+    onSession: vi.fn(),
+    onEnd: vi.fn(),
+    onEvent: vi.fn(),
+    onPing: vi.fn(),
+    onConnection: vi.fn(),
+  };
+}
+
+describe("apiSource.subscribe", () => {
+  afterEach(() => {
+    FakeEventSource.opened = [];
+    vi.unstubAllGlobals();
+  });
+
+  it("reports a ping from the server as a sign of life and nothing else", () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const handlers = handlerSpies();
+    apiSource.subscribe(SESSION_ID, 0, handlers);
+    const stream = FakeEventSource.opened[0]!;
+
+    stream.dispatchEvent(new MessageEvent("ping", { data: "" }));
+
+    expect(handlers.onPing).toHaveBeenCalledTimes(1);
+    expect(handlers.onFrames).not.toHaveBeenCalled();
+    expect(handlers.onSession).not.toHaveBeenCalled();
+    expect(handlers.onEvent).not.toHaveBeenCalled();
+    expect(handlers.onEnd).not.toHaveBeenCalled();
   });
 });

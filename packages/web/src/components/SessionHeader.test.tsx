@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, screen, within } from "@testing-library/react";
-import { makeSessionSummary } from "@afk/shared/testing";
+import { T0_MS, makeSessionSummary } from "@afk/shared/testing";
 import { DEMO_SESSION_ID } from "../data/source.ts";
 import { renderOnSessionRoute } from "../test-helpers.tsx";
 import { SessionHeader } from "./SessionHeader.tsx";
@@ -10,10 +10,16 @@ afterEach(() => {
   cleanup();
 });
 
-/** The header with nothing deleted and a deletion nobody expects. */
+/** The header with nothing deleted, contact fresh, and a deletion nobody expects. */
 function header(session = makeSessionSummary({ sessionId: "current" }), deleted = false) {
   return (
-    <SessionHeader session={session} connection={null} deleted={deleted} onDeleted={() => {}} />
+    <SessionHeader
+      session={session}
+      connection={null}
+      deleted={deleted}
+      contactLostSince={null}
+      onDeleted={() => {}}
+    />
   );
 }
 
@@ -104,5 +110,40 @@ describe("SessionHeader delete control", () => {
 
     await screen.findByRole("button", { name: "Share" });
     expect(screen.queryByRole("button", { name: "Delete session" })).toBeNull();
+  });
+});
+
+describe("SessionHeader connection pill", () => {
+  const active = makeSessionSummary({ sessionId: "current", status: "active" });
+
+  it("names the transport state while contact is fresh", async () => {
+    await renderOnSessionRoute(
+      <SessionHeader
+        session={active}
+        connection="live"
+        deleted={false}
+        contactLostSince={null}
+        onDeleted={() => {}}
+      />,
+    );
+
+    const pill = await screen.findByText("live");
+    expect(pill.className).toBe("pill pill-connection pill-connection-live");
+  });
+
+  it("says there is no fresh data, in a neutral pill, once contact with the server is lost", async () => {
+    await renderOnSessionRoute(
+      <SessionHeader
+        session={active}
+        connection="live"
+        deleted={false}
+        contactLostSince={T0_MS}
+        onDeleted={() => {}}
+      />,
+    );
+
+    const pill = await screen.findByText("no fresh data");
+    expect(pill.className).toBe("pill pill-connection pill-connection-lost");
+    expect(screen.queryByText("live")).toBeNull();
   });
 });

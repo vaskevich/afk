@@ -13,6 +13,8 @@ const CONNECTION_LABELS: Record<ConnectionState, string> = {
   reconnecting: "reconnecting",
   closed: "disconnected",
 };
+/** In place of the connection state while the browser has not heard from the server for too long. */
+const CONTACT_LOST_LABEL = "no fresh data";
 
 interface Props {
   session: SessionSummary;
@@ -20,11 +22,19 @@ interface Props {
   connection: ConnectionState | null;
   /** The session was deleted while this page was open; there is nothing left to delete. */
   deleted: boolean;
+  /** When the server was last heard from, once too long ago; null while contact is fresh (see StatusBanner). */
+  contactLostSince: number | null;
   /** The viewer deleted the session from here. */
   onDeleted(): void;
 }
 
-export function SessionHeader({ session, connection, deleted, onDeleted }: Props) {
+export function SessionHeader({
+  session,
+  connection,
+  deleted,
+  contactLostSince,
+  onDeleted,
+}: Props) {
   // Ended sessions have a fixed duration; an active one keeps counting.
   const now = useNow(session.status === "active");
   const durationMs = (session.endedAt ?? now) - session.startedAt;
@@ -38,7 +48,10 @@ export function SessionHeader({ session, connection, deleted, onDeleted }: Props
       <h1>
         {session.host.hostname}
         <span className={`pill pill-${session.status}`}>{session.status}</span>
-        {connection && (
+        {connection && contactLostSince !== null && (
+          <span className="pill pill-connection pill-connection-lost">{CONTACT_LOST_LABEL}</span>
+        )}
+        {connection && contactLostSince === null && (
           <span className={`pill pill-connection pill-connection-${connection}`}>
             {CONNECTION_LABELS[connection]}
           </span>

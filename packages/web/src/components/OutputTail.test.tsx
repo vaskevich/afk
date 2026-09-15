@@ -69,6 +69,7 @@ describe("event lists", () => {
         events={[failed]}
         nextSessionId={null}
         deleted={false}
+        contactLostSince={null}
         onSelectEvent={() => {}}
       />,
     );
