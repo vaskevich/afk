@@ -524,6 +524,44 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** Two servers may hold one session; the bucket layout and the index
+  arithmetic now say so. Measured against `afk.osv.im`: one client session spanning
+  three container swaps sent 1,472 frames and 106 of them are not in the bucket — 15,
+  32 and 28 consecutive `system` sequences around each swap (16 to 33 seconds of data
+  each), with matching losses on `agents` and `processes` — while the client had been
+  answered 2xx for every one, had deleted them from its spool, and logged no rejection
+  or retry. The stored indexes came out 1..1366, contiguous, no duplicates: the loss
+  was invisible in everything except the per-stream `sequence` gaps. Cause, in three
+  parts that compounded: Lightsail runs both containers for a few seconds, so the new
+  one loaded the session from the bucket before the old one's SIGTERM flush landed;
+  `SessionStore.admit` took the next index from `frames.length + 1` over that short
+  load and reissued a range the old container was still using; and the slab key was
+  `frames/<first index>.ndjson`, so the second `PutObject` of that range replaced the
+  first one's object outright. `SessionStore.end` then compacted from the surviving
+  process's memory, deleting any late slab that had landed. The fix is four changes,
+  none of which needs a lock or a leader: slab keys carry a per-process `writerId`
+  (`frames/<first index>-<writerId>.ndjson`) so two writers never share a key; the
+  next index is `max(index) + 1` over what the session holds (`Session.nextIndex`, set
+  on load from the frames, not their count) and `framesAfter` resumes by binary search
+  over indexes rather than by array position, so a skipped or merged frame cannot
+  shift later ones; the first ingest after a load re-reads the prefix once and merges
+  in whatever appeared since (the old container's final flush); and `compactSession`
+  compacts the union of the bucket and the caller's memory instead of trusting memory
+  alone. Reads settle the rest: `orderFrames` sorts by index then arrival and keeps
+  one frame per (stream, sequence), so overlapping slabs read as their union and a
+  frame stored twice appears once. Reproduced locally the way the incident was
+  measured — a fake bucket, two real servers whose lifetimes overlap, a switchable
+  proxy swinging a real `cli/afk` from one to the other, and the old server's flush
+  landing after the new one's load: 10 lost sequences (8 of them consecutive `system`
+  frames) before the fix, 0 after, with every frame the client sent present in the
+  compacted object. What the fix accepts: during the overlap the two writers can give
+  the same index to different frames (11 such indexes in the local run), since an
+  index is handed to the client's dashboard the moment a frame is accepted and cannot
+  be renumbered afterwards. Nothing is lost — both frames are stored, read back, and
+  ordered — but an SSE reconnect with `Last-Event-ID` inside that window can miss the
+  twin of a frame it already has. `AFK_S3_SLAB_FLUSH_SECONDS=10` in `infra/deploy.sh`
+  stays as it is: it shortens the overlap, which is now a correctness-neutral
+  narrowing rather than the mitigation it was.
 - **2026-09-15** The ingest token is stored as its sha256, not in clear. `session.json`
   in the bucket and on disk used to hold the write credential itself, so anyone who
   could read the store (the bucket key, which lives in the deployment spec, GitHub
