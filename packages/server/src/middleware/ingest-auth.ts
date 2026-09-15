@@ -1,6 +1,24 @@
 import { createMiddleware } from "hono/factory";
 import type { AppDeps, AppEnv } from "../env.ts";
 import { errorResponse, sessionNotFound } from "../http/errors.ts";
+import type { Session } from "../store/sessions.ts";
+import { ingestTokenMatches } from "../utils/ingest-token.ts";
+
+const BEARER_PREFIX = "Bearer ";
+
+/**
+ * Whether an `Authorization` header value is `Bearer <the session's ingest token>`.
+ * The token is compared through its hash in constant time (`utils/ingest-token.ts`);
+ * the session holds only the hash. Every route that takes the token as proof of
+ * ownership (ingest, end, qr, chaining from a previous session, a client's delete)
+ * goes through here so there is one comparison to get right.
+ */
+export function bearerMatchesSession(authorization: string | undefined, session: Session): boolean {
+  if (authorization === undefined || !authorization.startsWith(BEARER_PREFIX)) {
+    return false;
+  }
+  return ingestTokenMatches(authorization.slice(BEARER_PREFIX.length), session.ingestTokenHash);
+}
 
 /**
  * Resolves `:sessionId`, checks the bearer ingest token, and rejects sessions that are
@@ -16,8 +34,7 @@ export function ingestAuth({ store }: AppDeps) {
       return sessionNotFound(c, store.wasDeleted(sessionId));
     }
 
-    const auth = c.req.header("authorization") ?? "";
-    if (auth !== `Bearer ${session.ingestToken}`) {
+    if (!bearerMatchesSession(c.req.header("authorization"), session)) {
       return errorResponse(c, 401, "bad ingest token");
     }
 

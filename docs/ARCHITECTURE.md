@@ -416,8 +416,8 @@ For UI work the Vite dev server proxies `/api` to the server.
 ## Data model
 
 - A **session** is one `afk start` on one machine: unguessable id (also the share
-  link), a separate write-only ingest token, host info, start and end times, and a
-  server-owned maximum duration (one hour).
+  link), a separate write-only ingest token (stored only as its sha256), host info,
+  start and end times, and a server-owned maximum duration (one hour).
 - A **stream** is one time series within a session and one row on the timeline.
   Singleton collectors use their own name (`system`); per-instance collectors append
   an id (`run:3f2a`). Sequence numbers are per stream.
@@ -429,7 +429,11 @@ For UI work the Vite dev server proxies `/api` to the server.
 
 `sessions/<id>/session.json` holds the session record; `sessions/<id>/frames.ndjson`
 is append-only, one stored frame per line, in index order. Per-stream sequence state
-is rebuilt from the frames on load rather than persisted.
+is rebuilt from the frames on load rather than persisted. The record carries the
+ingest token as `ingestTokenHash` (sha256, `utils/ingest-token.ts`), never in clear;
+`parseSessionRecord` in `store/storage.ts` still accepts the clear `ingestToken` field
+of records written before that and hashes it on load, so a deploy does not 401 the
+sessions active at the moment (see the decision log).
 
 The bucket layout (`store/s3-storage.ts`) reaches the same shape in two steps, since
 object stores cannot append. While a session is live, `appendFrames` buffers accepted
@@ -494,6 +498,22 @@ against the hosted server delivered frames at ~1/s with 15 s keepalives, and bot
 
 Newest first. Add an entry whenever a direction changes; keep the reasoning short.
 
+- **2026-09-15** The ingest token is stored as its sha256, not in clear. `session.json`
+  in the bucket and on disk used to hold the write credential itself, so anyone who
+  could read the store (the bucket key, which lives in the deployment spec, GitHub
+  secrets, and tfstate; another user of a disk-storage self-host) could write into
+  every live session. `SessionRecord.ingestTokenHash` replaces `ingestToken`;
+  `store.create` returns the clear token once, for the create response, and nothing
+  else on the server holds it. The bearer is checked by hashing it and comparing the
+  digests with `crypto.timingSafeEqual` (`utils/ingest-token.ts`,
+  `bearerMatchesSession` in `middleware/ingest-auth.ts`, used by ingest, end, qr,
+  chaining, and delete alike), which also retires the early-exit `!==`. A plain sha256
+  with no salt or stretching is the right hash here: the token is 256 random bits,
+  not a password, so there is nothing to guess and no rainbow table to build.
+  Records written before this (clear `ingestToken`) are accepted for one release,
+  hashed on load by `parseSessionRecord`, so the sessions active at the deploy keep
+  working; sessions live an hour and are kept seven days, after which the legacy
+  branch can go.
 - **2026-09-15** The dashboard judges its own freshness rather than trusting the
   server's verdict forever. The banner used to be driven only by anomaly events, so a
   server that was down or restarting left a green "All normal" on every open phone,

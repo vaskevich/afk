@@ -9,7 +9,12 @@ import { StoredFrame } from "@afk/shared";
 import { log } from "../log/logger.ts";
 import { mapWithConcurrency } from "../utils/concurrency.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
-import { SessionRecord, parseStoredFrameLine, type SessionStorage } from "./storage.ts";
+import {
+  parseSessionRecord,
+  parseStoredFrameLine,
+  type SessionRecord,
+  type SessionStorage,
+} from "./storage.ts";
 
 const SESSION_KEY = "session.json";
 /** One object holding every frame of a session, written by `compactSession`. */
@@ -204,7 +209,7 @@ export class S3SessionStorage implements SessionStorage {
     }
     try {
       const text = await this.getObjectText(`${this.prefix(sessionId)}${SESSION_KEY}`);
-      return SessionRecord.parse(JSON.parse(text));
+      return parseSessionRecord(JSON.parse(text));
     } catch (err) {
       if (isNotFound(err)) {
         return null;

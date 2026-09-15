@@ -1,14 +1,19 @@
 import { z } from "zod";
 import { HostInfo, StoredFrame } from "@afk/shared";
+import { hashIngestToken } from "../utils/ingest-token.ts";
 
 /**
  * What the server persists about a session, independent of where. The live per-stream
  * sequence bookkeeping is not stored; it is rebuilt from the frames on load. The chain
  * links default to null so records written before chaining existed still parse.
+ *
+ * The ingest token is stored as its sha256 (`utils/ingest-token.ts`), never in clear:
+ * the store (a bucket, a self-hoster's disk) is readable by more than the server, and
+ * reading it must not grant write access to every live session.
  */
 export const SessionRecord = z.object({
   sessionId: z.string(),
-  ingestToken: z.string(),
+  ingestTokenHash: z.string(),
   host: HostInfo,
   clientVersion: z.string(),
   startedAt: z.number().int(),
@@ -20,6 +25,46 @@ export const SessionRecord = z.object({
   nextSessionId: z.string().nullable().default(null),
 });
 export type SessionRecord = z.infer<typeof SessionRecord>;
+
+/** The clear-token field records carried before tokens were hashed. */
+const LEGACY_INGEST_TOKEN_FIELD = "ingestToken";
+
+/**
+ * A record as it may be found in storage: written by this server (`ingestTokenHash`)
+ * or by one from before tokens were hashed (clear `ingestToken`). The legacy shape is
+ * hashed on the way in, so the rest of the server only ever sees `SessionRecord`.
+ * TODO(storage): drop the legacy field once every deployment has written past it (one
+ * release: sessions live an hour and are kept seven days).
+ */
+const StoredSessionRecord = SessionRecord.omit({ ingestTokenHash: true })
+  .extend({
+    ingestTokenHash: z.string().optional(),
+    [LEGACY_INGEST_TOKEN_FIELD]: z.string().optional(),
+  })
+  .transform((stored, ctx): SessionRecord => {
+    const { ingestTokenHash, ingestToken, ...rest } = stored;
+    if (ingestTokenHash !== undefined) {
+      return { ...rest, ingestTokenHash };
+    }
+    if (ingestToken !== undefined) {
+      return { ...rest, ingestTokenHash: hashIngestToken(ingestToken) };
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["ingestTokenHash"],
+      message: `record has neither ingestTokenHash nor ${LEGACY_INGEST_TOKEN_FIELD}`,
+    });
+    return z.NEVER;
+  });
+
+/**
+ * Parses a `session.json` document from storage, accepting both the hashed shape this
+ * server writes and the clear-token shape of records written before. Throws (a
+ * `ZodError`) on anything else, like `SessionRecord.parse` would.
+ */
+export function parseSessionRecord(json: unknown): SessionRecord {
+  return StoredSessionRecord.parse(json);
+}
 
 /**
  * Durable storage for sessions. Implementations: local disk for dev and self-hosting,

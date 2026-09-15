@@ -44,7 +44,7 @@ class BufferingStorage extends MemorySessionStorage {
 async function storeWithPendingWrite() {
   const storage = new MemorySessionStorage();
   const store = new SessionStore(storage);
-  const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+  const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
   const release = gateAppends(storage);
   const ingest = store.ingest(session, [makeSystemFrame(0)]);
   return { storage, store, session, release, ingest };
@@ -122,7 +122,7 @@ describe("shutdown", () => {
     vi.spyOn(log, "info").mockImplementation(() => {});
     const storage = new BufferingStorage();
     const store = new SessionStore(storage);
-    const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+    const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
     const release = gateAppends(storage);
     const ingest = store.ingest(session, [makeSystemFrame(0)]);
     const server = await listeningServer();
@@ -198,7 +198,7 @@ describe("shutdown", () => {
   it("ends an open SSE stream so a viewer reconnects instead of hanging", async () => {
     vi.spyOn(log, "info").mockImplementation(() => {});
     const store = new SessionStore(new MemorySessionStorage());
-    const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+    const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
     const app = createApp(makeAppConfig(), store);
     const server = serve({ fetch: app.fetch, port: 0, hostname: LOOPBACK }) as Server;
     openServers.push(server);

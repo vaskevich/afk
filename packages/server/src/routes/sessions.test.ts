@@ -11,6 +11,7 @@ import { createApp } from "../app.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { MemorySessionStorage } from "../store/storage.ts";
 import { sweepExpiredSessions } from "../store/sweeper.ts";
+import { hashIngestToken } from "../utils/ingest-token.ts";
 import { DEMO_SESSION_DELETE_MESSAGE, MAX_CREATE_BODY_BYTES } from "./sessions.ts";
 import {
   CLIENT_VERSION_HEADER,
@@ -339,6 +340,18 @@ describe("GET /api/sessions/:id", () => {
       previousSessionId: null,
       nextSessionId: null,
     });
+  });
+
+  it("never carries the ingest token or its hash: the summary is what a share link may see", async () => {
+    const app = buildApp();
+    const { sessionId, ingestToken } = await createTestSession(app);
+
+    const res = await app.request(`/api/sessions/${sessionId}`);
+
+    const text = await res.text();
+    expect(text).not.toContain(ingestToken);
+    expect(text).not.toContain(hashIngestToken(ingestToken));
+    expect(JSON.parse(text)).not.toHaveProperty("ingestTokenHash");
   });
 
   it("returns 404 for an unknown session id", async () => {

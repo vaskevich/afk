@@ -23,7 +23,8 @@ GET  /s/:id                             browser           the dashboard itself
 Ingest endpoints require `Authorization: Bearer <ingestToken>`. Read endpoints have no
 auth: the session id is the unguessable share link (22 chars of base62, ~131 bits).
 The ingest token never appears in the dashboard URL, so sharing a trace never shares
-write access.
+write access. The server hands the token out once, in the create response, and keeps
+only its sha256; no other response (the summary included) ever carries it.
 
 Every route with a `:id` answers `404` with an `ErrorResponse` (`unknown session`) for
 an id that is not exactly 22 base62 characters, before anything else about the request

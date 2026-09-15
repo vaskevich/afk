@@ -10,9 +10,9 @@ import {
   isAcceptedProtocolVersion,
   upgradeRequired,
 } from "../middleware/client-version.ts";
-import { ingestAuth } from "../middleware/ingest-auth.ts";
+import { bearerMatchesSession, ingestAuth } from "../middleware/ingest-auth.ts";
 import { log } from "../log/logger.ts";
-import { AlreadyContinuedError, type Session } from "../store/sessions.ts";
+import { AlreadyContinuedError, type CreatedSession, type Session } from "../store/sessions.ts";
 import { renderQrSvg, renderQrText } from "../utils/qr.ts";
 
 /** Parses the request body as JSON, or null if it isn't valid JSON. */
@@ -97,8 +97,7 @@ export function sessionRoutes(deps: AppDeps) {
     if (!previous) {
       return { status: 404, message: "unknown previous session" };
     }
-    const auth = c.req.header("authorization") ?? "";
-    if (auth !== `Bearer ${previous.ingestToken}`) {
+    if (!bearerMatchesSession(c.req.header("authorization"), previous)) {
       return { status: 401, message: "bad ingest token for the previous session" };
     }
     return previous;
@@ -151,9 +150,9 @@ export function sessionRoutes(deps: AppDeps) {
           );
         }
 
-        let session: Session;
+        let created: CreatedSession;
         try {
-          session = await store.create({
+          created = await store.create({
             host: parsed.data.host,
             clientVersion: parsed.data.clientVersion,
             previous,
@@ -164,6 +163,8 @@ export function sessionRoutes(deps: AppDeps) {
           }
           throw err;
         }
+        // The only place the token exists in clear on the server side: this response.
+        const { session, ingestToken } = created;
         const dashboardUrl = dashboardUrlFor(config.publicBaseUrl, session.sessionId);
         log.info("session created", {
           session: session.sessionId,
@@ -185,7 +186,7 @@ export function sessionRoutes(deps: AppDeps) {
         }
         const body: CreateSessionResponse = {
           sessionId: session.sessionId,
-          ingestToken: session.ingestToken,
+          ingestToken,
           dashboardUrl,
           maxDurationSeconds: session.maxDurationSeconds,
           // Advice, not a floor (the 426 above is the floor): the client says so on stderr
@@ -220,7 +221,7 @@ export function sessionRoutes(deps: AppDeps) {
           return sessionNotFound(c, store.wasDeleted(sessionId));
         }
         const auth = c.req.header("authorization");
-        if (auth !== undefined && auth !== `Bearer ${session.ingestToken}`) {
+        if (auth !== undefined && !bearerMatchesSession(auth, session)) {
           return errorResponse(c, 401, "bad ingest token");
         }
         const wasActive = store.status(session) === "active";

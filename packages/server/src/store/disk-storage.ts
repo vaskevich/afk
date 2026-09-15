@@ -2,7 +2,12 @@ import { mkdir, readdir, readFile, rename, rm, appendFile, writeFile } from "nod
 import path from "node:path";
 import { StoredFrame } from "@afk/shared";
 import { log } from "../log/logger.ts";
-import { SessionRecord, parseStoredFrameLine, type SessionStorage } from "./storage.ts";
+import {
+  parseSessionRecord,
+  parseStoredFrameLine,
+  type SessionRecord,
+  type SessionStorage,
+} from "./storage.ts";
 
 const SESSION_FILE = "session.json";
 const FRAMES_FILE = "frames.ndjson";
@@ -44,7 +49,7 @@ export class DiskSessionStorage implements SessionStorage {
     }
     try {
       const text = await readFile(path.join(this.dir(sessionId), SESSION_FILE), "utf8");
-      return SessionRecord.parse(JSON.parse(text));
+      return parseSessionRecord(JSON.parse(text));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         return null;

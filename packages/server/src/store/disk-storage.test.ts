@@ -1,10 +1,11 @@
-import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { T0_MS, makeHost, makeStoredFrames, makeSystemFrame } from "@afk/shared/testing";
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS } from "@afk/shared";
 import { DiskSessionStorage } from "./disk-storage.ts";
+import { hashIngestToken } from "../utils/ingest-token.ts";
 import type { SessionRecord } from "./storage.ts";
 
 const tempDirs: string[] = [];
@@ -23,7 +24,7 @@ afterEach(async () => {
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
     sessionId: "session1",
-    ingestToken: "token1",
+    ingestTokenHash: hashIngestToken("token1"),
     host: makeHost(),
     clientVersion: "0.1.0",
     startedAt: T0_MS,
@@ -35,6 +36,13 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
+/** `record` without its token hash: the shape of a record from before tokens were hashed. */
+function withoutTokenHash(record: SessionRecord): Omit<SessionRecord, "ingestTokenHash"> {
+  const copy: Partial<SessionRecord> = { ...record };
+  delete copy.ingestTokenHash;
+  return copy as Omit<SessionRecord, "ingestTokenHash">;
+}
+
 describe("DiskSessionStorage", () => {
   describe("putSession and getSession", () => {
     it("round-trips a record", async () => {
@@ -44,6 +52,38 @@ describe("DiskSessionStorage", () => {
       await storage.putSession(record);
 
       await expect(storage.getSession(record.sessionId)).resolves.toEqual(record);
+    });
+
+    it("loads a record written before tokens were hashed, hashing its clear ingestToken on the way in", async () => {
+      const dir = await makeTempDir();
+      const storage = new DiskSessionStorage(dir);
+      const rest = withoutTokenHash(makeRecord());
+      const legacy = { ...rest, ingestToken: "clearToken" };
+      await mkdir(join(dir, "sessions", legacy.sessionId), { recursive: true });
+      await writeFile(
+        join(dir, "sessions", legacy.sessionId, "session.json"),
+        JSON.stringify(legacy),
+      );
+
+      await expect(storage.getSession(legacy.sessionId)).resolves.toEqual({
+        ...rest,
+        ingestTokenHash: hashIngestToken("clearToken"),
+      });
+    });
+
+    it("rejects a record that carries neither a token hash nor a clear token", async () => {
+      const dir = await makeTempDir();
+      const storage = new DiskSessionStorage(dir);
+      const noToken = withoutTokenHash(makeRecord());
+      await mkdir(join(dir, "sessions", noToken.sessionId), { recursive: true });
+      await writeFile(
+        join(dir, "sessions", noToken.sessionId, "session.json"),
+        JSON.stringify(noToken),
+      );
+
+      await expect(storage.getSession(noToken.sessionId)).rejects.toThrow(
+        "neither ingestTokenHash nor ingestToken",
+      );
     });
 
     it("returns null for a missing session", async () => {

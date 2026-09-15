@@ -9,6 +9,7 @@ import {
 import { DEFAULT_MAX_SESSION_DURATION_SECONDS, type StoredFrame } from "@afk/shared";
 import { DEFAULT_LIMITS } from "../env.ts";
 import { log } from "../log/logger.ts";
+import { hashIngestToken } from "../utils/ingest-token.ts";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
 import {
   AlreadyContinuedError,
@@ -129,20 +130,35 @@ describe("SessionStore", () => {
       const first = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const second = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
-      expect(first.sessionId).not.toBe(second.sessionId);
+      expect(first.session.sessionId).not.toBe(second.session.sessionId);
       expect(first.ingestToken).not.toBe(second.ingestToken);
-      await expect(storage.getSession(first.sessionId)).resolves.toMatchObject({
-        sessionId: first.sessionId,
-        ingestToken: first.ingestToken,
+      await expect(storage.getSession(first.session.sessionId)).resolves.toMatchObject({
+        sessionId: first.session.sessionId,
         clientVersion: "0.1.0",
       });
+    });
+
+    it("stores the ingest token only as its hash: neither the record nor the session carries it in clear", async () => {
+      const storage = new MemorySessionStorage();
+      const store = new SessionStore(storage);
+
+      const { session, ingestToken } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+      });
+
+      expect(session.ingestTokenHash).toBe(hashIngestToken(ingestToken));
+      expect(JSON.stringify(session)).not.toContain(ingestToken);
+      const record = await storage.getSession(session.sessionId);
+      expect(record).toMatchObject({ ingestTokenHash: hashIngestToken(ingestToken) });
+      expect(JSON.stringify(record)).not.toContain(ingestToken);
     });
 
     it("stamps the configured max duration on every new session", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage, { maxSessionDurationSeconds: 120 });
 
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       expect(session.maxDurationSeconds).toBe(120);
       await expect(storage.getSession(session.sessionId)).resolves.toMatchObject({
@@ -153,7 +169,7 @@ describe("SessionStore", () => {
     it("uses the shared default max duration when none is configured", async () => {
       const store = new SessionStore(new MemorySessionStorage());
 
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       expect(session.maxDurationSeconds).toBe(DEFAULT_MAX_SESSION_DURATION_SECONDS);
     });
@@ -161,7 +177,7 @@ describe("SessionStore", () => {
     it("starts every session unlinked", async () => {
       const store = new SessionStore(new MemorySessionStorage());
 
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       expect(store.summary(session)).toMatchObject({
         previousSessionId: null,
@@ -176,13 +192,20 @@ describe("SessionStore", () => {
       vi.setSystemTime(T0_MS);
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: previous } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+      });
       await store.ingest(previous, highCpuFrames(31));
       const received: SessionEvent[] = [];
       store.subscribe(previous, (event) => received.push(event));
       vi.setSystemTime(T0_MS + 50_000);
 
-      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+      const { session: next } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        previous,
+      });
 
       expect(store.summary(next)).toMatchObject({
         status: "active",
@@ -216,10 +239,17 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage(), { maxSessionDurationSeconds: 60 });
-      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: previous } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+      });
       vi.setSystemTime(T0_MS + 90_000);
 
-      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+      const { session: next } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        previous,
+      });
 
       expect(store.summary(previous)).toMatchObject({
         status: "ended",
@@ -233,11 +263,18 @@ describe("SessionStore", () => {
       vi.setSystemTime(T0_MS);
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: previous } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+      });
       await store.end(previous);
       vi.setSystemTime(T0_MS + 5_000);
 
-      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+      const { session: next } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        previous,
+      });
 
       expect(previous.endedAt).toBe(T0_MS);
       await expect(storage.getSession(previous.sessionId)).resolves.toMatchObject({
@@ -248,8 +285,15 @@ describe("SessionStore", () => {
 
     it("refuses a second successor for the same session", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
-      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+      const { session: previous } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+      });
+      const { session: next } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        previous,
+      });
 
       await expect(
         store.create({ host: makeHost(), clientVersion: "0.1.0", previous }),
@@ -261,8 +305,15 @@ describe("SessionStore", () => {
     it("keeps the links when a chained session is reloaded from storage", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const previous = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
-      const next = await store.create({ host: makeHost(), clientVersion: "0.1.0", previous });
+      const { session: previous } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+      });
+      const { session: next } = await store.create({
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        previous,
+      });
       store.evict(previous.sessionId);
       store.evict(next.sessionId);
 
@@ -280,7 +331,7 @@ describe("SessionStore", () => {
     it("returns the cached session without going back to storage", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const created = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: created } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const getSessionSpy = vi.spyOn(storage, "getSession");
 
       const found = await store.get(created.sessionId);
@@ -295,7 +346,7 @@ describe("SessionStore", () => {
       const storage = new MemorySessionStorage();
       const record: SessionRecord = {
         sessionId: "existingSession",
-        ingestToken: "existingToken",
+        ingestTokenHash: hashIngestToken("existingToken"),
         host: makeHost(),
         clientVersion: "0.1.0",
         startedAt: T0_MS,
@@ -325,7 +376,7 @@ describe("SessionStore", () => {
       const storage = new MemorySessionStorage();
       const record: SessionRecord = {
         sessionId: "existingSession",
-        ingestToken: "existingToken",
+        ingestTokenHash: hashIngestToken("existingToken"),
         host: makeHost(),
         clientVersion: "0.1.0",
         startedAt: T0_MS,
@@ -404,7 +455,7 @@ describe("SessionStore", () => {
     it("drops the cached copy so the next get reads storage again", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const created = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: created } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const getSessionSpy = vi.spyOn(storage, "getSession");
 
       const wasCached = store.evict(created.sessionId);
@@ -427,7 +478,7 @@ describe("SessionStore", () => {
     it("removes the record and frames from storage and memory, and reports how many frames went", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1)]);
 
       const result = await store.delete(session);
@@ -442,7 +493,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, highCpuFrames(31));
       const received: SessionEvent[] = [];
       store.subscribe(session, (event) => received.push(event));
@@ -462,7 +513,7 @@ describe("SessionStore", () => {
     it("remembers the id as deleted, so the next get is answered from memory and says why", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const getSessionSpy = vi.spyOn(storage, "getSession");
 
       await store.delete(session, T0_MS);
@@ -485,7 +536,7 @@ describe("SessionStore", () => {
     it("waits for a frame write in flight so the batch cannot recreate the session's files", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));
       const append = storage.appendFrames.bind(storage);
@@ -506,7 +557,7 @@ describe("SessionStore", () => {
     it("deletes an already ended session without emitting a second end to anyone", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.end(session, T0_MS + 1_000);
       const received: SessionEvent[] = [];
       store.subscribe(session, (event) => received.push(event));
@@ -528,7 +579,7 @@ describe("SessionStore", () => {
   describe("ingest", () => {
     it("assigns session-wide indexes across streams in the order frames arrive", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       const result = await store.ingest(session, [makeSystemFrame(0), makeRunFrame(0)]);
 
@@ -538,7 +589,7 @@ describe("SessionStore", () => {
 
     it("skips a frame whose sequence is at or below the latest seen for its stream and counts it", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
 
       const result = await store.ingest(session, [makeSystemFrame(0)]);
@@ -549,7 +600,7 @@ describe("SessionStore", () => {
     it("persists before advancing state, so a rejected write leaves the session untouched and a retry is accepted", async () => {
       const storage = new FlakyAppendStorage(new MemorySessionStorage());
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const frames = [makeSystemFrame(0)];
       storage.failNextAppendOnce();
 
@@ -564,7 +615,7 @@ describe("SessionStore", () => {
 
     it("emits frames and events to subscribers", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const received: SessionEvent[] = [];
       store.subscribe(session, (event) => received.push(event));
 
@@ -582,7 +633,7 @@ describe("SessionStore", () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { ...DEFAULT_LIMITS, maxFramesPerSession: 3 },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1), makeSystemFrame(2)]);
 
       await expect(store.ingest(session, [makeSystemFrame(3)])).rejects.toThrow(TooManyFramesError);
@@ -596,7 +647,7 @@ describe("SessionStore", () => {
       const store = new SessionStore(storage, {
         limits: { ...DEFAULT_LIMITS, maxBytesPerSession: twoFramesBytes },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1)]);
 
       await expect(store.ingest(session, [makeSystemFrame(2)])).rejects.toThrow(TooManyBytesError);
@@ -610,7 +661,7 @@ describe("SessionStore", () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { ...DEFAULT_LIMITS, maxBytesPerSession: 1 },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       await expect(store.ingest(session, [makeSystemFrame(0)])).rejects.toThrow(
         "session has reached the limit of 1 bytes",
@@ -624,7 +675,7 @@ describe("SessionStore", () => {
       const framesBytes = frames.reduce((sum, f) => sum + storedFrameBytes(f), 0);
       const record: SessionRecord = {
         sessionId: "existingSession",
-        ingestToken: "existingToken",
+        ingestTokenHash: hashIngestToken("existingToken"),
         host: makeHost(),
         clientVersion: "0.1.0",
         startedAt: Date.now(),
@@ -649,7 +700,7 @@ describe("SessionStore", () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { ...DEFAULT_LIMITS, maxStreamsPerSession: 1 },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
 
       const result = await store.ingest(session, [makeRunFrame(0), makeSystemFrame(1)]);
@@ -716,8 +767,8 @@ describe("SessionStore", () => {
     it("resolves only once every pending append on every session has settled", async () => {
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const a = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
-      const b = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: a } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: b } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -762,7 +813,7 @@ describe("SessionStore", () => {
       vi.setSystemTime(T0_MS);
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, highCpuFrames(31));
       const received: SessionEvent[] = [];
       store.subscribe(session, (event) => received.push(event));
@@ -786,7 +837,7 @@ describe("SessionStore", () => {
 
     it("does nothing the second time a session is ended", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.end(session);
       const endedAtFirst = session.endedAt;
 
@@ -798,7 +849,7 @@ describe("SessionStore", () => {
     it("hands every frame to the storage's compaction after the end is recorded, without waiting for it", async () => {
       const storage = new CompactingStorage();
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1)]);
 
       await store.end(session);
@@ -818,7 +869,7 @@ describe("SessionStore", () => {
     it("compacts after an append that was still queued has settled", async () => {
       const storage = new CompactingStorage();
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       let releaseAppend!: () => void;
       const gate = new Promise<void>((resolve) => {
         releaseAppend = resolve;
@@ -847,7 +898,7 @@ describe("SessionStore", () => {
       const storage = new CompactingStorage();
       storage.failCompaction = true;
       const store = new SessionStore(storage);
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
 
       await store.end(session);
@@ -866,7 +917,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS + 120_000);
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, highCpuFrames(31));
 
       await store.end(session, T0_MS + 40_000);
@@ -881,14 +932,14 @@ describe("SessionStore", () => {
   describe("status and summary", () => {
     it("reports active for a session within its max duration", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       expect(store.status(session)).toBe("active");
     });
 
     it("reports ended for a session that has been ended", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       await store.end(session);
 
@@ -900,7 +951,7 @@ describe("SessionStore", () => {
       const oldStartedAt = Date.now() - (DEFAULT_MAX_SESSION_DURATION_SECONDS + 60) * 1000;
       const record: SessionRecord = {
         sessionId: "oldSession",
-        ingestToken: "oldToken",
+        ingestTokenHash: hashIngestToken("oldToken"),
         host: makeHost(),
         clientVersion: "0.1.0",
         startedAt: oldStartedAt,
@@ -920,7 +971,7 @@ describe("SessionStore", () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { ...DEFAULT_LIMITS, maxStreamsPerSession: 5 },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       await store.ingest(session, [makeSystemFrame(0), makeRunFrame(0)]);
 
@@ -932,7 +983,7 @@ describe("SessionStore", () => {
     it("counts only sessions that are still active", async () => {
       const store = new SessionStore(new MemorySessionStorage());
       await store.create({ host: makeHost(), clientVersion: "0.1.0" });
-      const ended = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: ended } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.end(ended);
 
       expect(store.activeSessionCount()).toBe(1);
@@ -962,7 +1013,7 @@ describe("SessionStore", () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { ...DEFAULT_LIMITS, maxActiveSessions: 5 },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       await store.ingest(session, [makeSystemFrame(0), makeSystemFrame(1, { sequence: 2 })]);
 
@@ -987,7 +1038,7 @@ describe("SessionStore", () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { ...DEFAULT_LIMITS, maxSseConnectionsPerSession: 2 },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       expect(store.openSseConnection(session)).toBe("admitted");
       expect(store.openSseConnection(session)).toBe("admitted");
@@ -1003,8 +1054,8 @@ describe("SessionStore", () => {
       const store = new SessionStore(new MemorySessionStorage(), {
         limits: { ...DEFAULT_LIMITS, maxSseConnections: 2 },
       });
-      const a = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
-      const b = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: a } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session: b } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       expect(store.openSseConnection(a)).toBe("admitted");
       expect(store.openSseConnection(b)).toBe("admitted");
 
@@ -1019,7 +1070,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
 
       vi.setSystemTime(T0_MS + 90_000);
@@ -1039,7 +1090,7 @@ describe("SessionStore", () => {
       vi.setSystemTime(T0_MS);
       const storage = new MemorySessionStorage();
       const store = new SessionStore(storage, { endAfterSilentMs: 600_000 });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       vi.setSystemTime(T0_MS + 5_000);
       await store.ingest(session, [makeSystemFrame(5)]);
       const received: SessionEvent[] = [];
@@ -1070,7 +1121,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
 
       vi.setSystemTime(T0_MS + 600_000);
@@ -1086,7 +1137,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       vi.setSystemTime(T0_MS + 600_001);
       await store.tick(Date.now());
@@ -1098,7 +1149,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS + 3_600_000);
       const store = new SessionStore(new MemorySessionStorage(), { endAfterSilentMs: 600_000 });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       // Client clock an hour behind: the frame says T0 but arrives now.
       await store.ingest(session, [makeSystemFrame(0)]);
 
@@ -1112,7 +1163,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
 
       vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.endAfterSilentMs);
@@ -1129,7 +1180,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage(), { evictEndedAfterMs: 1_000 });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.end(session);
 
       vi.setSystemTime(T0_MS + 1_001);
@@ -1142,7 +1193,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.end(session);
 
       vi.setSystemTime(T0_MS + DEFAULT_STORE_OPTIONS.evictEndedAfterMs);
@@ -1155,7 +1206,7 @@ describe("SessionStore", () => {
       vi.useFakeTimers();
       vi.setSystemTime(T0_MS);
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       store.subscribe(session, () => {});
       await store.end(session);
 
@@ -1169,7 +1220,7 @@ describe("SessionStore", () => {
   describe("subscribe", () => {
     it("returns a function that stops further delivery to the listener", async () => {
       const store = new SessionStore(new MemorySessionStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       const received: SessionEvent[] = [];
       const unsubscribe = store.subscribe(session, (event) => received.push(event));
 
@@ -1184,7 +1235,7 @@ describe("SessionStore", () => {
 describe("sessionStatus and sessionEndMs", () => {
   const record: SessionRecord = {
     sessionId: "record1",
-    ingestToken: "token1",
+    ingestTokenHash: hashIngestToken("token1"),
     host: makeHost(),
     clientVersion: "0.1.0",
     startedAt: T0_MS,

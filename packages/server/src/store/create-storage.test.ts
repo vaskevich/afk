@@ -24,7 +24,7 @@ afterEach(async () => {
 function makeRecord(): SessionRecord {
   return {
     sessionId: "session1",
-    ingestToken: "token1",
+    ingestTokenHash: "tokenHash1",
     host: makeHost(),
     clientVersion: "0.1.0",
     startedAt: T0_MS,

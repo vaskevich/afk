@@ -12,6 +12,7 @@ import { DEFAULT_LIMITS, type AdmissionLimits } from "../env.ts";
 import { log } from "../log/logger.ts";
 import { RuleEngine } from "../rules/engine.ts";
 import { randomId, randomToken } from "../utils/ids.ts";
+import { hashIngestToken } from "../utils/ingest-token.ts";
 import { SerialQueue } from "../utils/serial-queue.ts";
 import type { SessionRecord, SessionStorage } from "./storage.ts";
 
@@ -95,6 +96,16 @@ interface UnknownIdEntry {
  * whole process is at its cap (`maxSseConnectionsPerSession` / `maxSseConnections`).
  */
 export type SseAdmission = "admitted" | "session-full" | "server-full";
+
+/**
+ * What `create` returns: the session, and the one and only copy of its ingest token in
+ * clear. The session (and its record) holds the token's hash; the create response hands
+ * the token to the client and the server never sees it again except as a bearer.
+ */
+export interface CreatedSession {
+  session: Session;
+  ingestToken: string;
+}
 
 /** What `delete` reports back: the record that was removed and how many frames went with it. */
 export interface DeleteResult {
@@ -252,15 +263,16 @@ export class SessionStore {
     host: HostInfo;
     clientVersion: string;
     previous?: Session;
-  }): Promise<Session> {
+  }): Promise<CreatedSession> {
     const { previous } = input;
     if (previous && previous.nextSessionId !== null) {
       throw new AlreadyContinuedError(previous.sessionId, previous.nextSessionId);
     }
     const now = Date.now();
+    const ingestToken = randomToken();
     const record: SessionRecord = {
       sessionId: randomId(),
-      ingestToken: randomToken(),
+      ingestTokenHash: hashIngestToken(ingestToken),
       host: input.host,
       clientVersion: input.clientVersion,
       startedAt: now,
@@ -276,7 +288,7 @@ export class SessionStore {
     if (previous) {
       await this.continueIn(previous, session, now);
     }
-    return session;
+    return { session, ingestToken };
   }
 
   /** Links `previous` to its successor and ends it (persisting either way). */
@@ -417,7 +429,7 @@ export class SessionStore {
   private record(session: Session): SessionRecord {
     const {
       sessionId,
-      ingestToken,
+      ingestTokenHash,
       host,
       clientVersion,
       startedAt,
@@ -428,7 +440,7 @@ export class SessionStore {
     } = session;
     return {
       sessionId,
-      ingestToken,
+      ingestTokenHash,
       host,
       clientVersion,
       startedAt,

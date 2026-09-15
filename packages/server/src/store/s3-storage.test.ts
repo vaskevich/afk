@@ -12,6 +12,7 @@ import {
   S3SessionStorage,
   type S3StorageOptions,
 } from "./s3-storage.ts";
+import { hashIngestToken } from "../utils/ingest-token.ts";
 import type { SessionRecord } from "./storage.ts";
 
 /**
@@ -110,7 +111,7 @@ function installFakeS3(objects: Map<string, string>, options: FakeS3Options = {}
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
     sessionId: SESSION_ID,
-    ingestToken: "token1",
+    ingestTokenHash: hashIngestToken("token1"),
     host: makeHost(),
     clientVersion: "0.1.0",
     startedAt: T0_MS,
@@ -181,6 +182,31 @@ describe("S3SessionStorage", () => {
     await storage.putSession(record);
 
     expect(JSON.parse(objects.get(`sessions/${SESSION_ID}/session.json`)!)).toEqual(record);
+  });
+
+  it("getSession round-trips a record with a token hash", async () => {
+    const objects = new Map<string, string>();
+    const storage = makeStorage(objects);
+    const record = makeRecord();
+    await storage.putSession(record);
+
+    await expect(storage.getSession(SESSION_ID)).resolves.toEqual(record);
+  });
+
+  it("getSession loads an object written before tokens were hashed, hashing its clear ingestToken", async () => {
+    const objects = new Map<string, string>();
+    const storage = makeStorage(objects);
+    const rest: Partial<SessionRecord> = makeRecord();
+    delete rest.ingestTokenHash;
+    objects.set(
+      `sessions/${SESSION_ID}/session.json`,
+      JSON.stringify({ ...rest, ingestToken: "clearToken" }),
+    );
+
+    await expect(storage.getSession(SESSION_ID)).resolves.toEqual({
+      ...rest,
+      ingestTokenHash: hashIngestToken("clearToken"),
+    });
   });
 
   describe("slabs", () => {

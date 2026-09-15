@@ -6,6 +6,7 @@ import { T0_MS, makeHost, makeStoredFrames, makeSystemFrame } from "@afk/shared/
 import { log } from "../log/logger.ts";
 import { DiskSessionStorage } from "./disk-storage.ts";
 import { SessionStore } from "./sessions.ts";
+import { hashIngestToken } from "../utils/ingest-token.ts";
 import { MemorySessionStorage, type SessionRecord, type SessionStorage } from "./storage.ts";
 import type { StoredFrame } from "@afk/shared";
 import { MS_PER_DAY, startSweeper, sweepExpiredSessions } from "./sweeper.ts";
@@ -30,7 +31,7 @@ afterEach(async () => {
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
     sessionId: "session1",
-    ingestToken: "token1",
+    ingestTokenHash: hashIngestToken("token1"),
     host: makeHost(),
     clientVersion: "0.1.0",
     startedAt: T0_MS,
