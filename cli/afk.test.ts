@@ -3703,6 +3703,14 @@ describe("collect_run", () => {
 });
 
 describe("redact_command", () => {
+  // `-p` is deliberately not redacted: `mkdir -p dir` and `ps -p 123` are far more
+  // common than a password after a short flag, and the dashboard should show them as typed.
+  it("leaves short -p flags alone", async () => {
+    const { stdout } = await runBash('redact_command "mkdir -p build && ps -p 123"');
+
+    expect(stdout.trim()).toBe("mkdir -p build && ps -p 123");
+  });
+
   /** The command line after redact_command, printed back without a trailing newline. */
   async function redact(command: string): Promise<string> {
     const { stdout, stderr, code } = await runBash('printf "%s" "$(redact_command "$INPUT")"', {
@@ -3746,7 +3754,6 @@ describe("redact_command", () => {
     ["curl --password=hunter2 https://h", "curl --password=*** https://h"],
     ["gh auth login --token hunter2", "gh auth login --token ***"],
     ["tool --api-key hunter2 run", "tool --api-key *** run"],
-    ["mysql -p hunter2 db", "mysql -p *** db"],
   ])(
     "replaces the value after a secret-taking option, after a space or an equals sign: %s",
     async (command, redacted) => {

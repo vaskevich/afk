@@ -50,7 +50,8 @@ maintainability one. Add to this whenever a new fact or constraint turns up.
   dashboard still shows what ran: a URL's userinfo (`https://***@host`), the value
   of a `KEY=value` argument named like a secret (`TOKEN`, `SECRET`, `PASSWORD`,
   `KEY`, `AUTH`, any case; the name stays), and the value after `--password`,
-  `--token`, `--api-key`, `-p`, and the rest of `REDACT_OPTIONS`, after a space or
+  `--token`, `--api-key`, and the rest of `REDACT_OPTIONS` (not the short `-p`,
+  which `mkdir -p` and `ps -p` use), after a space or
   `=`. The redacted form is the only one spooled or sent; the server never sees the
   original (see the `run` collector in [PROTOCOL.md](PROTOCOL.md)). The copy kept
   locally for `afk status` (`runs/<runId>/command`, mode 600, gone with the session

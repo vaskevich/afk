@@ -44,7 +44,7 @@
 #
 # `afk run` sends the command line with the obvious secrets replaced by `***` (a URL's
 # user:password, the value of a KEY=value argument named like a secret, the value
-# after --password, --token, -p and the like; see redact_command) and, when the
+# after --password, --token and the like; see redact_command) and, when the
 # command fails, the last lines it printed unless AFK_RUN_TAIL_LINES is 0. Its output
 # is never sent otherwise.
 #
@@ -193,7 +193,7 @@ RUN_COMMAND_MAX_CHARS=256
 # words (BSD sed has no case-insensitive flag, so every letter is spelled as a class),
 # and the value after one of these options. Add to the lists, do not weaken them.
 REDACT_KEY_WORDS='[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Kk][Ee][Yy]|[Aa][Uu][Tt][Hh]'
-REDACT_OPTIONS='--password|--passwd|--token|--api-key|--apikey|--secret|--access-token|--auth-token|--client-secret|-p'
+REDACT_OPTIONS='--password|--passwd|--token|--api-key|--apikey|--secret|--access-token|--auth-token|--client-secret'
 REDACT_PLACEHOLDER='***'
 # split names chunks with this many letters after the prefix: 26^6 chunks of 64 MiB.
 RUN_CAPTURE_SUFFIX_LENGTH=6
@@ -798,8 +798,9 @@ collect_agents() {
 # (`https://me:hunter2@host` becomes `https://***@host`), the value of an argument
 # named like a secret anywhere on the line (`API_TOKEN=hunter2` becomes
 # `API_TOKEN=***`; the name stays), and the value after one of REDACT_OPTIONS,
-# separated by a space or `=` (`--password hunter2`, `--password=hunter2`,
-# `-p hunter2`). A value in quotes is taken whole. This is the only form of the
+# separated by a space or `=` (`--password hunter2`, `--password=hunter2`). Short
+# `-p` is not on the list: `mkdir -p` and `ps -p` are far more common than a
+# password. A value in quotes is taken whole. This is the only form of the
 # command line that leaves the machine; the server never sees the original. Runs
 # under the C locale so sed takes bytes that are not UTF-8 as they are.
 redact_command() { # command-line

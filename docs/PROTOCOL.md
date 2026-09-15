@@ -366,7 +366,7 @@ else is byte for byte what was typed: the userinfo of a URL
 `KEY=value` argument anywhere on the line whose name contains `TOKEN`, `SECRET`,
 `PASSWORD`, `KEY`, or `AUTH` in any case (`API_TOKEN=***`; the name stays), and the
 value after `--password`, `--passwd`, `--token`, `--api-key`, `--apikey`, `--secret`,
-`--access-token`, `--auth-token`, `--client-secret`, or `-p`, whether separated by a
+`--access-token`, `--auth-token`, or `--client-secret`, whether separated by a
 space or `=` (`--password ***`, `--password=***`). The lists are the named constants
 `REDACT_KEY_WORDS` and `REDACT_OPTIONS` at the top of the script. A secret in any
 other shape (`-pSECRET` with no space, a positional argument) is sent as typed: the

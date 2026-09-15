@@ -35,7 +35,7 @@ The wire format is spelled out field by field in [docs/PROTOCOL.md](docs/PROTOCO
   names, directories, or transcript contents. `AFK_NO_AGENTS=1` turns this off.
 - **For `afk run`:** the command line as typed, with a URL's user:password, the value of
   a `KEY=value` argument named like a secret (`TOKEN`, `SECRET`, `PASSWORD`, `KEY`,
-  `AUTH`), and the value after `--password`, `--token`, `-p` and the like replaced by
+  `AUTH`), and the value after `--password`, `--token` and the like replaced by
   `***` before it is sent; then its pid, elapsed time, cpu and memory, how many bytes it
   wrote to stdout and stderr, and its exit code.
 - **When a wrapped command fails:** the last 20 lines of its stdout and stderr (200

@@ -261,9 +261,9 @@ export function LandingPage() {
             </strong>{" "}
             the command line as typed, with a URL&apos;s user:password, the value of a{" "}
             <code>KEY=value</code> argument named like a secret, and the value after{" "}
-            <code>--password</code>, <code>--token</code>, <code>-p</code> and the like replaced by{" "}
-            <code>***</code> before it is sent; then its pid, elapsed time, cpu and memory, how many
-            bytes it wrote to stdout and stderr, and its exit code.
+            <code>--password</code>, <code>--token</code> and the like replaced by <code>***</code>{" "}
+            before it is sent; then its pid, elapsed time, cpu and memory, how many bytes it wrote
+            to stdout and stderr, and its exit code.
           </li>
           <li>
             <strong>When a wrapped command fails:</strong> the last {RUN_TAIL_MAX_LINES} lines of
