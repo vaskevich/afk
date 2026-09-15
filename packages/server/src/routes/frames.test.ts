@@ -159,9 +159,8 @@ describe("POST /api/sessions/:id/frames", () => {
   // Regression: the whole batch was refused, so the known streams' frames in it were lost.
   it("accepts the known streams of a batch and names the one beyond the cap in rejectedStreams", async () => {
     const { app, sessionId, ingestToken } = await startSession({
-      maxActiveSessions: 20,
+      ...DEFAULT_LIMITS,
       maxStreamsPerSession: 1,
-      maxFramesPerSession: 15_000,
     });
     await postFrames(app, sessionId, ingestToken, [makeSystemFrame(0)]);
 

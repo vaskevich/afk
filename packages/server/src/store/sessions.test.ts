@@ -716,7 +716,7 @@ describe("SessionStore", () => {
     // overlapped were both given the same index, and the dashboard dropped one frame.
     it("gives two batches whose writes overlap distinct indexes, in the order they were admitted", async () => {
       const store = new SessionStore(new YieldingStorage());
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
 
       const [first, second] = await Promise.all([
         store.ingest(session, [makeSystemFrame(0)]),
@@ -730,9 +730,9 @@ describe("SessionStore", () => {
 
     it("admits only one of two new streams whose batches race for the last slot under the cap", async () => {
       const store = new SessionStore(new YieldingStorage(), {
-        limits: { maxActiveSessions: 20, maxStreamsPerSession: 2, maxFramesPerSession: 15_000 },
+        limits: { ...DEFAULT_LIMITS, maxStreamsPerSession: 2 },
       });
-      const session = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
+      const { session } = await store.create({ host: makeHost(), clientVersion: "0.1.0" });
       await store.ingest(session, [makeSystemFrame(0)]);
 
       const results = await Promise.all([
