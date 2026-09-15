@@ -1217,6 +1217,64 @@ describe("SessionStore", () => {
     });
   });
 
+  // Regression: indexes and resume positions used to be counts and array positions,
+  // which agree with the index only while a session's frames are exactly 1..n. A line
+  // storage could not read back, or a frame merged in from the other writer of a
+  // deploy, made the next index one that was already taken -- so the frames that got
+  // it were indistinguishable from frames that were never sent.
+  describe("indexes over frames whose numbering has a hole", () => {
+    /** A session in storage whose stored indexes are 1, 2 and 5. */
+    async function storedSessionWithHole(): Promise<{
+      store: SessionStore;
+      sessionId: string;
+      stored: StoredFrame[];
+    }> {
+      const storage = new MemorySessionStorage();
+      const record: SessionRecord = {
+        sessionId: "existingSession",
+        ingestTokenHash: hashIngestToken("existingToken"),
+        host: makeHost(),
+        clientVersion: "0.1.0",
+        startedAt: Date.now(),
+        endedAt: null,
+        maxDurationSeconds: DEFAULT_MAX_SESSION_DURATION_SECONDS,
+        previousSessionId: null,
+        nextSessionId: null,
+      };
+      await storage.putSession(record);
+      const [first, second, third] = makeStoredFrames([
+        makeSystemFrame(0),
+        makeSystemFrame(1),
+        makeSystemFrame(2),
+      ]);
+      const stored = [first!, second!, { ...third!, index: 5 }];
+      await storage.appendFrames(record.sessionId, stored);
+      return { store: new SessionStore(storage), sessionId: record.sessionId, stored };
+    }
+
+    it("numbers the next frame from the highest stored index, not from the frame count", async () => {
+      const { store, sessionId } = await storedSessionWithHole();
+
+      const loaded = await store.get(sessionId);
+      const result = await store.ingest(loaded!, [makeSystemFrame(3)]);
+
+      expect(result.accepted.map((f) => f.index)).toEqual([6]);
+      expect(loaded!.frames.map((f) => f.index)).toEqual([1, 2, 5, 6]);
+    });
+
+    it("framesAfter resumes from the index a viewer names, not from that array position", async () => {
+      const { store, sessionId, stored } = await storedSessionWithHole();
+      const loaded = await store.get(sessionId);
+      const { accepted } = await store.ingest(loaded!, [makeSystemFrame(3)]);
+
+      expect(store.framesAfter(loaded!, 0)).toEqual([...stored, ...accepted]);
+      expect(store.framesAfter(loaded!, 2)).toEqual([stored[2], ...accepted]);
+      expect(store.framesAfter(loaded!, 4)).toEqual([stored[2], ...accepted]);
+      expect(store.framesAfter(loaded!, 5)).toEqual(accepted);
+      expect(store.framesAfter(loaded!, 6)).toEqual([]);
+    });
+  });
+
   describe("subscribe", () => {
     it("returns a function that stops further delivery to the listener", async () => {
       const store = new SessionStore(new MemorySessionStorage());

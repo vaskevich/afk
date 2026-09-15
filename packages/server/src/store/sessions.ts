@@ -35,6 +35,14 @@ export interface Session extends SessionRecord {
   latestSequence: Map<string, number>;
   /** Every frame so far, in index order. */
   frames: StoredFrame[];
+  /**
+   * The session-wide index the next accepted frame gets: one past the highest index
+   * the session holds, never `frames.length + 1`. The two differ whenever the frames
+   * are not exactly 1..n — a line `parseStoredFrameLine` could not read, or another
+   * writer's frames merged in — and counting would then hand out an index that is
+   * already taken.
+   */
+  nextIndex: number;
   /** Bytes of `frames` as stored NDJSON (`storedFrameBytes`); what `maxBytesPerSession` bounds. */
   byteCount: number;
   /** Open SSE connections serving this session (`openSseConnection` / `closeSseConnection`). */
@@ -157,6 +165,26 @@ export class TooManyBytesError extends Error {
  */
 export function storedFrameBytes(stored: StoredFrame): number {
   return Buffer.byteLength(JSON.stringify(stored)) + 1;
+}
+
+/**
+ * The position of the first frame whose index is past `index`, by binary search over
+ * frames held in index order (`frames.length` when there is none). Position and index
+ * are not the same number: indexes can have holes (a stored line that would not parse)
+ * or repeat (two writers numbering from the same point during a deploy).
+ */
+function firstIndexAfter(frames: readonly StoredFrame[], index: number): number {
+  let low = 0;
+  let high = frames.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (frames[middle]!.index > index) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return low;
 }
 
 /** Thrown by `create` when the session to chain from already has a successor. */
@@ -398,11 +426,15 @@ export class SessionStore {
   private hydrate(record: SessionRecord, frames: StoredFrame[]): Session {
     const latestSequence = new Map<string, number>();
     let byteCount = 0;
+    let highestIndex = 0;
     for (const stored of frames) {
       const { frame } = stored;
       const latest = latestSequence.get(frame.stream) ?? 0;
       if (frame.sequence > latest) {
         latestSequence.set(frame.stream, frame.sequence);
+      }
+      if (stored.index > highestIndex) {
+        highestIndex = stored.index;
       }
       byteCount += storedFrameBytes(stored);
     }
@@ -413,6 +445,7 @@ export class SessionStore {
       ...record,
       latestSequence,
       frames,
+      nextIndex: highestIndex + 1,
       byteCount,
       sseConnections: 0,
       listeners: new Set(),
@@ -535,9 +568,17 @@ export class SessionStore {
     return { sessionId: session.sessionId, frames };
   }
 
-  /** Frames after the given session-wide index (0 = everything). */
+  /**
+   * Frames after the given session-wide index (0 = everything). Resolved by index, not
+   * by array position: the two agree only while the frames are exactly 1..n, and a
+   * dashboard resuming from `index` after a frame was skipped or merged in would
+   * otherwise be handed the wrong slice (silently missing or repeating frames).
+   */
   framesAfter(session: Session, index: number): StoredFrame[] {
-    return index <= 0 ? session.frames.slice() : session.frames.slice(index);
+    if (index <= 0) {
+      return session.frames.slice();
+    }
+    return session.frames.slice(firstIndexAfter(session.frames, index));
   }
 
   /** Subscribe to live changes. Returns an unsubscribe function. */
@@ -666,7 +707,11 @@ export class SessionStore {
     const receivedAt = Date.now();
     session.lastAccessAt = receivedAt;
     return session.writeQueue.run(async () => {
-      const { nextSequence, byteCount, ...result } = this.admit(session, frames, receivedAt);
+      const { nextSequence, nextIndex, byteCount, ...result } = this.admit(
+        session,
+        frames,
+        receivedAt,
+      );
       if (result.accepted.length === 0) {
         return result;
       }
@@ -674,6 +719,7 @@ export class SessionStore {
       await this.storage.appendFrames(session.sessionId, result.accepted);
 
       session.latestSequence = nextSequence;
+      session.nextIndex = nextIndex;
       session.byteCount = byteCount;
       session.frames.push(...result.accepted);
       this.emit(session, { type: "frames", frames: result.accepted });
@@ -687,12 +733,19 @@ export class SessionStore {
     session: Session,
     frames: Frame[],
     receivedAt: number,
-  ): IngestResult & { nextSequence: Map<string, number>; byteCount: number } {
+  ): IngestResult & {
+    nextSequence: Map<string, number>;
+    nextIndex: number;
+    byteCount: number;
+  } {
     const accepted: StoredFrame[] = [];
     const rejectedStreams: string[] = [];
     const nextSequence = new Map(session.latestSequence);
     let duplicates = 0;
-    let nextIndex = session.frames.length + 1;
+    // One past the highest index the session holds, not a count of its frames: a frame
+    // that could not be read back, or one merged in from another writer, must not shift
+    // the numbering onto indexes that are already in use.
+    let nextIndex = session.nextIndex;
     let byteCount = session.byteCount;
     for (const frame of frames) {
       const latest = nextSequence.get(frame.stream) ?? 0;
@@ -720,6 +773,6 @@ export class SessionStore {
       }
       accepted.push(stored);
     }
-    return { accepted, duplicates, rejectedStreams, nextSequence, byteCount };
+    return { accepted, duplicates, rejectedStreams, nextSequence, nextIndex, byteCount };
   }
 }

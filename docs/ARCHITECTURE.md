@@ -137,7 +137,13 @@ Hono on Node. Layout is documented at the top of `src/app.ts`:
   sequence bookkeeping, SSE listeners. It writes through to `store/storage.ts`, the
   `SessionStorage` interface, and lazily loads sessions it does not have in memory.
   Frames are persisted **before** in-memory state advances, so a failed write is
-  retried by the client rather than being counted as a duplicate.
+  retried by the client rather than being counted as a duplicate. The session-wide
+  index an accepted frame gets is one past the highest index the session holds
+  (`Session.nextIndex`, set on load from the frames themselves), never a count of its
+  frames, and `framesAfter` finds a viewer's resume point by binary search over those
+  indexes rather than by array position — so a stored line that would not parse, or a
+  frame merged in from another writer, cannot shift later frames onto indexes that are
+  already taken.
 - `store/disk-storage.ts` is the local implementation; `store/s3-storage.ts` is the
   S3-compatible one used against Lightsail object storage in production.
   `store/create-storage.ts` builds whichever `AFK_STORAGE=disk|s3` asks for.
