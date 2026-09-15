@@ -24,6 +24,11 @@ export interface SubscribeHandlers {
    * as a snapshot on connect, then one per change; consumers upsert by `id`.
    */
   onEvent(event: AnomalyEvent): void;
+  /**
+   * The server's keepalive, every `EXPECTED_KEEPALIVE_MS` (`freshness.ts`) while the
+   * stream has nothing else to say: the only sign of life on a quiet session.
+   */
+  onPing(): void;
   /** Transport state, for a small "live / reconnecting" indicator. */
   onConnection(state: ConnectionState): void;
 }

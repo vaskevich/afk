@@ -61,7 +61,7 @@ function LoadFailure({ error }: { error: unknown }) {
 
 export function SessionPage() {
   const { sessionId } = route.useParams();
-  const { query, connection, endReason } = useSession(sessionId);
+  const { query, connection, endReason, contactLostSince } = useSession(sessionId);
   const navigate = useNavigate();
   // null means "follow the latest frame", which is the default while a session is live;
   // a number is an explicit position the user picked by scrubbing.
@@ -107,6 +107,7 @@ export function SessionPage() {
         session={query.data.session}
         connection={active ? connection : null}
         deleted={deleted}
+        contactLostSince={contactLostSince}
         onDeleted={onDeleted}
       />
       <StatusBanner
@@ -114,6 +115,7 @@ export function SessionPage() {
         events={query.data.events}
         nextSessionId={query.data.session.nextSessionId}
         deleted={deleted}
+        contactLostSince={contactLostSince}
         onSelectEvent={selectEvent}
       />
       <Timeline

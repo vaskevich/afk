@@ -1,6 +1,8 @@
 import type { AnomalyEvent, SessionStatus } from "@afk/shared";
 import { Link } from "@tanstack/react-router";
 import { isOpenEvent, pluralize, worstSeverity } from "../events.ts";
+import { formatDuration } from "../format.ts";
+import { useNow } from "../useNow.ts";
 import { OutputTail } from "./OutputTail.tsx";
 import { TopProcesses } from "./TopProcesses.tsx";
 
@@ -19,8 +21,32 @@ interface Props {
    * so). What is on the page is all that is left; the server has nothing.
    */
   deleted: boolean;
+  /**
+   * When this browser last heard from the server, once that is too long ago to trust
+   * the page (or the stream has reported itself down); null while contact is fresh.
+   * Only meaningful for an active session: an ended one has nothing to be late.
+   */
+  contactLostSince: number | null;
   /** Move the cursor to an event the viewer clicked. */
   onSelectEvent(event: AnomalyEvent): void;
+}
+
+/**
+ * Neither green nor red: the browser cannot say how the machine is doing because it
+ * cannot reach the server. Distinct from `client.stale`, an anomaly the server raises
+ * when the machine has gone quiet while the server itself is fine.
+ */
+function ContactLost({ since }: { since: number }) {
+  const now = useNow(true);
+  return (
+    <div className="banner banner-neutral" role="status">
+      <span className="dot dot-hollow" />
+      No fresh data
+      <small>
+        lost contact with {window.location.host} {formatDuration(now - since)} ago, reconnecting…
+      </small>
+    </div>
+  );
 }
 
 /**
@@ -31,9 +57,18 @@ interface Props {
  * While the session is active the banner reflects what is wrong right now (open
  * events). Once it is over it summarises what happened, and says where the trace
  * continues when the client chained to a successor. A session deleted under the
- * viewer gets one line saying so instead: there is no verdict left to give.
+ * viewer gets one line saying so instead: there is no verdict left to give, and a
+ * live session whose server cannot be reached says that rather than repeating a
+ * verdict it can no longer stand behind.
  */
-export function StatusBanner({ status, events, nextSessionId, deleted, onSelectEvent }: Props) {
+export function StatusBanner({
+  status,
+  events,
+  nextSessionId,
+  deleted,
+  contactLostSince,
+  onSelectEvent,
+}: Props) {
   if (deleted) {
     return (
       <div className="banner banner-warning" role="status">
@@ -45,6 +80,10 @@ export function StatusBanner({ status, events, nextSessionId, deleted, onSelectE
   }
 
   const active = status === "active";
+  if (active && contactLostSince !== null) {
+    return <ContactLost since={contactLostSince} />;
+  }
+
   const listed = active ? events.filter(isOpenEvent) : events;
   const worst = worstSeverity(listed);
   const continuation = !active && nextSessionId !== null && (
