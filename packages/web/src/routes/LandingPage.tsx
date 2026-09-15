@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, getRouteApi } from "@tanstack/react-router";
 import { ThemeToggle } from "../components/ThemeToggle.tsx";
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
-import { AfkMark, AfkWordmark } from "../components/AfkMark.tsx";
+import { AfkMark } from "../components/AfkMark.tsx";
 import { formatDuration } from "../format.ts";
 
 /** How often the landing page refreshes the service numbers. */
@@ -15,6 +15,9 @@ const RETENTION_DAYS = 7;
 /** Remembers whether the reader opened the details below the fold; absent means closed. */
 const DETAILS_STORAGE_KEY = "afk.landing.details";
 const DETAILS_OPEN_VALUE = "open";
+
+/** What the name stands for; the wordmark says so on hover and to screen readers. */
+const AFK_EXPANSION = "away from keyboard";
 
 const route = getRouteApi("/");
 
@@ -163,7 +166,7 @@ export function LandingPage() {
         <AfkMark />
         <div>
           <h1 className="landing-wordmark">
-            <AfkWordmark />
+            <abbr title={AFK_EXPANSION}>afk</abbr>
           </h1>
           {/* TODO(copy): draft, the owner will refine */}
           <p className="tagline">Walk away from your laptop. Know if something breaks.</p>

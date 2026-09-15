@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, screen, within } from "@testing-library/react";
 import { renderOnSessionRoute } from "../test-helpers.tsx";
 import { LandingPage } from "./LandingPage.tsx";
 
@@ -12,6 +12,19 @@ afterEach(() => {
 function withoutStats(): void {
   vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("no server in this test"));
 }
+
+describe("LandingPage header", () => {
+  it("spells the name out on hover and to screen readers", async () => {
+    withoutStats();
+
+    await renderOnSessionRoute(null, "/", <LandingPage />);
+
+    const heading = await screen.findByRole("heading", { level: 1 });
+    const name = within(heading).getByTitle("away from keyboard");
+    expect(name.tagName).toBe("ABBR");
+    expect(name.textContent).toBe("afk");
+  });
+});
 
 describe("LandingPage after a delete", () => {
   it("says which session was deleted when sent here with ?deleted=", async () => {

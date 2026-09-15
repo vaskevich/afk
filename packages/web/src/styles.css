@@ -275,14 +275,19 @@ button:focus-visible {
   flex: none;
 }
 
+/* The icon already draws the letters; next to it the name is set as plain text. */
 .landing-wordmark {
-  margin: 0 0 6px;
-  line-height: 0;
+  margin: 0 0 2px;
+  font-family: var(--font-mono);
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
 }
-
-.afk-wordmark {
-  display: block;
-  color: var(--fg);
+/* The expansion is in the tooltip; a dotted underline would read as a link. */
+.landing-wordmark abbr {
+  text-decoration: none;
+  cursor: help;
 }
 
 .tagline {
@@ -405,9 +410,8 @@ button:focus-visible {
     width: 56px;
     height: 56px;
   }
-  .afk-wordmark {
-    height: 28px;
-    width: auto;
+  .landing-wordmark {
+    font-size: 26px;
   }
   .tagline {
     font-size: 15px;
