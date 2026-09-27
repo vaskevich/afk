@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "zod": "^3.23.8"
+    "zod": "^4.6.2"
   },
   "exports": {
     ".": {
